@@ -85,3 +85,16 @@ npm test
 The example is **TypeScript without a rendered React app**. It demonstrates domain isolation, application ports, domain-owned analytics adapters, and injection using fake dependencies. The folder conventions are not a substitute for checking your application's actual dependency graph.
 
 No GitHub Actions workflow is included. Adopt the rules within existing project quality gates and preserve security and test checks. Avoid repeated pushes that consume Actions minutes.
+
+## Milestone 1 — executable guidance
+
+The [React reference application](examples/react-app/README.md) demonstrates independent catalog and orders modules with Vite, TanStack Router, TanStack Query, React UI, dependency inversion and tests. The [architecture checker](tools/check-boundaries.cjs) uses TypeScript's AST to inspect imports and prevent invalid dependencies; its [nine fixture tests](tools/check-boundaries.test.cjs) cover both permitted and forbidden patterns. See [milestone verification and limitations](docs/implementation-milestone.md) and [copy-ready coding-agent guidance](agents/react-architecture/AGENTS.snippet.md).
+
+Run local architecture checks after installing TypeScript, or with a globally available TypeScript compiler:
+
+~~~bash
+node --test tools/check-boundaries.test.cjs
+node tools/check-boundaries.cjs examples/react-app/src
+~~~
+
+**Verification note:** the checker and fixtures passed locally, but the React app's npm dependencies could not be installed in the authoring environment, so its Vite build and UI tests remain unverified. The direct dependencies are pinned but a lockfile is not yet available; create one on a network-enabled machine before relying on repeatable installs.

@@ -1,0 +1,11 @@
+{
+  "name": "react-architecture-guide-tooling",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local architectural boundary fixture tests (no CI workflow)",
+  "scripts": {
+    "test:architecture": "node --test tools/check-boundaries.test.cjs",
+    "check:react": "node tools/check-boundaries.cjs examples/react-app/src"
+  },
+  "devDependencies": { "typescript": "5.9.3" }
+}

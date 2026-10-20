@@ -36,3 +36,9 @@ This repository defines a React architecture standard; don't convert it into a l
 ## Review questions
 
 Does this feature own the new logic? Are import directions acyclic? Is `shared` generic? Are interfaces or new layers justified? Does pure business code remain pure? Are API responses validated? Are React Effects, cache keys, accessible UI and tests correct? Has work been locally validated and remote pushes batched?
+
+## Milestone 1 implementation
+
+The new [boundary checker](tools/check-boundaries.cjs) enforces critical rules against TypeScript import graphs. In this repository run `node --test tools/check-boundaries.test.cjs` and `node tools/check-boundaries.cjs examples/react-app/src`. The [React reference app](examples/react-app/README.md) demonstrates the rules; when deps are installed, run its typecheck, tests and build.
+
+When applying these rules to a different repository, adapt [the copy-ready instructions](agents/react-architecture/AGENTS.snippet.md), don't assume this repository's AGENTS.md propagates automatically. Do not claim the React example is built or UI-tested until npm dependencies are available and checks have actually passed.
