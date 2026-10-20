@@ -1,0 +1,60 @@
+# Dependency ownership and import rules
+
+A good folder structure is a naming convention. **Import direction** and contracts determine whether modules stay independent.
+
+## High-level rules
+
+1. `shared/` never imports `modules/`, `routes/`, or `app/`, **including type-only imports**.
+2. `modules/<A>` does not import `modules/<B>` by default. Instead, compose them in routes/app. Document rare one-way public-API exceptions.
+3. `routes/` may compose multiple modules and shared components. Do not let routes import app setup and create an `app → routes → app` cycle.
+4. `app/` can import routes, modules' public APIs and shared components to configure the application.
+5. Outside a module, import only its explicit public API. Do not deep-import private implementation paths.
+6. Inside a module, use direct relative imports; do not import your own `index.ts` barrel.
+7. Avoid uncontrolled `export *` trees; expose only stable dependencies.
+
+## Simple internal mode
+
+| Importer | May import | Forbidden |
+| --- | --- | --- |
+| `model/` | Other pure model files, relevant shared pure utilities | `ui/`, `api/`, app, routes |
+| `api/` | Model, technical shared API clients | UI, routes, app |
+| `ui/` | Model, API, shared UI | App setup, sibling implementation |
+| Module `index.ts` | Exposes intentional public API | Broad wildcard-export of internals |
+
+## Complex internal mode
+
+| Importer | May import | Forbidden |
+| --- | --- | --- |
+| `domain/` | Domain and pure shared primitives | React, application, infrastructure, UI |
+| `application/` | Domain, application-owned ports | Concrete infrastructure, UI |
+| `infrastructure/` | Application ports, domain, generic shared clients | UI, routes, app |
+| `ui/` | Application use cases, domain, shared UI | Concrete infrastructure in component/hook |
+| Composition root | UI, application and concrete infrastructure to wire dependencies | Owning arbitrary domain business decisions |
+
+A module-local composition factory can import implementations and expose one small factory from the module public API. This should not give unrelated modules deep access to internals.
+
+## Avoid the "generic circular dependency" problem
+
+**Bad**: `shared/analytics.ts` imports `modules/orders/domain/order.ts` only to create a payload. If orders also imports the shared analytics tool, ownership becomes circular or conceptually coupled. Even `import type` creates a source dependency and change propagation.
+
+**Good**: `shared` declares `AnalyticsClient.track(name, primitiveFields)`. `modules/orders/infrastructure/order-analytics.ts` imports the order type and maps it to a generic event payload. Higher-level composition wires the two together. Domain-specific notifications, logging, permission mapping, and API transport follow similar rules.
+
+### Classify cycles
+
+| Cycle | Default response |
+| --- | --- |
+| Runtime dependency cycle | Reject/fix |
+| Type-only cycle | Investigate structural coupling and possible ownership inversion |
+| Shared infrastructure importing domain types | Reject for business-neutral primitives |
+| One-way stable public dependency | May be permitted by an explicitly documented exception |
+| Genuine shared domain model | Establish a small, stable shared kernel with defined ownership; don't dump every common type into `shared` |
+
+A type-only import does not execute at runtime, but still expresses source-level dependence. Not every one-way dependency merits new layers or factories.
+
+## Enforcing boundaries
+
+Production apps should configure a dependency analysis tool such as [dependency-cruiser](https://github.com/sverweij/dependency-cruiser), including TypeScript aliases and type-only imports. Add targeted rules for `shared`, public API access, sibling modules, complex-layer direction and cycles.
+
+Run this in the existing local/CI quality gate. No ruleset is presented as universal; account for Next.js route conventions, test imports, generated code, source aliases, and justified exceptions. A regex-only check is insufficient for accurate module graph enforcement.
+
+See [Architecture](architecture.md) and [ADR 0003](decisions/0003-generic-services.md).
