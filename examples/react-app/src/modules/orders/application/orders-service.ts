@@ -6,8 +6,9 @@ export interface OrderRepository {
 export interface OrderEvents {
   orderPlaced(receipt: OrderReceipt): void;
 }
-export function createOrdersService(repo: OrderRepository, events: OrderEvents) {
+export function createOrdersService(repo: OrderRepository, events: OrderEvents, scopeId: string) {
   return {
+    scopeId,
     listOrders: () => repo.list(),
     async placeOrder(draft: OrderDraft): Promise<OrderReceipt> {
       const error = validateOrder(draft);

@@ -72,3 +72,67 @@ test('reject domain imports from shared technical infrastructure', () => withFix
 }, result => {
   assert.match(result.errors.join(' '), /pure-layer-imports-shared-infrastructure/);
 }));
+
+test('pure domain cannot import React even with unresolved node_modules', () => withFixture({
+  ...base, 'modules/orders/domain/order.ts': 'import { useEffect } from "react"; export const x = useEffect;',
+}, result => assert.match(result.errors.join(' '), /pure-layer-external-package/)));
+test('Windows-style module paths identify self barrels', () => {
+  const { isSelfBarrel, normPath } = require('./check-boundaries.cjs');
+  assert.equal(isSelfBarrel({ module: 'orders' }, { relative: normPath(String.raw`modules\orders\index.ts`) }), true);
+});
+test('empty imports emit runtime edges and cycle detection must catch them', () => withFixture({
+  'modules/a/model/a.ts': 'import {} from "./b"; export const a = 1;',
+  'modules/a/model/b.ts': 'import {} from "./a"; export const b = 2;',
+}, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+test('verbatimModuleSyntax retains inline type-only named imports', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"verbatimModuleSyntax":true,"module":"ESNext"}}',
+  'modules/a/model/a.ts': 'import { type B } from "./b"; export type A = {b?: B};',
+  'modules/a/model/b.ts': 'import { type A } from "./a"; export type B = {a?: A};',
+}, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+test('baseUrl paths do not bypass sibling and private-import checks', () => withFixture({
+  ...base,
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src"}}',
+  'modules/billing/ui/pay.ts': 'import { form } from "modules/orders/ui/form"; export const x = form;',
+}, result => {
+  assert.match(result.errors.join(' '), /sibling-module-dependency/);
+}));
+test('unresolved internal project aliases fail rather than silently skip', () => withFixture({
+  ...base, '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@/*":["*"]}}}',
+  'routes/orders.ts': 'import { missing } from "@/modules/orders/absent"; export const a = missing;',
+}, result => assert.match(result.errors.join(' '), /unresolved internal import/)));
+test('unknown relative import remains unresolved even if directory exists', () => withFixture({
+  ...base, 'modules/orders/ui/directory/index.ts': 'export const x = 1;',
+  'routes/orders.ts': 'import { x } from "../modules/orders/ui/directory/not-here"; export const f = x;',
+}, result => assert.match(result.errors.join(' '), /unresolved internal import/)));
+test('syntax errors in TSX are surfaced', () => withFixture({
+  'modules/orders/ui/bad.tsx': 'export const Bad = () => <div>',
+}, result => assert.match(result.errors.join(' '), /syntax-error/)));
+test('an explicitly reviewed one-way public API exception can be allowed', () => withFixture({
+  ...base, '../architecture.config.json': '{"allowCrossModule":{"payments":["orders"]}}',
+  'modules/payments/application/pay.ts': 'import type { Order } from "../../orders/index"; export type P = Order;',
+  'modules/orders/index.ts': 'export type { Order } from "./domain/order";',
+}, result => assert.equal(result.errors.filter(e => /sibling-module-dependency/.test(e)).length, 0)));
+test('without the explicit exception, public sibling imports are denied', () => withFixture({
+  ...base,
+  'modules/payments/application/pay.ts': 'import type { Order } from "../../orders/index"; export type P = Order;',
+  'modules/orders/index.ts': 'export type { Order } from "./domain/order";',
+}, result => assert.match(result.errors.join(' '), /sibling-module-dependency/)));
+
+test('CLI exits nonzero for violations and zero for compliant input', () => {
+  const { spawnSync } = require('node:child_process');
+  const bad = setup({ 'shared/x.ts': 'import { order } from "../modules/orders/index"; export const x = order;', 'modules/orders/index.ts': 'export const order = 1;' });
+  const good = setup({ 'shared/x.ts': 'export const x = 1;' });
+  try {
+    const tool = path.join(__dirname, 'check-boundaries.cjs');
+    assert.equal(spawnSync(process.execPath, [tool, bad.root], { encoding: 'utf8' }).status, 1);
+    assert.equal(spawnSync(process.execPath, [tool, good.root], { encoding: 'utf8' }).status, 0);
+  } finally { bad.cleanup(); good.cleanup(); }
+});
+test('test-only imports are excluded from pure production package restrictions', () => withFixture({
+  'modules/orders/domain/order.ts': 'export const total = 1;',
+  'modules/orders/domain/order.test.ts': 'import { it } from "vitest"; import { total } from "./order"; it("works", () => total);',
+}, result => assert.deepEqual(result.errors, [])));
+test('paths wildcard cannot mask a forbidden external import', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"*":["*"]}}}',
+  'modules/orders/domain/order.ts': 'import { useEffect } from "react"; export const f = useEffect;',
+}, result => assert.match(result.errors.join(' '), /pure-layer-external-package|unresolved internal import/)));

@@ -4,5 +4,5 @@ import { createMemoryOrderRepository } from '../infrastructure/memory-order-repo
 import { createOrderAnalytics } from '../infrastructure/order-analytics';
 // Module factory hides implementation paths from app/route consumers.
 export function createOrders(sink: AnalyticsSink) {
-  return createOrdersService(createMemoryOrderRepository(), createOrderAnalytics(sink));
+  return createOrdersService(createMemoryOrderRepository(), createOrderAnalytics(sink), crypto.randomUUID());
 }

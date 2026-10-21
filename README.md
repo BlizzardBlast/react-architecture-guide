@@ -98,3 +98,12 @@ node tools/check-boundaries.cjs examples/react-app/src
 ~~~
 
 **Verification note:** the checker and fixtures passed locally, but the React app's npm dependencies could not be installed in the authoring environment, so its Vite build and UI tests remain unverified. The direct dependencies are pinned but a lockfile is not yet available; create one on a network-enabled machine before relying on repeatable installs.
+
+## Validation after findings remediation
+
+The repository's cross-platform full validation entry point is `npm run verify` after dependencies are installed in the repository and both examples. This runs the checker fixtures, source boundaries, standalone orders example tests, and React architecture/typecheck/Vitest/build. Run `python3 scripts/validate_docs.py` for documentation links as well.
+
+The boundary checker supports optional `architecture.config.json` project exceptions, documented in [Dependency rules](docs/dependency-rules.md). Pure layers reject bare package imports by default unless explicitly allowed as framework-independent dependencies. Test files may import Vitest and test helpers.
+
+**Network limitation:** secure package versions were updated, but a trustworthy npm lockfile could not be generated in this isolated environment. Run `npm install --package-lock-only --ignore-scripts` in the project root and each example on a network-enabled development machine, review the dependency audit, commit the generated files and complete all checks *before merging*. No fabricated or partial lockfiles are committed.
+

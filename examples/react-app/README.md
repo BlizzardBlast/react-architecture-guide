@@ -27,3 +27,10 @@ Install versions are pinned directly in `package.json`, but transitive versions 
 Unit/UI tests use Vitest and Testing Library. The architecture checker is run locally using TypeScript's AST; it is **not** a replacement for a comprehensive production dependency audit.
 
 Router integration follows TanStack's recommended router-context QueryClient pattern, including `defaultPreloadStaleTime: 0`. For SSR, services and query clients must be request-scoped.
+
+## Cache identity and security updates
+
+Each independently created `OrdersService` has a unique `scopeId` used in the React Query key, avoiding cached order history from a different injected service. The app's singleton scope is suitable only for this client-only demo. Production authentication/tenant changes require independently scoped caches, server authorization, and appropriate cache clearing.
+
+Direct dependencies pin Vite 7.3.7 and Vitest 4.1.12 (published patched releases). This environment cannot fetch npm registry dependencies; therefore **do not call the React app verified** until `npm install`, `npm run verify`, and `npm audit` complete successfully. Commit a genuinely generated `package-lock.json`; never fabricate a partial lockfile.
+

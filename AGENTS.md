@@ -42,3 +42,10 @@ Does this feature own the new logic? Are import directions acyclic? Is `shared` 
 The new [boundary checker](tools/check-boundaries.cjs) enforces critical rules against TypeScript import graphs. In this repository run `node --test tools/check-boundaries.test.cjs` and `node tools/check-boundaries.cjs examples/react-app/src`. The [React reference app](examples/react-app/README.md) demonstrates the rules; when deps are installed, run its typecheck, tests and build.
 
 When applying these rules to a different repository, adapt [the copy-ready instructions](agents/react-architecture/AGENTS.snippet.md), don't assume this repository's AGENTS.md propagates automatically. Do not claim the React example is built or UI-tested until npm dependencies are available and checks have actually passed.
+
+## Findings remediation and package integrity
+
+Use `npm run verify` after dependencies are installed, and run `python3 scripts/validate_docs.py`. The checker examines third-party imports in pure domain/model files (test files excepted); explicitly allow trusted pure packages in the per-project `architecture.config.json` rather than silently bypassing the boundary. Reviewed module-to-module imports must use public APIs and explicit `allowCrossModule` entries; cycles remain forbidden.
+
+The React app is pinned to security-patched Vite/Vitest versions. Until a real npm lockfile is generated and build/tests/audit pass, do not mark PR #1 merge-ready.
+

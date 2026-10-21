@@ -58,3 +58,24 @@ Production apps should configure a dependency analysis tool such as [dependency-
 Run this in the existing local/CI quality gate. No ruleset is presented as universal; account for Next.js route conventions, test imports, generated code, source aliases, and justified exceptions. A regex-only check is insufficient for accurate module graph enforcement.
 
 See [Architecture](architecture.md) and [ADR 0003](decisions/0003-generic-services.md).
+
+## Enforced exceptions and pure external dependencies
+
+The executable checker supports an optional `architecture.config.json` file alongside the consuming application's `tsconfig.json` (the parent of `src/`). Use the following **only when reviewed and justified**:
+
+~~~json
+{
+  "allowPureExternal": ["zod"],
+  "allowCrossModule": {
+    "payments": ["orders"]
+  }
+}
+~~~
+
+- `allowPureExternal` names explicitly reviewed packages that can be used by **non-test** domain/model files without making domain behavior depend on React, HTTP or state-management frameworks. Keep this list very small. Any unlisted bare package import in pure code fails by default.
+- `allowCrossModule` lists approved one-way module dependencies. The importer may use only the destination module's **public `index.ts` or `index.tsx`**, never its internal implementation. Runtime cycles remain failures and type-level cycles remain review warnings.
+- TypeScript `baseUrl` and `paths` are read from the consuming project's `tsconfig.json`. Unresolved internal aliases are errors, not silently skipped.
+- Unit test files may import their test framework without being mistaken for production domain code. Import restrictions elsewhere still apply.
+
+This checker implements practical rules for conventional `src/` layouts; it is not a full security sandbox, semantic proof or substitute for production typechecking, vulnerability auditing and a comprehensive dependency graph.
+

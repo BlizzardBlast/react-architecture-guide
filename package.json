@@ -5,7 +5,11 @@
   "description": "Local architectural boundary fixture tests (no CI workflow)",
   "scripts": {
     "test:architecture": "node --test tools/check-boundaries.test.cjs",
-    "check:react": "node tools/check-boundaries.cjs examples/react-app/src"
+    "check:react": "node tools/check-boundaries.cjs examples/react-app/src",
+    "verify": "npm run test:docs && npm run test:architecture && npm --prefix examples/orders test && npm --prefix examples/react-app run verify",
+    "test:docs": "node tools/validate-docs.cjs"
   },
-  "devDependencies": { "typescript": "5.9.3" }
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
 }

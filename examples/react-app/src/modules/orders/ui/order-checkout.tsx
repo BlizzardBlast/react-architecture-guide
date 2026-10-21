@@ -3,9 +3,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { OrdersService } from '../application/orders-service';
 export interface OrderSelection { readonly productId: string; readonly productName: string; readonly priceCents: number; }
 interface Props { readonly service: OrdersService; readonly selection: OrderSelection | null; }
-const orderKey = ['orders', 'local-demo'] as const;
 export function OrderCheckout({ service, selection }: Props) {
   const [customerName, setCustomerName] = useState('');
+  // One cache entry per independently injected OrdersService instance.
+  const orderKey = ['orders', 'local-demo', service.scopeId] as const;
   const queryClient = useQueryClient();
   const history = useQuery({ queryKey: orderKey, queryFn: service.listOrders });
   const mutation = useMutation({

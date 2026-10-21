@@ -6,14 +6,14 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
+const { execSync } = require('node:child_process');
 
 function loadTypeScript() {
   try { return require('typescript'); }
   catch {
     // Allows local smoke tests on machines with a globally installed compiler.
     // In a project, add typescript as a devDependency instead.
-    const root = execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim();
+    const root = execSync('npm root -g', { encoding: 'utf8', shell: true }).trim();
     return require(path.join(root, 'typescript'));
   }
 }
@@ -26,12 +26,12 @@ function walk(root) {
     if (['node_modules', 'dist', 'coverage', '.git'].includes(item.name)) continue;
     const full = path.join(root, item.name);
     if (item.isDirectory()) result.push(...walk(full));
-    else if (sourceExt.test(item.name) && !item.name.endsWith('.d.ts')) result.push(full);
+    else if (sourceExt.test(item.name) && !/\.d\.[cm]?ts$/.test(item.name)) result.push(full);
   }
   return result;
 }
 function category(filename, srcDir) {
-  const relative = path.relative(srcDir, filename).replace(/\\/g, '/');
+  const relative = normPath(path.relative(srcDir, filename));
   if (relative.startsWith('..')) return { layer: 'outside', relative };
   const segs = relative.split('/');
   if (segs[0] === 'modules' && segs.length >= 3) {
@@ -42,28 +42,30 @@ function category(filename, srcDir) {
 function literalString(node) {
   return node && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) ? node.text : null;
 }
-function runtimeImport(node) {
+function runtimeImport(node, options) {
   if (ts.isImportDeclaration(node)) {
     const clause = node.importClause;
     if (!clause) return true;
     if (clause.isTypeOnly) return false;
     // import { type A } only is type-only, even if the declaration is not.
     const b = clause.namedBindings;
-    return Boolean(clause.name || !b || ts.isNamespaceImport(b) || b.elements.some(e => !e.isTypeOnly));
+    // With verbatimModuleSyntax, `import { type A }` emits `import {}`.
+    // An explicitly empty binding list also always retains a runtime import.
+    return Boolean(clause.name || !b || ts.isNamespaceImport(b) || b.elements.length === 0 || b.elements.some(e => !e.isTypeOnly) || options.verbatimModuleSyntax);
   }
-  if (ts.isExportDeclaration(node)) return !node.isTypeOnly && !(node.exportClause && ts.isNamedExports(node.exportClause) && node.exportClause.elements.length > 0 && node.exportClause.elements.every(e => e.isTypeOnly));
+  if (ts.isExportDeclaration(node)) return !node.isTypeOnly && (!node.exportClause || !ts.isNamedExports(node.exportClause) || node.exportClause.elements.length === 0 || node.exportClause.elements.some(e => !e.isTypeOnly) || Boolean(options.verbatimModuleSyntax));
   return true;
 }
-function imports(node, list) {
+function imports(node, list, options) {
   if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
     const spec = literalString(node.moduleSpecifier);
-    if (spec) list.push({ spec, runtime: runtimeImport(node), line: node.getStart() });
+    if (spec) list.push({ spec, runtime: runtimeImport(node, options), line: node.getStart() });
   }
   if (ts.isCallExpression(node) && node.arguments.length === 1 && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
     const spec = literalString(node.arguments[0]);
     if (spec) list.push({ spec, runtime: true, line: node.getStart() });
   }
-  ts.forEachChild(node, child => imports(child, list));
+  ts.forEachChild(node, child => imports(child, list, options));
 }
 function configFor(dir) {
   const file = ts.findConfigFile(dir, ts.sys.fileExists, 'tsconfig.json');
@@ -74,37 +76,83 @@ function configFor(dir) {
   if (parsed.errors.length) throw Error(parsed.errors.map(e => ts.flattenDiagnosticMessageText(e.messageText, '\n')).join('\n'));
   return parsed;
 }
+function normPath(pathname) { return pathname.replace(/\\/g, '/'); }
+function isSelfBarrel(source, dest) {
+  return dest.relative === `modules/${source.module}/index.ts` ||
+    dest.relative === `modules/${source.module}/index.tsx`;
+}
+function matchesAlias(spec, patterns) {
+  return Object.keys(patterns || {}).some(pattern => {
+    const chunks = pattern.split('*');
+    return chunks.length === 1 ? spec === pattern
+      : spec.startsWith(chunks[0]) && spec.endsWith(chunks[chunks.length - 1]);
+  });
+}
+function loadBoundaryConfig(parent) {
+  const file = path.join(parent, 'architecture.config.json');
+  if (!fs.existsSync(file)) return { allowPureExternal: [], allowCrossModule: {} };
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (!Array.isArray(data.allowPureExternal || []) ||
+      typeof (data.allowCrossModule || {}) !== 'object' ||
+      Array.isArray(data.allowCrossModule || {})) {
+    throw Error('Invalid architecture.config.json: expected allowPureExternal array and allowCrossModule object');
+  }
+  return { allowPureExternal: data.allowPureExternal || [], allowCrossModule: data.allowCrossModule || {} };
+}
 function check(srcDir) {
   const errors = [];
   const warnings = [];
   const root = path.resolve(srcDir);
   const options = configFor(path.dirname(root)).options;
+  const policy = loadBoundaryConfig(path.dirname(root));
   const files = walk(root).map(f => path.resolve(f));
   const known = new Set(files);
   const edges = new Map(files.map(f => [f, []]));
   for (const file of files) {
     const text = fs.readFileSync(file, 'utf8');
-    const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    const kind = ts.getScriptKindFromFileName(file);
+    const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
+    for (const diagnostic of sf.parseDiagnostics) {
+      const location = sf.getLineAndCharacterOfPosition(diagnostic.start || 0);
+      errors.push(`syntax-error: ${path.relative(root, file)}:${location.line + 1}:${location.character + 1}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}`);
+    }
     const dependencies = [];
-    imports(sf, dependencies);
+    imports(sf, dependencies, options);
     for (const dep of dependencies) {
-      if (!dep.spec.startsWith('.') && !dep.spec.startsWith('@/') && !Object.keys(options.paths || {}).some(p => p.replace('*', '') && dep.spec.startsWith(p.replace('*', '')))) continue;
+      const source = category(file, root);
+      const relativeSpec = dep.spec.startsWith('.');
+      const projectAlias = matchesAlias(dep.spec, options.paths) ||
+        (Boolean(options.baseUrl) && /^(?:modules|shared|routes|app|testing|generated)\//.test(dep.spec));
+      const barePackage = !relativeSpec && !projectAlias;
+      const isTest = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file);
       const resolved = ts.resolveModuleName(dep.spec, file, options, ts.sys).resolvedModule?.resolvedFileName;
+      const externalDependency = Boolean(resolved && normPath(resolved).includes('/node_modules/'));
+      if (source.layer === 'module' && ['domain', 'model'].includes(source.part) && !isTest &&
+          (barePackage || externalDependency) && !policy.allowPureExternal.includes(dep.spec)) {
+        errors.push(`pure-layer-external-package: ${source.relative} -> ${dep.spec}`);
+      }
       if (!resolved) {
-        // Do not hide broken *relative* project imports; package imports are handled by the typechecker.
-        if (dep.spec.startsWith('.') && !fs.existsSync(path.resolve(path.dirname(file), dep.spec))) errors.push(`${path.relative(root, file)}: unresolved import ${dep.spec}`);
+        if (relativeSpec || projectAlias) errors.push(`${source.relative}: unresolved internal import ${dep.spec}`);
         continue;
       }
       const target = path.resolve(resolved);
-      if (!known.has(target)) continue;
-      const source = category(file, root), dest = category(target, root);
+      if (!known.has(target)) {
+        if (relativeSpec && !target.includes(`${path.sep}node_modules${path.sep}`) &&
+            !target.endsWith('.d.ts')) errors.push(`outside-source-import: ${source.relative} -> ${dep.spec}`);
+        continue;
+      }
+      const dest = category(target, root);
       const desc = `${source.relative} -> ${dest.relative}`;
       if (source.layer === 'shared' && dest.layer !== 'shared') errors.push(`shared-must-be-independent: ${desc}`);
       if (source.layer === 'module' && dest.layer === 'module' && source.module !== dest.module) {
-        errors.push(`sibling-module-dependency: ${desc}`);
+        const exceptions = policy.allowCrossModule[source.module] || [];
+        if (!Array.isArray(exceptions) || !exceptions.includes(dest.module) ||
+            !['index.ts', 'index.tsx'].some(name => dest.relative === `modules/${dest.module}/${name}`)) {
+          errors.push(`sibling-module-dependency: ${desc}`);
+        }
       }
       if (source.layer === 'module' && dest.layer === 'module' && source.module === dest.module) {
-        if (target.endsWith(`/modules/${source.module}/index.ts`)) errors.push(`no-self-barrel: ${desc}`);
+        if (isSelfBarrel(source, dest)) errors.push(`no-self-barrel: ${desc}`);
         const part = source.part, targetPart = dest.part;
         if (part === 'domain' && targetPart !== 'domain') errors.push(`pure-domain-import: ${desc}`);
         if (part === 'application' && !['domain', 'application'].includes(targetPart)) errors.push(`application-import: ${desc}`);
@@ -117,10 +165,10 @@ function check(srcDir) {
         errors.push(`invalid-external-module-use: ${desc}`);
       }
       if (dest.layer === 'module' && source.layer !== 'module') {
-        const allowedPublic = dest.relative === `modules/${dest.module}/index.ts`;
+        const allowedPublic = ['index.ts','index.tsx'].some(name => dest.relative === `modules/${dest.module}/${name}`);
         if (!allowedPublic && !['testing'].includes(source.layer)) errors.push(`deep-module-import: ${desc}`);
       }
-      if (source.layer === 'module' && ['domain', 'model'].includes(source.part) && dest.layer === 'shared' && !dest.relative.startsWith('shared/lib/') && !dest.relative.startsWith('shared/domain/')) errors.push(`pure-layer-imports-shared-infrastructure: ${desc}`);
+      if (source.layer === 'module' && ['domain', 'model'].includes(source.part) && !isTest && dest.layer === 'shared' && !dest.relative.startsWith('shared/lib/') && !dest.relative.startsWith('shared/domain/')) errors.push(`pure-layer-imports-shared-infrastructure: ${desc}`);
       if (source.layer === 'routes' && dest.layer === 'app') errors.push(`routes-import-app: ${desc}`);
       if (source.layer === 'module' && ['app', 'routes'].includes(dest.layer)) errors.push(`module-imports-composition: ${desc}`);
       edges.get(file).push({ target, runtime: dep.runtime });
@@ -163,4 +211,4 @@ if (require.main === module) {
     else console.log(`PASS architecture boundaries for ${result.count} files`);
   } catch (error) { console.error(error); process.exitCode = 2; }
 }
-module.exports = { check };
+module.exports = { check, isSelfBarrel, normPath };

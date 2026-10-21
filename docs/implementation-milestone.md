@@ -31,3 +31,10 @@ It intentionally uses an in-memory adapter rather than pretending to implement p
 - The React UI compilation, browser launch and Vitest UI tests require npm dependencies and **were not run in the authoring environment**, which cannot access the package registry.
 - The React app uses exact direct package versions, but lacks a generated dependency lockfile; it must be created and verified in a network-enabled environment before calling the app dependency installation fully reproducible.
 - No GitHub Actions workflow was added. Batch local checks and one push when possible, without sacrificing quality/security.
+
+## Code review remediation — October 2026
+
+The next revision addresses the review's principal concerns: external dependency purity, Windows-safe path comparison and globally installed TypeScript discovery, TypeScript `verbatimModuleSyntax` runtime-import semantics, parsing syntax diagnostics and JSX, resolution of `baseUrl` and `paths` aliases, explicit one-way public-module exceptions, service-scoped TanStack Query keys, expanded regression fixtures, and a consolidated `npm run verify` command.
+
+The React example uses Vite **7.3.7** and Vitest **4.1.12** based on published security patches. Pinning direct dependencies **does not** replace a complete `npm audit`, trusted lockfile, verified install, typecheck, UI tests and production build. The authoring environment cannot contact npm's registry; the lockfiles and runtime validation **remain required before merge**. Keep PR #1 in draft until these steps are completed.
+
