@@ -27,7 +27,7 @@ src/
 
 Do not create empty directories to fit the diagram. A module is a cohesive business capability, not automatically a DDD bounded context. Next.js App Router uses `src/app/` as its route tree; do not duplicate it as `routes/`.
 
-For complex business workflows, **replace**, rather than combine blindly, the simple module internals with `domain/application/infrastructure/ui`. Application ports belong in the consuming layer by default. Avoid mandatory repositories, global DI containers, and speculative abstractions.
+For complex business workflows, **replace**, rather than combine blindly, the simple module internals with `domain/application/infrastructure/ui`. The checker rejects mixed structures unless a documented `allowMixedLayouts` migration exception exists; even during migration, direct cross-mode imports remain forbidden. Application ports belong in the consuming layer by default. Avoid mandatory repositories, global DI containers, and speculative abstractions.
 
 ## Non-negotiable boundaries
 
@@ -36,7 +36,7 @@ For complex business workflows, **replace**, rather than combine blindly, the si
 - Domain, model, application, and pure shared utilities do not depend on React, HTTP clients, generated DTOs, technical shared services, or presentation assets. Pure packages need explicit, reviewed allowlisting.
 - A module's internal code imports its own files directly, not its public barrel. External consumers access the public API, not private implementation paths.
 - Runtime cycles and cross-module type cycles are rejected. Intra-module type-only cycles require review.
-- Presentation code may import local styles/images/JSON within ownership boundaries; pure code may import owned JSON data without importing technical layers.
+- Presentation code may import local styles/images/JSON within ownership boundaries; pure code may import owned JSON data without importing technical layers. Physical source-file symlinks cannot change module ownership.
 - React Hooks follow React's rules. Query identity reflects data scope; mutations, errors, loading, accessibility, and server validation need meaningful tests.
 
 ## Guides and examples

@@ -103,6 +103,13 @@ function configFor(dir) {
   return parsed;
 }
 function normPath(pathname) { return pathname.replace(/\\/g, '/'); }
+function isWithinRoot(filename, root) {
+  const relative = path.relative(root, filename);
+  return relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative));
+}
+function sameOwnership(a, b) {
+  return a.layer === b.layer && a.module === b.module && a.part === b.part;
+}
 const publicEntrypoints = new Set([
   'index.ts', 'index.tsx', 'index.mts', 'index.cts',
   'index.js', 'index.jsx', 'index.mjs', 'index.cjs',
@@ -124,26 +131,51 @@ function matchesAlias(spec, patterns) {
 }
 function loadBoundaryConfig(parent) {
   const file = path.join(parent, 'architecture.config.json');
-  if (!fs.existsSync(file)) return { allowPureExternal: [], allowCrossModule: {} };
+  if (!fs.existsSync(file)) return { allowPureExternal: [], allowCrossModule: {}, allowMixedLayouts: {} };
   const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const mixed = data.allowMixedLayouts || {};
   if (!Array.isArray(data.allowPureExternal || []) ||
       typeof (data.allowCrossModule || {}) !== 'object' ||
-      Array.isArray(data.allowCrossModule || {})) {
-    throw Error('Invalid architecture.config.json: expected allowPureExternal array and allowCrossModule object');
+      Array.isArray(data.allowCrossModule || {}) ||
+      typeof mixed !== 'object' || Array.isArray(mixed) ||
+      Object.values(mixed).some(reason => typeof reason !== 'string' || !reason.trim())) {
+    throw Error('Invalid architecture.config.json: allowPureExternal must be an array, allowCrossModule an object, and allowMixedLayouts a map of nonempty migration reasons');
   }
-  return { allowPureExternal: data.allowPureExternal || [], allowCrossModule: data.allowCrossModule || {} };
+  return {
+    allowPureExternal: data.allowPureExternal || [],
+    allowCrossModule: data.allowCrossModule || {},
+    allowMixedLayouts: mixed,
+  };
 }
 function check(srcDir) {
   const errors = [];
   const warnings = [];
   const root = path.resolve(srcDir);
+  const physicalRoot = fs.realpathSync(root);
   const options = configFor(path.dirname(root)).options;
   const policy = loadBoundaryConfig(path.dirname(root));
   const files = walk(root).map(f => path.resolve(f));
   if (files.length === 0) errors.push('no-source-files: No supported source files found');
   const known = new Set(files);
   const edges = new Map(files.map(f => [f, []]));
+  const moduleLayouts = new Map();
   for (const file of files) {
+    const logical = category(file, root);
+    const physicalFile = fs.realpathSync(file);
+    if (!isWithinRoot(physicalFile, physicalRoot)) {
+      errors.push(`outside-source-symlink: ${logical.relative} -> ${physicalFile}`);
+      continue;
+    }
+    const actual = category(physicalFile, physicalRoot);
+    if (!sameOwnership(logical, actual)) {
+      errors.push(`source-symlink-ownership: ${logical.relative} -> ${actual.relative}`);
+    }
+    if (actual.layer === 'module') {
+      const layout = moduleLayouts.get(actual.module) || { simple: new Set(), complex: new Set() };
+      if (['api', 'model'].includes(actual.part)) layout.simple.add(actual.part);
+      if (['domain', 'application', 'infrastructure'].includes(actual.part)) layout.complex.add(actual.part);
+      moduleLayouts.set(actual.module, layout);
+    }
     const text = fs.readFileSync(file, 'utf8');
     const kind = ts.getScriptKindFromFileName(file);
     const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
@@ -154,7 +186,7 @@ function check(srcDir) {
     const dependencies = [];
     imports(sf, dependencies, options);
     for (const dep of dependencies) {
-      const source = category(file, root);
+      const source = actual;
       const relativeSpec = dep.spec.startsWith('.');
       const projectAlias = matchesAlias(dep.spec, options.paths) ||
         (Boolean(options.baseUrl) && /^(?:modules|shared|routes|app|testing|generated)\//.test(dep.spec));
@@ -216,15 +248,20 @@ function check(srcDir) {
       }
       const target = path.resolve(resolved);
       if (!known.has(target) && !localAsset) {
-        // A resolved workspace alias outside src must not bypass all boundary checks.
-        // Third-party packages and their declarations in node_modules are external.
+        // Ordinary package imports are not owned source files. Keep them separate
+        // from relative/aliased workspace references, which must be validated.
         const externalPackage = normPath(target).includes('/node_modules/');
         if (!externalPackage && (relativeSpec || projectAlias)) {
           errors.push(`outside-source-import: ${source.relative} -> ${dep.spec}`);
         }
         continue;
       }
-      const dest = category(target, root);
+      const physicalTarget = fs.realpathSync(target);
+      if (!isWithinRoot(physicalTarget, physicalRoot)) {
+        errors.push(`outside-source-import: ${logical.relative} -> ${dep.spec}`);
+        continue;
+      }
+      const dest = category(physicalTarget, physicalRoot);
       const desc = `${source.relative} -> ${dest.relative}`;
       if (dest.layer === 'outside') {
         errors.push(`outside-source-import: ${source.relative} -> ${dep.spec}`);
@@ -262,6 +299,14 @@ function check(srcDir) {
         if (part === 'ui' && targetPart === 'infrastructure') errors.push(`ui-imports-infrastructure: ${desc}`);
         if (part === 'model' && !['model'].includes(targetPart)) errors.push(`pure-model-import: ${desc}`);
         if (part === 'api' && targetPart === 'ui') errors.push(`api-imports-ui: ${desc}`);
+        if (['api', 'model'].includes(part) &&
+            ['domain', 'application', 'infrastructure'].includes(targetPart)) {
+          errors.push(`mixed-mode-import: ${desc}`);
+        }
+        if (['domain', 'application', 'infrastructure'].includes(part) &&
+            ['api', 'model'].includes(targetPart)) {
+          errors.push(`mixed-mode-import: ${desc}`);
+        }
       }
       if (dest.layer === 'module' && source.layer !== 'module' && source.layer !== 'app' && source.layer !== 'routes' && source.layer !== 'shared') {
         errors.push(`invalid-external-module-use: ${desc}`);
@@ -275,6 +320,11 @@ function check(srcDir) {
       if (source.layer === 'routes' && dest.layer === 'app') errors.push(`routes-import-app: ${desc}`);
       if (source.layer === 'module' && ['app', 'routes'].includes(dest.layer)) errors.push(`module-imports-composition: ${desc}`);
       if (!localAsset) edges.get(file).push({ target, runtime: dep.runtime });
+    }
+  }
+  for (const [name, layout] of moduleLayouts) {
+    if (layout.simple.size && layout.complex.size && !policy.allowMixedLayouts[name]) {
+      errors.push(`mixed-module-layout: ${name} has both simple (${[...layout.simple].join(', ')}) and complex (${[...layout.complex].join(', ')}) layers; use an explicitly justified allowMixedLayouts migration exception`);
     }
   }
   // DFS detects cycles. Only runtime edges are fatal; type-only edges are inspected separately.

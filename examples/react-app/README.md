@@ -19,6 +19,10 @@ Generate and commit an authentic `package-lock.json` with `npm install --package
 
 `npm run verify` runs Vitest, architecture checks, TypeScript typechecking and the Vite build. The architecture checker accepts Vite-style CSS/image assets within owned presentation code, and checks source and owned JSON dependencies separately.
 
+## Catalog behavior
+
+The catalog displays distinct loading, error/retry, empty and success states. Its heading uses React `useId` to avoid duplicate DOM IDs when the component is rendered more than once. Tests exercise each state through a controlled data-source mock. This feature remains a simple `api/model/ui` module; the orders feature uses complex layering.
+
 ## Checkout behavior
 
 The checkout uses structured field validation, unique accessible IDs (`useId`), and a TanStack Query cache key scoped to the injected Orders service. Changing the selected product remounts the form to clear outdated feedback; the non-keyed wrapper holds an in-flight save guard so the user cannot edit or resubmit while an earlier save is pending. Failed saves release the guard for retry.

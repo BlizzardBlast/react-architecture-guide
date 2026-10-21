@@ -9,7 +9,8 @@ Use this checklist when reviewing a change to the guide or adopting its rules in
 - [ ] Sibling-module communication happens in app/routes or through a reviewed, acyclic public-API exception.
 - [ ] External consumers use module public `index.*` files. Internal code does not import its own barrel.
 - [ ] Pure domain/model/application and pure shared utilities do not depend on technical integrations, generated DTOs or presentation assets.
-- [ ] JSON and CSS/image imports stay within appropriate ownership and layer boundaries, including path aliases and symlink targets.
+- [ ] JSON, CSS/images, and JS/TS source imports stay within their physical ownership and source-root boundaries, including symlinks and path aliases.
+- [ ] A module does not mix simple (`api/model`) and complex (`domain/application/infrastructure`) layers without a reviewed, justified migration exception; direct cross-mode imports remain forbidden.
 - [ ] Cross-module type-only cycles and runtime cycles are rejected; internal type-only cycles are reviewed.
 - [ ] Complex domain/application/infrastructure/UI layers point inward as documented, without unnecessary DI/repositories.
 
@@ -17,7 +18,7 @@ Use this checklist when reviewing a change to the guide or adopting its rules in
 
 - [ ] Domain rules have tests for valid, invalid and boundary inputs.
 - [ ] Components render purely; Hooks follow their rules; Effects synchronize with external systems.
-- [ ] Query keys include source/security scope; errors, loading, empty results and retry paths are usable.
+- [ ] Query keys include source/security scope; catalog and checkout expose accessible loading, empty, error and retry states.
 - [ ] Saving cannot be accidentally submitted twice while pending; a rejected save releases guards and enables retry.
 - [ ] Product/service changes during a pending save do not unlock another save.
 - [ ] Inputs have stable accessible labels, validation associations and meaningful status announcements.

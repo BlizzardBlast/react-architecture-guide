@@ -356,3 +356,90 @@ test('asset path aliases take precedence over baseUrl fallback files', () => wit
   'modules/payments/ui/view.css': '.payment { color: red }',
   '@styles/view.css': '.shadow { color: blue }',
 }, result => assert.match(result.errors.join(' '), /sibling-module-dependency/)));
+
+test('source symlinks cannot disguise a business module as pure shared code', t => {
+  const fixture = setup({
+    'modules/orders/domain/order.ts': 'export type Order = { id: string };',
+    'shared/lib/use.ts': 'import type { Order } from "./alias"; export type Use = Order;',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, 'modules/orders/domain/order.ts'),
+        path.join(fixture.root, 'shared/lib/alias.ts'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows file symlinks');
+      throw error;
+    }
+    const result = check(fixture.root);
+    assert.match(result.errors.join(' '), /source-symlink-ownership/);
+    assert.match(result.errors.join(' '), /shared-must-be-independent/);
+  } finally { fixture.cleanup(); }
+});
+
+test('source symlinks pointing outside src are always reported', t => {
+  const fixture = setup({
+    '../external.ts': 'export const external = 1;',
+    'shared/lib/use.ts': 'import { external } from "./alias"; export const value = external;',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, '../external.ts'),
+        path.join(fixture.root, 'shared/lib/alias.ts'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows file symlinks');
+      throw error;
+    }
+    assert.match(check(fixture.root).errors.join(' '), /outside-source-symlink/);
+  } finally { fixture.cleanup(); }
+});
+
+test('same-owner source-file aliases are not treated as different modules', t => {
+  const fixture = setup({
+    'shared/lib/real.ts': 'export const value = 1;',
+    'shared/lib/consumer.ts': 'import { value } from "./alias"; export const x = value;',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, 'shared/lib/real.ts'),
+        path.join(fixture.root, 'shared/lib/alias.ts'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows file symlinks');
+      throw error;
+    }
+    assert.deepEqual(check(fixture.root).errors, []);
+  } finally { fixture.cleanup(); }
+});
+
+test('reject a module that mixes simple and complex layer layouts', () => withFixture({
+  'modules/orders/model/product.ts': 'export const product = 1;',
+  'modules/orders/domain/order.ts': 'export const order = 1;',
+}, result => assert.match(result.errors.join(' '), /mixed-module-layout/)));
+
+test('a justified temporary migration can explicitly permit mixed layouts', () => withFixture({
+  '../architecture.config.json': '{"allowMixedLayouts":{"orders":"Gradual migration tracked by ticket #123"}}',
+  'modules/orders/model/product.ts': 'export const product = 1;',
+  'modules/orders/domain/order.ts': 'export const order = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('empty mixed-layout migration reasons are invalid', () => {
+  const f = setup({
+    '../architecture.config.json': '{"allowMixedLayouts":{"orders":" "}}',
+    'modules/orders/model/product.ts': 'export const product = 1;',
+    'modules/orders/domain/order.ts': 'export const order = 1;',
+  });
+  try { assert.throws(() => check(f.root), /Invalid architecture.config.json/); }
+  finally { f.cleanup(); }
+});
+
+test('migration exceptions do not permit direct simple-to-complex layer coupling', () => withFixture({
+  '../architecture.config.json': '{"allowMixedLayouts":{"orders":"Migrate API clients into infrastructure"}}',
+  'modules/orders/api/request.ts': 'import { http } from "../infrastructure/http"; export const request = http;',
+  'modules/orders/infrastructure/http.ts': 'export const http = 1;',
+}, result => assert.match(result.errors.join(' '), /mixed-mode-import/)));
+
+test('independent simple and complex modules can coexist in one app', () => withFixture({
+  'modules/catalog/api/list.ts': 'export const list = () => [];',
+  'modules/catalog/model/product.ts': 'export type Product = { id: string };',
+  'modules/orders/domain/order.ts': 'export type Order = { id: string };',
+  'modules/orders/application/use-case.ts': 'import type { Order } from "../domain/order"; export type Save = (order: Order) => void;',
+}, result => assert.deepEqual(result.errors, [])));

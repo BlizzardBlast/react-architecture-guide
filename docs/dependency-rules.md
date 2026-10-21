@@ -47,6 +47,9 @@ Create `architecture.config.json` next to the consuming app's `tsconfig.json`:
   "allowPureExternal": ["zod"],
   "allowCrossModule": {
     "payments": ["orders"]
+  },
+  "allowMixedLayouts": {
+    "orders": "Temporary migration from model/api to domain/infrastructure; see issue #123"
   }
 }
 ```
@@ -54,6 +57,16 @@ Create `architecture.config.json` next to the consuming app's `tsconfig.json`:
 `allowPureExternal` lists explicitly reviewed pure third-party packages used in domain/model/application/pure shared code; it is **not** a blanket exemption for React or HTTP. The checker does not prove that an allowed external package is pure.
 
 `allowCrossModule` only permits eligible UI, infrastructure, API and composition importers to consume sibling **public entry points**. Domain, model and application layers cannot depend on another business module's public barrel merely because an exception exists.
+
+### Module layout enforcement and temporary migrations
+
+Each module uses the simple `api/model/ui` shape or the complex `domain/application/infrastructure/ui` shape, not both. The checker infers the mode from the module's direct layer directories and rejects a module containing both simple-only (`api`, `model`) and complex-only (`domain`, `application`, `infrastructure`) layers.
+
+For an incremental migration, `allowMixedLayouts` maps a module name to a **nonempty, reviewed justification**. It temporarily permits the coexistence of both layouts; it does **not** permit direct imports between simple-only and complex-only layers, unsafe public API exceptions, or cycles. Remove the exception once migration is complete.
+
+### Symlinks and physical file ownership
+
+Source-file symlinks are checked against their physical targets, not just their apparent paths. Aliases that point into a different module/layer, or outside the validated source root, are rejected. Same-owner aliases remain possible. Ownership enforcement applies to type-only and runtime imports.
 
 ## Avoid circular "generic" services
 

@@ -5,9 +5,9 @@ This milestone makes the [modular, feature-first standard](architecture.md) demo
 ## What is included
 
 - [`tools/check-boundaries.cjs`](../tools/check-boundaries.cjs): AST-based dependency analysis of JS/TS source, declaration files, literal imports/re-exports, import-equals, require/dynamic import, and TypeScript path aliases. It checks module ownership, public APIs, shared purity, layered imports, cycles, and static asset/JSON ownership.
-- [`tools/check-boundaries.test.cjs`](../tools/check-boundaries.test.cjs): positive and negative fixtures for the above boundaries, including pure-layer dependencies, internal modules, shared code, JavaScript public APIs and local assets.
+- [`tools/check-boundaries.test.cjs`](../tools/check-boundaries.test.cjs): positive and negative fixtures for the above boundaries, including pure-layer dependencies, module modes and migrations, source symlinks, shared code, JavaScript public APIs and local assets.
 - [`tools/validate-docs.cjs`](../tools/validate-docs.cjs) and [its tests](../tools/validate-docs.test.cjs): Markdown code-fence and local-link validation.
-- [React reference app](../examples/react-app/README.md): Vite, React, TanStack Router/Query, simple catalog and layered orders capabilities, in-memory persistence, and service-specific Query keys. Checkout has structured validation, accessible labels, a shared in-flight guard and deferred-promise retry tests.
+- [React reference app](../examples/react-app/README.md): Vite, React, TanStack Router/Query, simple catalog (including loading/error/empty/retry states) and layered orders capabilities, in-memory persistence, and service-specific Query keys. Checkout has structured validation, accessible labels, a shared in-flight guard and deferred-promise retry tests.
 - [TypeScript orders example](../examples/orders/README.md): dependency inversion with application-owned ports.
 - [Agent instructions](../agents/react-architecture/AGENTS.snippet.md): a copy-ready guide for consumer repositories.
 
@@ -31,7 +31,7 @@ npm --prefix examples/react-app audit
 
 ## Boundaries and limitations
 
-The checker reads the consuming project's `tsconfig.json` and optionally `architecture.config.json`. It accepts owned JSON configuration imports; pure layers cannot import presentation assets. Paths resolving outside the scanned `src/` are reported as unverified rather than silently accepted. Read [dependency rules](dependency-rules.md) for approved external pure packages and one-way module API exceptions.
+The checker reads the consuming project's `tsconfig.json` and optionally `architecture.config.json`. It accepts owned JSON configuration imports; pure layers cannot import presentation assets. Source-file symlinks are checked against canonical physical paths, and modules mixing simple/complex layer modes require a justified `allowMixedLayouts` migration exception. Paths resolving outside the scanned `src/` are reported as unverified rather than silently accepted. Read [dependency rules](dependency-rules.md) for approved external pure packages and one-way module API exceptions.
 
 Computed dynamic imports and semantic use of ambient globals cannot be proved by static import analysis. The checker is not a security sandbox or replacement for a compiler, exhaustive dependency analyzer, browser validation, supply-chain audit, or backend authorization.
 
