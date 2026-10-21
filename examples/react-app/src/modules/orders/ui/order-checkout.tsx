@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from 'react';
+import { useId, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { validateOrder } from '../domain/order';
+import { getOrderValidationError, type OrderValidationIssue } from '../domain/order';
 import type { OrdersService } from '../application/orders-service';
 
 export interface OrderSelection {
@@ -22,7 +22,11 @@ export function OrderCheckout(props: Props) {
 
 function CheckoutForm({ service, selection }: Props) {
   const [customerName, setCustomerName] = useState('');
-  const [validationError, setValidationError] = useState<string | null>(null);
+  const [validationError, setValidationError] = useState<OrderValidationIssue | null>(null);
+  const id = useId();
+  const titleId = `${id}-checkout-title`;
+  const customerId = `${id}-customer`;
+  const customerErrorId = `${id}-customer-error`;
   const orderKey = ['orders', 'local-demo', service.scopeId] as const;
   const queryClient = useQueryClient();
   const history = useQuery({ queryKey: orderKey, queryFn: service.listOrders });
@@ -33,13 +37,13 @@ function CheckoutForm({ service, selection }: Props) {
       await queryClient.invalidateQueries({ queryKey: orderKey });
     },
   });
-  const customerNameError = validationError?.includes('customer name') ? validationError : null;
+  const customerNameError = validationError?.field === 'customerName' ? validationError.message : null;
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selection || mutation.isPending) return;
     const draft = { customerName, productId: selection.productId, priceCents: selection.priceCents };
-    const error = validateOrder(draft);
+    const error = getOrderValidationError(draft);
     mutation.reset();
     setValidationError(error);
     if (error) return;
@@ -47,13 +51,13 @@ function CheckoutForm({ service, selection }: Props) {
   }
 
   return (
-    <section aria-labelledby="checkout-title">
-      <h2 id="checkout-title">Place an order</h2>
+    <section aria-labelledby={titleId}>
+      <h2 id={titleId}>Place an order</h2>
       <form onSubmit={onSubmit} noValidate>
         <p>{selection ? `Selected: ` + selection.productName : 'Select a product first.'}</p>
-        <label htmlFor="customer">Customer name</label>{' '}
+        <label htmlFor={customerId}>Customer name</label>{' '}
         <input
-          id="customer"
+          id={customerId}
           name="customer"
           value={customerName}
           onChange={event => {
@@ -64,12 +68,12 @@ function CheckoutForm({ service, selection }: Props) {
           required
           minLength={2}
           aria-invalid={Boolean(customerNameError)}
-          aria-describedby={customerNameError ? 'customer-error' : undefined}
+          aria-describedby={customerNameError ? customerErrorId : undefined}
         />{' '}
         <button type="submit" disabled={!selection || mutation.isPending}>
           {mutation.isPending ? 'Saving…' : 'Place order'}
         </button>
-        {validationError && <p id={customerNameError ? 'customer-error' : undefined} role="alert">{validationError}</p>}
+        {validationError && <p id={customerNameError ? customerErrorId : undefined} role="alert">{validationError.message}</p>}
         {mutation.isError && <p role="alert">{mutation.error.message}</p>}
         {mutation.isSuccess && <p role="status">Order saved.</p>}
       </form>

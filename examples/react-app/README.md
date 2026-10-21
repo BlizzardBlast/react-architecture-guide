@@ -38,3 +38,9 @@ Direct dependencies pin Vite 7.3.7 and Vitest 4.1.12 (published patched releases
 ## Accessibility and checkout behavior
 
 Customer-name validation is applied before making a mutation and announced through a linked error message (`aria-invalid` and `aria-describedby`). Editing the field clears the error. Changing the selected product begins a fresh checkout form and clears the previous product's success or error status while order history remains scoped to the active service's cache identity.
+
+## More realistic UI and build validation
+
+The form uses React `useId` for per-instance accessible labels and the domain supplies structured field-specific validation errors instead of relying on English-message matching. Its string-returning validation function remains for API compatibility. Vite-style CSS imports are intentionally accepted by the architecture check when the stylesheet exists.
+
+**Do not skip the build test:** `npm run build` checks architecture boundaries first. On a network-enabled machine, install dependencies, create real lockfiles and run the full test/build suite, as documented above.

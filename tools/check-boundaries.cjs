@@ -28,7 +28,19 @@ function loadTypeScript(projectDir = process.argv[2]) {
   }
 }
 const ts = loadTypeScript();
+// The dot is required: filenames such as "assets" are not source files.
 const sourceExt = /\.(?:[cm]?[jt]s|[jt]sx)$/;
+const assetExt = /\.(?:css|scss|sass|less|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|mp4|webm)$/i;
+function assetPath(spec) {
+  const filename = spec.split(/[?#]/, 1)[0];
+  return assetExt.test(filename) ? filename : null;
+}
+function isPureShared(relative) {
+  return relative.startsWith('shared/lib/') || relative.startsWith('shared/domain/');
+}
+function isPureModule(source) {
+  return source.layer === 'module' && ['domain', 'model', 'application'].includes(source.part);
+}
 function walk(root) {
   if (!fs.existsSync(root)) throw new Error(`Source directory not found: ${root}`);
   const result = [];
@@ -75,7 +87,7 @@ function imports(node, list, options) {
     const spec = literalString(node.moduleSpecifier);
     if (spec) list.push({ spec, runtime: runtimeImport(node, options), line: node.getStart() });
   }
-  if (ts.isCallExpression(node) && node.arguments.length === 1 && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+  if (ts.isCallExpression(node) && node.arguments.length >= 1 && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
     const spec = literalString(node.arguments[0]);
     if (spec) list.push({ spec, runtime: true, line: node.getStart() });
   }
@@ -139,10 +151,41 @@ function check(srcDir) {
       const projectAlias = matchesAlias(dep.spec, options.paths) ||
         (Boolean(options.baseUrl) && /^(?:modules|shared|routes|app|testing|generated)\//.test(dep.spec));
       const barePackage = !relativeSpec && !projectAlias;
+      const staticAsset = assetPath(dep.spec);
+      if (staticAsset && (relativeSpec || projectAlias)) {
+        // TypeScript module resolution intentionally does not resolve CSS/images.
+        // Verify Vite-style relative and tsconfig.paths/baseUrl asset imports by file.
+        const candidates = [];
+        if (relativeSpec) candidates.push(path.resolve(path.dirname(file), staticAsset));
+        if (projectAlias) {
+          const baseDir = options.baseUrl || path.dirname(root);
+          if (options.baseUrl) candidates.push(path.resolve(baseDir, staticAsset));
+          for (const [pattern, targets] of Object.entries(options.paths || {})) {
+            const star = pattern.indexOf('*');
+            const match = star < 0
+              ? (staticAsset === pattern ? '' : null)
+              : (staticAsset.startsWith(pattern.slice(0, star)) &&
+                  staticAsset.endsWith(pattern.slice(star + 1))
+                    ? staticAsset.slice(star, staticAsset.length - (pattern.length - star - 1))
+                    : null);
+            if (match === null) continue;
+            for (const targetSpec of targets) {
+              candidates.push(path.resolve(baseDir, targetSpec.replace('*', match)));
+            }
+          }
+        }
+        if (!candidates.some(candidate =>
+          fs.existsSync(candidate) && fs.statSync(candidate).isFile())) {
+          errors.push(`missing-static-asset: ${source.relative} -> ${dep.spec}`);
+        }
+        continue;
+      }
       const isTest = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file);
       const resolved = ts.resolveModuleName(dep.spec, file, options, ts.sys).resolvedModule?.resolvedFileName;
       const externalDependency = Boolean(resolved && normPath(resolved).includes('/node_modules/'));
-      if (source.layer === 'module' && ['domain', 'model'].includes(source.part) && !isTest &&
+      const pureCode = isPureModule(source) ||
+        (source.layer === 'shared' && isPureShared(source.relative));
+      if (pureCode && !isTest &&
           (barePackage || externalDependency) && !policy.allowPureExternal.includes(dep.spec)) {
         errors.push(`pure-layer-external-package: ${source.relative} -> ${dep.spec}`);
       }
@@ -152,13 +195,28 @@ function check(srcDir) {
       }
       const target = path.resolve(resolved);
       if (!known.has(target)) {
-        if (relativeSpec && !target.includes(`${path.sep}node_modules${path.sep}`) &&
-            !target.endsWith('.d.ts')) errors.push(`outside-source-import: ${source.relative} -> ${dep.spec}`);
+        // A resolved workspace alias outside src must not bypass all boundary checks.
+        // Third-party packages and their declarations in node_modules are external.
+        const externalPackage = normPath(target).includes('/node_modules/');
+        if (!externalPackage && (relativeSpec || projectAlias)) {
+          errors.push(`outside-source-import: ${source.relative} -> ${dep.spec}`);
+        }
         continue;
       }
       const dest = category(target, root);
       const desc = `${source.relative} -> ${dest.relative}`;
       if (source.layer === 'shared' && dest.layer !== 'shared') errors.push(`shared-must-be-independent: ${desc}`);
+      // Domain/model/application and pure shared code may depend on pure shared
+      // primitives only, never generated API clients, UI, HTTP or test setup.
+      if (pureCode && !(source.layer === 'shared' && isTest)) {
+        if (dest.layer === 'shared' && !isPureShared(dest.relative)) {
+          errors.push(`pure-layer-imports-technical-shared: ${desc}`);
+        }
+        if (dest.layer === 'generated' || dest.layer === 'testing' ||
+            (dest.layer === 'shared' && !isPureShared(dest.relative))) {
+          if (dest.layer !== 'shared') errors.push(`pure-layer-imports-technical: ${desc}`);
+        }
+      }
       if (source.layer === 'module' && dest.layer === 'module' && source.module !== dest.module) {
         // Pure/application layers must not depend on another module's potentially UI-facing barrel.
         if (['domain', 'model', 'application'].includes(source.part)) {
@@ -187,7 +245,8 @@ function check(srcDir) {
         const allowedPublic = ['index.ts','index.tsx'].some(name => dest.relative === `modules/${dest.module}/${name}`);
         if (!allowedPublic && !['testing'].includes(source.layer)) errors.push(`deep-module-import: ${desc}`);
       }
-      if (source.layer === 'module' && ['domain', 'model'].includes(source.part) && !isTest && dest.layer === 'shared' && !dest.relative.startsWith('shared/lib/') && !dest.relative.startsWith('shared/domain/')) errors.push(`pure-layer-imports-shared-infrastructure: ${desc}`);
+      // Pure-layer checks above apply consistently to domain, model, application
+      // and transitively pure shared/lib and shared/domain modules.
       if (source.layer === 'routes' && dest.layer === 'app') errors.push(`routes-import-app: ${desc}`);
       if (source.layer === 'module' && ['app', 'routes'].includes(dest.layer)) errors.push(`module-imports-composition: ${desc}`);
       edges.get(file).push({ target, runtime: dep.runtime });

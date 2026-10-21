@@ -17,3 +17,8 @@ https://github.com/BlizzardBlast/react-architecture-guide/blob/main/docs/depende
 - Preserve required security and CI checks; avoid unnecessary repeated GitHub Actions executions.
 
 When introducing an exception, document its ownership, dependency direction, justification and test.
+
+- Keep application use cases as independent from concrete HTTP/data implementations as domain models; pure `shared/lib` code must remain pure too.
+- Do not import generated API DTOs into domain, model or application layers unless the project's explicitly documented design changes that boundary.
+- Static CSS/SVG/image imports may exist in presentation/app code, but their referenced files must exist.
+- Use React `useId` for reusable input/label IDs and structured validation errors rather than parsing English message strings.

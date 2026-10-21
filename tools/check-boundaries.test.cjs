@@ -56,7 +56,7 @@ test('reject routes importing app and domain importing infra', () => withFixture
 }));
 test('reject self barrel and detect unresolved relative import', () => withFixture({ ...base, 'modules/orders/ui/form.ts': 'import { form } from "../index"; import { bad } from "./not-found"; export const f = form;' }, result => {
   assert.match(result.errors.join(' '), /no-self-barrel/);
-  assert.match(result.errors.join(' '), /unresolved import/);
+  assert.match(result.errors.join(' '), /unresolved internal import/);
 }));
 
 test('detect re-exports and literal dynamic imports across boundaries', () => withFixture({ ...base,
@@ -70,7 +70,7 @@ test('reject domain imports from shared technical infrastructure', () => withFix
   'shared/api/client.ts': 'export const get = () => 1;',
   'modules/orders/domain/order.ts': 'import { get } from "../../../shared/api/client"; export type Order = { id: ReturnType<typeof get> };',
 }, result => {
-  assert.match(result.errors.join(' '), /pure-layer-imports-shared-infrastructure/);
+  assert.match(result.errors.join(' '), /pure-layer-imports-technical-shared/);
 }));
 
 test('pure domain cannot import React even with unresolved node_modules', () => withFixture({
@@ -181,3 +181,72 @@ test('do not reject independent intra-module type-only cycles', () => withFixtur
 test('reject an empty source tree rather than reporting a misleading pass', () => withFixture({
   'ignored.md': '# Empty project',
 }, result => assert.match(result.errors.join(' '), /no-source-files/)));
+
+test('relative CSS asset is valid and a missing asset is a reported error', () => {
+  withFixture({
+    'main.tsx': 'import "./style.css"; export const app = 1;',
+    'style.css': 'body { color: black; }',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    'main.tsx': 'import "./not-here.css"; export const app = 1;',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+});
+
+test('reject domain importing generated API DTOs directly', () => withFixture({
+  'modules/orders/domain/order.ts': 'import type { OrderDto } from "../../../generated/api/order"; export type Order = OrderDto;',
+  'generated/api/order.ts': 'export interface OrderDto { id: string }',
+}, result => assert.match(result.errors.join(' '), /pure-layer-imports-technical/)));
+
+test('reject application importing a shared HTTP client', () => withFixture({
+  'modules/orders/application/place.ts': 'import { get } from "../../../shared/api/http"; export const go = get;',
+  'shared/api/http.ts': 'export const get = () => 1;',
+}, result => assert.match(result.errors.join(' '), /pure-layer-imports-technical-shared/)));
+
+test('pure shared libraries cannot import React or shared infrastructure', () => withFixture({
+  'shared/lib/number.ts': 'import { useMemo } from "react"; export const x = useMemo;',
+  'shared/lib/other.ts': 'import { get } from "../api/http"; export const y = get;',
+  'shared/api/http.ts': 'export const get = () => 1;',
+  'modules/orders/domain/order.ts': 'import { x } from "../../../shared/lib/number"; export const order = x;',
+}, result => {
+  assert.match(result.errors.join(' '), /pure-layer-external-package/);
+  assert.match(result.errors.join(' '), /pure-layer-imports-technical-shared/);
+}));
+
+test('two-argument literal dynamic imports and requires are checked', () => withFixture({
+  'modules/orders/index.ts': 'export const order = 1;',
+  'shared/util.ts': 'export const a = import("../modules/orders/index", { with: { type: "json" } });',
+  'shared/util2.ts': 'export const b = require("../modules/orders/index", undefined);',
+}, result => assert.equal(result.errors.filter(e => e.includes('shared-must-be-independent')).length, 2)));
+
+test('custom aliases resolving outside scanned src cannot evade enforcement', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":".","paths":{"@external/*":["outside/*"]}}}',
+  '../outside/secret.ts': 'export const leaked = 123;',
+  'modules/orders/domain/order.ts': 'import { leaked } from "@external/secret"; export const order = leaked;',
+}, result => assert.match(result.errors.join(' '), /outside-source-import/)));
+
+test('extension matching excludes unextended filenames ending in ts and js', () => withFixture({
+  'assets': 'this is not valid TypeScript!',
+  'robots': 'this is not valid TypeScript!',
+  'archivejs': 'this is not valid TypeScript!',
+  'shared/lib/example.ts': 'export const valid = 1;',
+}, result => {
+  assert.equal(result.count, 1);
+  assert.deepEqual(result.errors, []);
+}));
+
+test('pure application may import a pure shared library', () => withFixture({
+  'shared/lib/money.ts': 'export const amount = 10;',
+  'modules/orders/application/place.ts': 'import { amount } from "../../../shared/lib/money"; export const price = amount;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('tsconfig path-alias asset is allowed only when the target actually exists', () => {
+  withFixture({
+    '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@/*":["*"]}}}',
+    'main.tsx': 'import "@/style.css"; export const app = 1;',
+    'style.css': 'body { margin: 0 }',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@/*":["*"]}}}',
+    'main.tsx': 'import "@/missing.css"; export const app = 1;',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+});

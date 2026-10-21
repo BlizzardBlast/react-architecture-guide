@@ -45,11 +45,15 @@ When applying these rules to a different repository, adapt [the copy-ready instr
 
 ## Findings remediation and package integrity
 
-Use `npm run verify` after dependencies are installed, and run `python3 scripts/validate_docs.py`. The checker examines third-party imports in pure domain/model files (test files excepted); explicitly allow trusted pure packages in the per-project `architecture.config.json` rather than silently bypassing the boundary. Reviewed module-to-module imports must use public APIs and explicit `allowCrossModule` entries; cycles remain forbidden.
+Use `npm run verify` after dependencies are installed, and run `python3 scripts/validate_docs.py`. The checker examines third-party imports in pure domain/model/application and shared/lib or shared/domain files (test files excepted); explicitly allow trusted pure packages in the per-project `architecture.config.json` rather than silently bypassing the boundary. Reviewed module-to-module imports must use public APIs and explicit `allowCrossModule` entries; cycles remain forbidden.
 
 The React app is pinned to security-patched Vite/Vitest versions. Until a real npm lockfile is generated and build/tests/audit pass, do not mark PR #1 merge-ready.
 
 
 ## Follow-up code review standard
 
-Do not claim that an approved cross-module exception permits domain/application dependencies on another module; such imports remain forbidden. Reject type-only cycles **across** modules and include source declaration files in import checks. Run `npm run verify` after installing dependencies, which also executes Markdown validator regression tests. The intended milestone suite has 29 architecture tests and 6 Markdown checks.
+Do not claim that an approved cross-module exception permits domain/application dependencies on another module; such imports remain forbidden. Reject type-only cycles **across** modules and include source declaration files in import checks. Run `npm run verify` after installing dependencies, which also executes Markdown validator regression tests. The expanded milestone suite defines 38 architecture tests and 6 Markdown-validator tests. These counts describe committed tests, not a claim that the revised architecture suite has passed.
+
+## Additional mandatory enforcement
+
+Pure `domain/`, `model/`, `application/`, `shared/lib/`, and `shared/domain/` files must not directly import generated transport DTOs, HTTP clients, UI packages or other technical layers. Treat aliases resolving outside the validated source tree as unverified and fail with an explicit finding. Allow static asset imports only when the referenced file exists. Do not assume architecture rule enforcement is a substitute for `tsc`, runtime tests, or trusted-server authorization.

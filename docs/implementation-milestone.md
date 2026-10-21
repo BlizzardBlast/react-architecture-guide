@@ -11,7 +11,7 @@ node --test tools/check-boundaries.test.cjs
 node tools/check-boundaries.cjs examples/react-app/src
 ```
 
-Install `typescript` as a development dependency in real consumer apps. On developer machines with an existing global TypeScript CLI, the script can also locate the global compiler. Its 29 fixture tests assert valid imports and invalid cross-module, deep import, shared leakage, layer, runtime cycle, self-barrel, and unresolved imports; source-only type cycles produce warnings.
+Install `typescript` as a development dependency in real consumer apps. On developer machines with an existing global TypeScript CLI, the script can also locate the global compiler. Its 38 fixture tests assert valid imports and invalid cross-module, deep import, shared leakage, layer, runtime cycle, self-barrel, and unresolved imports; source-only type cycles produce warnings.
 
 **Limitations:** dynamic computed imports cannot be statically resolved, semantic ownership cannot be proved by tooling, and this focused checker does not replace production tools such as dependency-cruiser, TypeScript compilation, ESLint/oxlint, or tests. It does not enforce every possible framework or folder convention. It assumes `src/` under one app and does not interpret path aliases without the corresponding `tsconfig`.
 
@@ -43,10 +43,20 @@ The React example uses Vite **7.3.7** and Vitest **4.1.12** based on published s
 
 The checker now visits declaration-file dependencies, JavaScript `.mjs`/`.cjs`, and TypeScript `import = require(...)`. It rejects cross-module imports originating from pure domain/model/application layers, even if a public API exception has been granted. Type-only cycles spanning two or more modules fail the architecture gate; purely intra-module type cycles remain warnings.
 
-The architecture test suite now contains **29 top-level tests**, and the Markdown validator has **6 negative/positive tests** for fence syntax and local link integrity.
+The architecture test suite now contains **38 top-level tests**, and the Markdown validator has **6 negative/positive tests** for fence syntax and local link integrity.
 
 The React example clears stale checkout messages on selection changes, validates customer input before mutation, and connects validation feedback to the input for assistive technology. Its query-cache scope remains per service instance.
 
 ### Remaining external prerequisite
 
 Dependencies were not available from npm in this authoring environment. Actual `package-lock.json` files and `npm ci` / `npm audit` / Vite build / Vitest runtime checks must be generated and run in a network-enabled environment before marking the draft PR merge-ready. Do not substitute fabricated dependency resolution or describe static checks as equivalent to full runtime validation.
+
+## Final enforcement and UI improvements
+
+The checker recognizes bundler static assets without treating stylesheets as TypeScript modules; prevents direct pure-layer imports from generated DTOs or shared HTTP/UI code; enforces the purity of `shared/lib` transitively through locally scanned source; and reports internal workspace aliases outside the scanned root instead of silently skipping them. It also checks multi-argument literal imports. The extension matcher already required a leading dot; it has a regression test rather than an unnecessary implementation change.
+
+The orders reference uses `useId` to avoid duplicate form element IDs and a structured `OrderValidationIssue` to link accessible error messages to their fields. The string-based domain validation helper remains available for compatibility with existing examples.
+
+The revised architecture checker defines **38 regression tests**. Verify that they pass before merging—definition of tests alone is not execution.
+
+**Still required:** npm registry access to generate authentic lockfiles for the root and both example packages, dependency auditing, a full `npm run verify`, and a React browser smoke check. Keep PR #1 as draft until those results are available.

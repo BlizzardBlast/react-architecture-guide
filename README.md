@@ -113,3 +113,11 @@ The boundary checker supports optional `architecture.config.json` project except
 The checker includes source declaration files, ESM/CommonJS JavaScript extensions, TypeScript import-equals statements and stronger cross-module rules. Checkout selection changes reset earlier mutation feedback and field validation is announced accessibly. The documentation checker tests matched fenced blocks and local links.
 
 For a fresh machine, generate lockfiles from the actual npm registry (not by hand) before merging the PR. Install at the root, in `examples/orders` and in `examples/react-app`, audit dependencies, run `npm run verify`, and smoke-test the app in a browser. Until this is completed, the reference app is intentionally not represented as fully verified.
+
+## Architecture review enforcement update
+
+The checker now distinguishes asset imports (including Vite's `./style.css`) from TypeScript imports and validates the target assets. It applies consistent pure-layer rules to domain, model, application, and pure shared utility code, including a generated-DTO prohibition and rejection of unverified out-of-root aliases. The architecture suite now defines 38 cases.
+
+The React example uses per-instance IDs and structured field-validation results. These are educational patterns, not proof of a production-ready checkout implementation.
+
+**Required before merging:** generate and commit real dependency lockfiles with npm registry access, execute `npm ci` in the root and both examples, run `npm run verify`, perform `npm audit` for each package, and smoke-test the browser app. Do not mark the PR ready based solely on static analysis.

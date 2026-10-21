@@ -72,8 +72,8 @@ The executable checker supports an optional `architecture.config.json` file alon
 }
 ~~~
 
-- `allowPureExternal` names explicitly reviewed packages that can be used by **non-test** domain/model files without making domain behavior depend on React, HTTP or state-management frameworks. Keep this list very small. Any unlisted bare package import in pure code fails by default.
-- `allowCrossModule` lists approved one-way module dependencies. The importer may use only the destination module's **public `index.ts` or `index.tsx`**, never its internal implementation. Runtime cycles remain failures and type-level cycles remain review warnings.
+- `allowPureExternal` names explicitly reviewed packages that can be used by **non-test** pure domain/model/application files and pure shared utilities without making domain behavior depend on React, HTTP or state-management frameworks. Keep this list very small. Any unlisted bare package import in pure code fails by default.
+- `allowCrossModule` lists approved one-way module dependencies. The importer may use only the destination module's **public `index.ts` or `index.tsx`**, never its internal implementation. Runtime cycles always fail; source-level cycles spanning modules also fail, including type-only cycles.
 - TypeScript `baseUrl` and `paths` are read from the consuming project's `tsconfig.json`. Unresolved internal aliases are errors, not silently skipped.
 - Unit test files may import their test framework without being mistaken for production domain code. Import restrictions elsewhere still apply.
 
@@ -88,3 +88,13 @@ This checker implements practical rules for conventional `src/` layouts; it is n
 - Source-owned `.d.ts` declarations and `.mjs`/`.cjs` modules are included in the graph. TypeScript import-equals references are also collected.
 
 These restrictions take precedence over the more general discussion of type-only cycles above.
+
+## Full pure-layer dependency rules
+
+The static checker now restricts `domain/`, `model/`, `application/`, `shared/lib/` and `shared/domain/` to other pure code. In particular, these layers cannot import `shared/api/`, `shared/ui/`, `generated/`, or `testing/`. Pure shared subdirectories cannot import React, HTTP SDKs or other packages unless the precise dependency is explicitly reviewed in `allowPureExternal`.
+
+This is **direct dependency enforcement plus recursively checked pure shared source**. It does not prove global-variable purity (e.g., calls to `fetch` without importing a module), and explicit package allowlists must be audited by the adopter.
+
+The checker recognizes relative and `tsconfig.paths`/`baseUrl`-aliased static assets such as CSS, SVG and images. It checks that the target file exists, without treating it as a TypeScript dependency. It also flags resolved internal project aliases pointing **outside the scanned source root** instead of silently ignoring workspace code. For multi-package monorepos, configure project scopes and validate each relevant source root. Workspace exceptions must be documented rather than inferred.
+
+Literal dynamic import/require calls are analyzed even with additional arguments; computed runtime specifiers are not statically checked.

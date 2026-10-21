@@ -17,7 +17,9 @@ describe('OrderCheckout', () => {
     expect(placeOrder).not.toHaveBeenCalled();
     const field = screen.getByRole('textbox', { name: /customer name/i });
     expect(field).toHaveAttribute('aria-invalid', 'true');
-    expect(field).toHaveAttribute('aria-describedby', 'customer-error');
+    const messageId = field.getAttribute('aria-describedby');
+    expect(messageId).toBeTruthy();
+    expect(document.getElementById(messageId!)).toHaveTextContent(/customer name/i);
   });
   it('creates an order and refreshes history', async () => {
     const orders: Array<{ id: string; customerName: string; productId: string; priceCents: number }> = [];
@@ -99,4 +101,27 @@ it('clears field-level error when the user corrects the input', async () => {
   expect(field).toHaveAttribute('aria-invalid', 'false');
   expect(field).not.toHaveAttribute('aria-describedby');
   expect(screen.queryByText(/enter a customer name/i)).not.toBeInTheDocument();
+});
+
+it('uses unique labels and error associations for multiple checkout instances', async () => {
+  const service: OrdersService = {
+    scopeId: 'accessible-ids',
+    listOrders: async () => [],
+    placeOrder: async () => { throw new Error('unused'); },
+  };
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={queryClient}>
+    <OrderCheckout service={service} selection={{ productId: 'tea', productName: 'Tea', priceCents: 100 }} />
+    <OrderCheckout service={service} selection={{ productId: 'coffee', productName: 'Coffee', priceCents: 200 }} />
+  </QueryClientProvider>);
+  const fields = screen.getAllByRole('textbox', { name: /customer name/i });
+  expect(fields).toHaveLength(2);
+  expect(fields[0].id).not.toBe(fields[1].id);
+  const forms = screen.getAllByRole('button', { name: /place order/i });
+  await userEvent.click(forms[0]);
+  expect(fields[0]).toHaveAttribute('aria-invalid', 'true');
+  expect(fields[1]).toHaveAttribute('aria-invalid', 'false');
+  const description = fields[0].getAttribute('aria-describedby');
+  expect(description).toBeTruthy();
+  expect(document.getElementById(description!)).toHaveTextContent(/customer name/i);
 });
