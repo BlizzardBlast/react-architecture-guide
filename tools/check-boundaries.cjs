@@ -103,9 +103,17 @@ function configFor(dir) {
   return parsed;
 }
 function normPath(pathname) { return pathname.replace(/\\/g, '/'); }
+const publicEntrypoints = new Set([
+  'index.ts', 'index.tsx', 'index.mts', 'index.cts',
+  'index.js', 'index.jsx', 'index.mjs', 'index.cjs',
+]);
+function isPublicEntrypoint(dest) {
+  return dest.layer === 'module' &&
+    publicEntrypoints.has(dest.relative.split('/').at(-1)) &&
+    dest.relative.split('/').length === 3;
+}
 function isSelfBarrel(source, dest) {
-  return dest.relative === `modules/${source.module}/index.ts` ||
-    dest.relative === `modules/${source.module}/index.tsx`;
+  return dest.module === source.module && isPublicEntrypoint(dest);
 }
 function matchesAlias(spec, patterns) {
   return Object.keys(patterns || {}).some(pattern => {
@@ -151,8 +159,14 @@ function check(srcDir) {
       const projectAlias = matchesAlias(dep.spec, options.paths) ||
         (Boolean(options.baseUrl) && /^(?:modules|shared|routes|app|testing|generated)\//.test(dep.spec));
       const barePackage = !relativeSpec && !projectAlias;
+      const isTest = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file);
+      const pureCode = isPureModule(source) ||
+        (source.layer === 'shared' && isPureShared(source.relative));
       const staticAsset = assetPath(dep.spec);
       if (staticAsset && (relativeSpec || projectAlias)) {
+        if (pureCode && !isTest) {
+          errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
+        }
         // TypeScript module resolution intentionally does not resolve CSS/images.
         // Verify Vite-style relative and tsconfig.paths/baseUrl asset imports by file.
         const candidates = [];
@@ -180,11 +194,8 @@ function check(srcDir) {
         }
         continue;
       }
-      const isTest = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file);
       const resolved = ts.resolveModuleName(dep.spec, file, options, ts.sys).resolvedModule?.resolvedFileName;
       const externalDependency = Boolean(resolved && normPath(resolved).includes('/node_modules/'));
-      const pureCode = isPureModule(source) ||
-        (source.layer === 'shared' && isPureShared(source.relative));
       if (pureCode && !isTest &&
           (barePackage || externalDependency) && !policy.allowPureExternal.includes(dep.spec)) {
         errors.push(`pure-layer-external-package: ${source.relative} -> ${dep.spec}`);
@@ -224,7 +235,7 @@ function check(srcDir) {
         }
         const exceptions = policy.allowCrossModule[source.module] || [];
         if (!Array.isArray(exceptions) || !exceptions.includes(dest.module) ||
-            !['index.ts', 'index.tsx'].some(name => dest.relative === `modules/${dest.module}/${name}`)) {
+            !isPublicEntrypoint(dest)) {
           errors.push(`sibling-module-dependency: ${desc}`);
         }
       }
@@ -242,7 +253,7 @@ function check(srcDir) {
         errors.push(`invalid-external-module-use: ${desc}`);
       }
       if (dest.layer === 'module' && source.layer !== 'module') {
-        const allowedPublic = ['index.ts','index.tsx'].some(name => dest.relative === `modules/${dest.module}/${name}`);
+        const allowedPublic = isPublicEntrypoint(dest);
         if (!allowedPublic && !['testing'].includes(source.layer)) errors.push(`deep-module-import: ${desc}`);
       }
       // Pure-layer checks above apply consistently to domain, model, application

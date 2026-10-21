@@ -45,3 +45,10 @@ Do not claim SOLID compliance or tests passed from folder appearance alone.
 - [ ] Type-only cycles crossing module boundaries fail; intra-module type-only cycles are reported separately.
 - [ ] Checkout mutation feedback is scoped to its selection and customer-name errors are associated accessibly.
 - [ ] The documentation validator rejects mismatched Markdown fences.
+
+## Pending saves and asset-module checks
+
+- [ ] Defer a save promise, attempt to edit and resubmit, and verify only one save was called.
+- [ ] Switch products during a pending save and verify the new checkout remains locked until settlement.
+- [ ] Verify domain, application, model, and pure shared files cannot import CSS or other presentation assets.
+- [ ] Verify JavaScript public APIs and self-barrel restrictions for `index.mjs` and `index.cjs`.

@@ -44,3 +44,9 @@ Customer-name validation is applied before making a mutation and announced throu
 The form uses React `useId` for per-instance accessible labels and the domain supplies structured field-specific validation errors instead of relying on English-message matching. Its string-returning validation function remains for API compatibility. Vite-style CSS imports are intentionally accepted by the architecture check when the stylesheet exists.
 
 **Do not skip the build test:** `npm run build` checks architecture boundaries first. On a network-enabled machine, install dependencies, create real lockfiles and run the full test/build suite, as documented above.
+
+## Preventing repeat order submissions
+
+A single-flight guard lives in the non-keyed `OrderCheckout` wrapper. While a save is pending, the customer input and submit button are disabled, and a product-selection change cannot unlock another save. The guard releases only when the underlying asynchronous operation settles; `mutation.reset()` is never used to cancel an active request because it does not cancel network work.
+
+This is a UI-only demonstration. Production order processing requires server-side idempotency keys and duplicate-request protection, regardless of browser behavior.

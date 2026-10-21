@@ -98,3 +98,9 @@ This is **direct dependency enforcement plus recursively checked pure shared sou
 The checker recognizes relative and `tsconfig.paths`/`baseUrl`-aliased static assets such as CSS, SVG and images. It checks that the target file exists, without treating it as a TypeScript dependency. It also flags resolved internal project aliases pointing **outside the scanned source root** instead of silently ignoring workspace code. For multi-package monorepos, configure project scopes and validate each relevant source root. Workspace exceptions must be documented rather than inferred.
 
 Literal dynamic import/require calls are analyzed even with additional arguments; computed runtime specifiers are not statically checked.
+
+## Asset boundaries and JavaScript entry points
+
+Although a CSS/image asset is not a TypeScript module, importing one is an architectural dependency. Pure `domain/`, `model/`, `application/`, `shared/lib/` and `shared/domain/` code must not import presentation assets. UI and application composition may import existing supported assets; missing local assets are reported as errors.
+
+When JavaScript is used, the checker recognizes module public entry points named `index.js`, `index.jsx`, `index.mjs`, and `index.cjs`, in addition to `index.ts`, `index.tsx`, `index.mts`, and `index.cts`. Self-barrel restrictions apply across these formats, and explicitly allowed sibling dependencies must still target a public entry point.

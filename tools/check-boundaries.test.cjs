@@ -250,3 +250,39 @@ test('tsconfig path-alias asset is allowed only when the target actually exists'
     'main.tsx': 'import "@/missing.css"; export const app = 1;',
   }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
 });
+
+test('pure layers reject imported styles even when the asset exists', () => {
+  withFixture({
+    'modules/orders/domain/order.ts': 'import "../ui/styles.css"; export const value = 1;',
+    'modules/orders/ui/styles.css': ':root { color: red }',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+  withFixture({
+    'modules/orders/application/order.ts': 'import "../ui/styles.css"; export const value = 1;',
+    'modules/orders/ui/styles.css': ':root { color: red }',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+  withFixture({
+    'shared/lib/util.ts': 'import "./styles.css"; export const value = 1;',
+    'shared/lib/styles.css': ':root { color: red }',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+});
+
+test('UI and application composition may import existing stylesheets', () => withFixture({
+  'app/main.tsx': 'import "./app.css"; export const app = 1;',
+  'app/app.css': ':root { color: blue }',
+  'modules/orders/ui/view.tsx': 'import "./view.css"; export const view = 1;',
+  'modules/orders/ui/view.css': ':root { color: red }',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('approved JavaScript module public APIs accept index.mjs and index.cjs', () => withFixture({
+  '../architecture.config.json': '{"allowCrossModule":{"payments":["orders"]}}',
+  'modules/orders/index.mjs': 'export const order = 1;',
+  'modules/orders/index.cjs': 'module.exports = { order: 1 };',
+  'modules/payments/ui/pay.mjs': 'import { order } from "../../orders/index.mjs"; export const paid = order;',
+  'modules/payments/ui/pay.cjs': 'const orders = require("../../orders/index.cjs"); module.exports = orders;',
+  'routes/home.mjs': 'import { order } from "../modules/orders/index.mjs"; export const home = order;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('self-barrel imports are rejected for JavaScript module entrypoints', () => withFixture({
+  'modules/orders/index.mjs': 'export const value = 1;',
+  'modules/orders/ui/form.mjs': 'import { value } from "../index.mjs"; export const form = value;',
+}, result => assert.match(result.errors.join(' '), /no-self-barrel/)));

@@ -116,8 +116,16 @@ For a fresh machine, generate lockfiles from the actual npm registry (not by han
 
 ## Architecture review enforcement update
 
-The checker now distinguishes asset imports (including Vite's `./style.css`) from TypeScript imports and validates the target assets. It applies consistent pure-layer rules to domain, model, application, and pure shared utility code, including a generated-DTO prohibition and rejection of unverified out-of-root aliases. The architecture suite now defines 38 cases.
+The checker now distinguishes asset imports (including Vite's `./style.css`) from TypeScript imports and validates the target assets. It applies consistent pure-layer rules to domain, model, application, and pure shared utility code, including a generated-DTO prohibition and rejection of unverified out-of-root aliases. The architecture suite now defines 42 cases.
 
 The React example uses per-instance IDs and structured field-validation results. These are educational patterns, not proof of a production-ready checkout implementation.
 
 **Required before merging:** generate and commit real dependency lockfiles with npm registry access, execute `npm ci` in the root and both examples, run `npm run verify`, perform `npm audit` for each package, and smoke-test the browser app. Do not mark the PR ready based solely on static analysis.
+
+## Follow-up validation and JavaScript support
+
+The architecture checker supports module public entry points in TS/TSX/MTS/CTS and JS/JSX/MJS/CJS, treating a self-barrel import as a violation in each format. Pure layers may **not** import CSS, images or other presentation assets, even though UI and app-level imports remain supported.
+
+The reference checkout keeps a pending-save guard across product switches and disables editing while a save is pending. The test suite defines 42 architecture fixtures plus deferred-promise checkout tests.
+
+This does not replace a real server's order-idempotency protections. npm lockfiles and the full build/security verification remain outstanding until registry access is restored.

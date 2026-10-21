@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { OrderCheckout } from './order-checkout';
@@ -124,4 +124,67 @@ it('uses unique labels and error associations for multiple checkout instances', 
   const description = fields[0].getAttribute('aria-describedby');
   expect(description).toBeTruthy();
   expect(document.getElementById(description!)).toHaveTextContent(/customer name/i);
+});
+
+it('keeps one order in flight while the customer tries to edit and resubmit', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const placeOrder = vi.fn(async (draft: Parameters<OrdersService['placeOrder']>[0]) => {
+    await gate;
+    return { ...draft, id: 'one-order' };
+  });
+  const service: OrdersService = {
+    scopeId: 'single-flight-edit',
+    listOrders: async () => [],
+    placeOrder,
+  };
+  renderCheckout(service);
+  const name = screen.getByRole('textbox', { name: /customer name/i });
+  await userEvent.type(name, 'Alice');
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  expect(placeOrder).toHaveBeenCalledTimes(1);
+  expect(name).toBeDisabled();
+  expect(screen.getByRole('button', { name: /saving/i })).toBeDisabled();
+  await userEvent.type(name, 'Different name');
+  expect(name).toHaveValue('Alice');
+  await userEvent.click(screen.getByRole('button', { name: /saving/i }));
+  expect(placeOrder).toHaveBeenCalledTimes(1);
+  release();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled());
+  expect(await screen.findByText('Order saved.')).toBeInTheDocument();
+});
+
+it('retains a pending save across a product-selection remount', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const placeOrder = vi.fn(async (draft: Parameters<OrdersService['placeOrder']>[0]) => {
+    await gate;
+    return { ...draft, id: 'saved-order' };
+  });
+  const service: OrdersService = {
+    scopeId: 'single-flight-product-change',
+    listOrders: async () => [],
+    placeOrder,
+  };
+  const provider = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const first = { productId: 'tea', productName: 'Green tea', priceCents: 250 };
+  const second = { productId: 'coffee', productName: 'Coffee', priceCents: 375 };
+  const view = (selection: typeof first) => (
+    <QueryClientProvider client={provider}>
+      <OrderCheckout service={service} selection={selection} />
+    </QueryClientProvider>
+  );
+  const { rerender } = render(view(first));
+  await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  expect(placeOrder).toHaveBeenCalledTimes(1);
+  rerender(view(second));
+  expect(screen.getByText(/selected: coffee/i)).toBeInTheDocument();
+  expect(screen.getByRole('textbox', { name: /customer name/i })).toBeDisabled();
+  expect(screen.getByRole('button', { name: /saving/i })).toBeDisabled();
+  await userEvent.click(screen.getByRole('button', { name: /saving/i }));
+  expect(placeOrder).toHaveBeenCalledTimes(1);
+  release();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled());
+  expect(screen.queryByText('Order saved.')).not.toBeInTheDocument();
 });

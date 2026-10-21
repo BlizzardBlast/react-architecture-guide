@@ -11,7 +11,7 @@ node --test tools/check-boundaries.test.cjs
 node tools/check-boundaries.cjs examples/react-app/src
 ```
 
-Install `typescript` as a development dependency in real consumer apps. On developer machines with an existing global TypeScript CLI, the script can also locate the global compiler. Its 38 fixture tests assert valid imports and invalid cross-module, deep import, shared leakage, layer, runtime cycle, self-barrel, and unresolved imports; source-only type cycles produce warnings.
+Install `typescript` as a development dependency in real consumer apps. On developer machines with an existing global TypeScript CLI, the script can also locate the global compiler. Its 42 fixture tests assert valid imports and invalid cross-module, deep import, shared leakage, layer, runtime cycle, self-barrel, and unresolved imports; source-only type cycles produce warnings.
 
 **Limitations:** dynamic computed imports cannot be statically resolved, semantic ownership cannot be proved by tooling, and this focused checker does not replace production tools such as dependency-cruiser, TypeScript compilation, ESLint/oxlint, or tests. It does not enforce every possible framework or folder convention. It assumes `src/` under one app and does not interpret path aliases without the corresponding `tsconfig`.
 
@@ -57,6 +57,14 @@ The checker recognizes bundler static assets without treating stylesheets as Typ
 
 The orders reference uses `useId` to avoid duplicate form element IDs and a structured `OrderValidationIssue` to link accessible error messages to their fields. The string-based domain validation helper remains available for compatibility with existing examples.
 
-The revised architecture checker defines **38 regression tests**. Verify that they pass before merging—definition of tests alone is not execution.
+The revised architecture checker defines **42 regression tests**. Verify that they pass before merging—definition of tests alone is not execution.
 
 **Still required:** npm registry access to generate authentic lockfiles for the root and both example packages, dependency auditing, a full `npm run verify`, and a React browser smoke check. Keep PR #1 as draft until those results are available.
+
+## Pending mutation and public API follow-up
+
+The latest revision introduces an in-flight guard in the `OrderCheckout` wrapper rather than relying solely on a `useMutation` observer. The guard remains active when a product change remounts the keyed checkout form, and the customer-name field is disabled until settlement. The UI tests include deliberately delayed saves to check duplicate-submit prevention and product-switch behavior. The example does not demonstrate server-side idempotency.
+
+The checker now rejects CSS and other presentation assets in pure layers while retaining valid app/UI asset imports. Public `index.*` entry points and self-barrel checks are consistent across all supported TypeScript and JavaScript extensions. The suite defines **42 architecture test cases** and 6 Markdown-validator test cases; this is a count of source tests, not evidence of successful execution.
+
+**Merge still blocked:** Genuine npm lockfiles, dependency audits, full build, typecheck, and Vitest checks require network-enabled package installation. Keep PR #1 as a draft until completed.

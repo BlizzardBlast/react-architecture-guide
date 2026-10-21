@@ -1,4 +1,4 @@
-import { useId, useState, type FormEvent } from 'react';
+import { useId, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getOrderValidationError, type OrderValidationIssue } from '../domain/order';
 import type { OrdersService } from '../application/orders-service';
@@ -13,14 +13,33 @@ interface Props {
   readonly selection: OrderSelection | null;
 }
 
-export function OrderCheckout(props: Props) {
-  // A different selected product (or service) represents a new checkout attempt.
-  // Remounting clears prior mutation feedback rather than showing "saved" for it.
-  const key = [props.service.scopeId, props.selection?.productId ?? '', props.selection?.priceCents ?? 0].join(':');
-  return <CheckoutForm key={key} {...props} />;
+interface SaveGuard {
+  readonly isSaving: boolean;
+  readonly beginSave: () => boolean;
+  readonly finishSave: () => void;
 }
 
-function CheckoutForm({ service, selection }: Props) {
+export function OrderCheckout(props: Props) {
+  // This guard outlives the keyed form and its mutation observer: changing products
+  // must not unlock another save while the first operation remains in flight.
+  const inFlight = useRef(false);
+  const [isSaving, setIsSaving] = useState(false);
+  function beginSave() {
+    if (inFlight.current) return false;
+    inFlight.current = true;
+    setIsSaving(true);
+    return true;
+  }
+  function finishSave() {
+    inFlight.current = false;
+    setIsSaving(false);
+  }
+  // Remounting clears previous product's feedback, but not the pending save guard.
+  const key = [props.service.scopeId, props.selection?.productId ?? '', props.selection?.priceCents ?? 0].join(':');
+  return <CheckoutForm key={key} {...props} isSaving={isSaving} beginSave={beginSave} finishSave={finishSave} />;
+}
+
+function CheckoutForm({ service, selection, isSaving, beginSave, finishSave }: Props & SaveGuard) {
   const [customerName, setCustomerName] = useState('');
   const [validationError, setValidationError] = useState<OrderValidationIssue | null>(null);
   const id = useId();
@@ -36,17 +55,21 @@ function CheckoutForm({ service, selection }: Props) {
       setCustomerName('');
       await queryClient.invalidateQueries({ queryKey: orderKey });
     },
+    // Mutation reset does not cancel requests. Release the cross-form guard only
+    // after the actual asynchronous mutation has settled.
+    onSettled: finishSave,
   });
   const customerNameError = validationError?.field === 'customerName' ? validationError.message : null;
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selection || mutation.isPending) return;
+    if (!selection || isSaving || mutation.isPending) return;
     const draft = { customerName, productId: selection.productId, priceCents: selection.priceCents };
     const error = getOrderValidationError(draft);
     mutation.reset();
     setValidationError(error);
     if (error) return;
+    if (!beginSave()) return;
     mutation.mutate(draft);
   }
 
@@ -60,7 +83,9 @@ function CheckoutForm({ service, selection }: Props) {
           id={customerId}
           name="customer"
           value={customerName}
+          disabled={isSaving}
           onChange={event => {
+            if (isSaving) return;
             setCustomerName(event.target.value);
             setValidationError(null);
             mutation.reset();
@@ -70,8 +95,8 @@ function CheckoutForm({ service, selection }: Props) {
           aria-invalid={Boolean(customerNameError)}
           aria-describedby={customerNameError ? customerErrorId : undefined}
         />{' '}
-        <button type="submit" disabled={!selection || mutation.isPending}>
-          {mutation.isPending ? 'Saving…' : 'Place order'}
+        <button type="submit" disabled={!selection || isSaving || mutation.isPending}>
+          {isSaving || mutation.isPending ? 'Saving…' : 'Place order'}
         </button>
         {validationError && <p id={customerNameError ? customerErrorId : undefined} role="alert">{validationError.message}</p>}
         {mutation.isError && <p role="alert">{mutation.error.message}</p>}

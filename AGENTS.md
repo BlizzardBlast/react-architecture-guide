@@ -52,8 +52,16 @@ The React app is pinned to security-patched Vite/Vitest versions. Until a real n
 
 ## Follow-up code review standard
 
-Do not claim that an approved cross-module exception permits domain/application dependencies on another module; such imports remain forbidden. Reject type-only cycles **across** modules and include source declaration files in import checks. Run `npm run verify` after installing dependencies, which also executes Markdown validator regression tests. The expanded milestone suite defines 38 architecture tests and 6 Markdown-validator tests. These counts describe committed tests, not a claim that the revised architecture suite has passed.
+Do not claim that an approved cross-module exception permits domain/application dependencies on another module; such imports remain forbidden. Reject type-only cycles **across** modules and include source declaration files in import checks. Run `npm run verify` after installing dependencies, which also executes Markdown validator regression tests. The expanded milestone suite defines 42 architecture tests and 6 Markdown-validator tests. These counts describe committed tests, not a claim that the revised architecture suite has passed.
 
 ## Additional mandatory enforcement
 
 Pure `domain/`, `model/`, `application/`, `shared/lib/`, and `shared/domain/` files must not directly import generated transport DTOs, HTTP clients, UI packages or other technical layers. Treat aliases resolving outside the validated source tree as unverified and fail with an explicit finding. Allow static asset imports only when the referenced file exists. Do not assume architecture rule enforcement is a substitute for `tsc`, runtime tests, or trusted-server authorization.
+
+## Single-flight saves and JavaScript public entry points
+
+The reference checkout must keep a save guard across product-selection remounts, and must not reset an in-flight TanStack Query mutation when customer input changes. Keep both input and submit controls disabled during an active save. Production checkout systems additionally require trusted-server idempotency and authorization.
+
+For modules written in JavaScript, explicit public APIs may use `index.js`, `index.jsx`, `index.mjs` or `index.cjs` (and TS/MTS/CTS counterparts). Internal imports through a module's own barrel remain forbidden.
+
+The checker disallows presentation asset imports from pure domain, model, application, and shared utility layers, even when the asset exists. Presentation/app composition may import existing CSS and other supported assets.
