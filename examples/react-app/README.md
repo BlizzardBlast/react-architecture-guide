@@ -1,52 +1,26 @@
-# Runnable React reference application
+# React reference application
 
-A deliberately small **Vite + React + TypeScript + TanStack Router + TanStack Query** example illustrating both supported module shapes.
+This educational client-only Vite application illustrates the [architecture guide](../../docs/architecture.md) with React, TypeScript, TanStack Router and TanStack Query.
 
-- `catalog/`: simple `api/model/ui` module with an asynchronous query and accessible loading/error/selection states.
-- `orders/`: complex `domain/application/infrastructure/ui` module with domain validation, a small repository port, an in-memory adapter, domain-owned analytics and a composition factory.
-- `routes/home.tsx`: combines the independent modules **without sibling-module imports**.
-- `app/router.tsx`: constructs providers/services and configures client-side routing; nothing imports app setup back from the route tree.
+`src/modules/catalog/` is intentionally simple (`api/model/ui`). `src/modules/orders/` is more complex (`domain/application/infrastructure/ui`) with a module-local composition factory and consuming-layer repository/event contracts. `src/routes/` composes the two features, and `src/app/` configures the router and providers. Pure shared analytics transport is implemented separately from the domain-specific Order analytics adapter.
 
-No real backend is used. Order data is in memory and disappears on reload. This is **not** an example of backend authorization or durable persistence.
+## Running and verification
 
-## Run (requires registry access)
-
-Requires Node >=22.12.
+Requires Node >=22.12 and npm registry access:
 
 ```sh
-npm install
+npm ci
 npm run dev
-npm run typecheck
-npm run arch
-npm test
-npm run build
+npm run verify
+npm audit
 ```
 
-Install versions are pinned directly in `package.json`, but transitive versions are **not frozen without a lockfile**. Generate and commit a lockfile on a network-enabled machine before relying on `npm ci` for reproducible installations. React/Router/Query dependencies could not be downloaded in the authoring environment; UI tests and the browser build therefore remain **unverified** until those checks run.
+Generate and commit an authentic `package-lock.json` with `npm install --package-lock-only --ignore-scripts` before relying on `npm ci`. This branch does **not** yet include verified dependency lockfiles, build/typecheck/audit results, or browser smoke-test results because the authoring environment cannot reach the npm registry.
 
-Unit/UI tests use Vitest and Testing Library. The architecture checker is run locally using TypeScript's AST; it is **not** a replacement for a comprehensive production dependency audit.
+`npm run verify` runs Vitest, architecture checks, TypeScript typechecking and the Vite build. The architecture checker accepts Vite-style CSS/image assets within owned presentation code, and checks source and owned JSON dependencies separately.
 
-Router integration follows TanStack's recommended router-context QueryClient pattern, including `defaultPreloadStaleTime: 0`. For SSR, services and query clients must be request-scoped.
+## Checkout behavior
 
-## Cache identity and security updates
+The checkout uses structured field validation, unique accessible IDs (`useId`), and a TanStack Query cache key scoped to the injected Orders service. Changing the selected product remounts the form to clear outdated feedback; the non-keyed wrapper holds an in-flight save guard so the user cannot edit or resubmit while an earlier save is pending. Failed saves release the guard for retry.
 
-Each independently created `OrdersService` has a unique `scopeId` used in the React Query key, avoiding cached order history from a different injected service. The app's singleton scope is suitable only for this client-only demo. Production authentication/tenant changes require independently scoped caches, server authorization, and appropriate cache clearing.
-
-Direct dependencies pin Vite 7.3.7 and Vitest 4.1.12 (published patched releases). This environment cannot fetch npm registry dependencies; therefore **do not call the React app verified** until `npm install`, `npm run verify`, and `npm audit` complete successfully. Commit a genuinely generated `package-lock.json`; never fabricate a partial lockfile.
-
-
-## Accessibility and checkout behavior
-
-Customer-name validation is applied before making a mutation and announced through a linked error message (`aria-invalid` and `aria-describedby`). Editing the field clears the error. Changing the selected product begins a fresh checkout form and clears the previous product's success or error status while order history remains scoped to the active service's cache identity.
-
-## More realistic UI and build validation
-
-The form uses React `useId` for per-instance accessible labels and the domain supplies structured field-specific validation errors instead of relying on English-message matching. Its string-returning validation function remains for API compatibility. Vite-style CSS imports are intentionally accepted by the architecture check when the stylesheet exists.
-
-**Do not skip the build test:** `npm run build` checks architecture boundaries first. On a network-enabled machine, install dependencies, create real lockfiles and run the full test/build suite, as documented above.
-
-## Preventing repeat order submissions
-
-A single-flight guard lives in the non-keyed `OrderCheckout` wrapper. While a save is pending, the customer input and submit button are disabled, and a product-selection change cannot unlock another save. The guard releases only when the underlying asynchronous operation settles; `mutation.reset()` is never used to cancel an active request because it does not cancel network work.
-
-This is a UI-only demonstration. Production order processing requires server-side idempotency keys and duplicate-request protection, regardless of browser behavior.
+**Important:** The orders repository is **in memory**, so data disappears on refresh. There is no backend authorization, persistence or server-side idempotency. The single-flight guard only protects one mounted client UI and is not an example of secure payment/order processing. Real applications require server validation, authorization, idempotent order creation and appropriately scoped caches; SSR frameworks also need request-scoped services and Query clients.

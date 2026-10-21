@@ -286,3 +286,73 @@ test('self-barrel imports are rejected for JavaScript module entrypoints', () =>
   'modules/orders/index.mjs': 'export const value = 1;',
   'modules/orders/ui/form.mjs': 'import { value } from "../index.mjs"; export const form = value;',
 }, result => assert.match(result.errors.join(' '), /no-self-barrel/)));
+
+test('static assets never bypass shared ownership or sibling module privacy', () => {
+  withFixture({
+    'shared/ui/button.tsx': 'import "../../modules/orders/ui/order.css"; export const Button = () => 1;',
+    'modules/orders/ui/order.css': '.order { color: red }',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  withFixture({
+    'modules/payments/ui/payment.tsx': 'import "../../orders/ui/order.css"; export const Payment = () => 1;',
+    'modules/orders/ui/order.css': '.order { color: red }',
+  }, result => assert.match(result.errors.join(' '), /sibling-module-dependency/));
+  withFixture({
+    'app/start.tsx': 'import "../modules/orders/ui/order.css"; export const App = () => 1;',
+    'modules/orders/ui/order.css': '.order { color: red }',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/));
+});
+
+test('valid same-owner CSS imports still pass after ownership enforcement', () => withFixture({
+  'modules/orders/ui/order.css': '.order { color: red }',
+  'modules/orders/ui/order.tsx': 'import "./order.css"; export const Order = () => 1;',
+  'shared/ui/button.css': '.button { color: blue }',
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'app/app.css': ':root { color: blue }',
+  'app/main.tsx': 'import "./app.css"; export const app = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('JSON imports are valid local data dependencies, not TypeScript source edges', () => withFixture({
+  'app/config.json': '{"theme":"dark"}',
+  'app/main.ts': 'import config from "./config.json"; export const theme = config.theme;',
+  'modules/orders/domain/tax.json': '{"tax":10}',
+  'modules/orders/domain/tax.ts': 'import tax from "./tax.json"; export const cents = tax.tax;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('JSON import targets must exist and must respect ownership', () => {
+  withFixture({
+    'app/main.ts': 'import missing from "./missing.json"; export const config = missing;',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+  withFixture({
+    'shared/ui/button.ts': 'import order from "../../modules/orders/domain/order.json"; export const value = order;',
+    'modules/orders/domain/order.json': '{"id":1}',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  withFixture({
+    'modules/payments/ui/payment.ts': 'import order from "../../orders/domain/order.json"; export const value = order;',
+    'modules/orders/domain/order.json': '{"id":1}',
+  }, result => assert.match(result.errors.join(' '), /sibling-module-dependency/));
+  withFixture({
+    'modules/orders/domain/order.ts': 'import schema from "../../../generated/api/schema.json"; export const value = schema;',
+    'generated/api/schema.json': '{"type":"object"}',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-imports-technical/));
+});
+
+test('assets resolving outside the scanned root cannot bypass the boundary', () => withFixture({
+  'app/start.ts': 'import "../../external/style.css"; export const app = 1;',
+  '../external/style.css': ':root { color: red }',
+}, result => assert.match(result.errors.join(' '), /outside-source-import/)));
+
+test('runtime cycle diagnostics contain exactly one closing node', () => withFixture({
+  'modules/orders/model/a.ts': 'import { b } from "./b"; export const a = b;',
+  'modules/orders/model/b.ts': 'import { a } from "./a"; export const b = a;',
+}, result => {
+  assert.ok(result.errors.some(error =>
+    error === 'runtime-cycle: modules/orders/model/a.ts -> modules/orders/model/b.ts -> modules/orders/model/a.ts'));
+  assert.ok(!result.errors.some(error => /a\.ts -> a\.ts/.test(error)));
+}));
+
+test('asset path aliases take precedence over baseUrl fallback files', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@styles/*":["modules/payments/ui/*"]}}}',
+  'modules/orders/ui/view.tsx': 'import "@styles/view.css"; export const View = () => 1;',
+  'modules/payments/ui/view.css': '.payment { color: red }',
+  '@styles/view.css': '.shadow { color: blue }',
+}, result => assert.match(result.errors.join(' '), /sibling-module-dependency/)));

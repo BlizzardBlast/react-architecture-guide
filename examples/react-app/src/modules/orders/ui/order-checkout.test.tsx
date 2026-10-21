@@ -188,3 +188,31 @@ it('retains a pending save across a product-selection remount', async () => {
   await waitFor(() => expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled());
   expect(screen.queryByText('Order saved.')).not.toBeInTheDocument();
 });
+
+it('releases the save guard and permits retry after a rejected save', async () => {
+  let rejectSave!: (error: Error) => void;
+  const pending = new Promise<Awaited<ReturnType<OrdersService['placeOrder']>>>(
+    (_resolve, reject) => { rejectSave = reject; },
+  );
+  const placeOrder = vi.fn()
+    .mockImplementationOnce(() => pending)
+    .mockImplementation(async (draft: Parameters<OrdersService['placeOrder']>[0]) => ({
+      ...draft, id: 'retried-order',
+    }));
+  const service: OrdersService = {
+    scopeId: 'single-flight-rejected',
+    listOrders: async () => [],
+    placeOrder,
+  };
+  renderCheckout(service);
+  await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  expect(placeOrder).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole('button', { name: /saving/i })).toBeDisabled();
+  rejectSave(new Error('Service temporarily unavailable'));
+  expect(await screen.findByRole('alert')).toHaveTextContent('Service temporarily unavailable');
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled());
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  expect(placeOrder).toHaveBeenCalledTimes(2);
+  expect(await screen.findByText('Order saved.')).toBeInTheDocument();
+});

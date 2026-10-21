@@ -30,7 +30,7 @@ function loadTypeScript(projectDir = process.argv[2]) {
 const ts = loadTypeScript();
 // The dot is required: filenames such as "assets" are not source files.
 const sourceExt = /\.(?:[cm]?[jt]s|[jt]sx)$/;
-const assetExt = /\.(?:css|scss|sass|less|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|mp4|webm)$/i;
+const assetExt = /\.(?:css|scss|sass|less|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|mp4|webm|json)$/i;
 function assetPath(spec) {
   const filename = spec.split(/[?#]/, 1)[0];
   return assetExt.test(filename) ? filename : null;
@@ -163,17 +163,17 @@ function check(srcDir) {
       const pureCode = isPureModule(source) ||
         (source.layer === 'shared' && isPureShared(source.relative));
       const staticAsset = assetPath(dep.spec);
-      if (staticAsset && (relativeSpec || projectAlias)) {
-        if (pureCode && !isTest) {
-          errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
-        }
-        // TypeScript module resolution intentionally does not resolve CSS/images.
-        // Verify Vite-style relative and tsconfig.paths/baseUrl asset imports by file.
+      const localAsset = Boolean(staticAsset && (relativeSpec || projectAlias));
+      // Assets are still architectural dependencies. Resolve the physical path,
+      // then apply the same ownership/layer checks used for source imports.
+      let resolved;
+      if (localAsset) {
         const candidates = [];
         if (relativeSpec) candidates.push(path.resolve(path.dirname(file), staticAsset));
         if (projectAlias) {
           const baseDir = options.baseUrl || path.dirname(root);
-          if (options.baseUrl) candidates.push(path.resolve(baseDir, staticAsset));
+          // Match tsconfig.paths before falling back to baseUrl; otherwise a
+          // same-named local file can hide the intended aliased dependency.
           for (const [pattern, targets] of Object.entries(options.paths || {})) {
             const star = pattern.indexOf('*');
             const match = star < 0
@@ -187,25 +187,35 @@ function check(srcDir) {
               candidates.push(path.resolve(baseDir, targetSpec.replace('*', match)));
             }
           }
+          if (options.baseUrl) candidates.push(path.resolve(baseDir, staticAsset));
         }
-        if (!candidates.some(candidate =>
-          fs.existsSync(candidate) && fs.statSync(candidate).isFile())) {
+        const candidate = candidates.find(candidate =>
+          fs.existsSync(candidate) && fs.statSync(candidate).isFile());
+        // Real paths matter: a symlink inside src may point outside the owned tree.
+        resolved = candidate ? fs.realpathSync(candidate) : undefined;
+        if (!resolved) {
           errors.push(`missing-static-asset: ${source.relative} -> ${dep.spec}`);
+          continue;
         }
-        continue;
-      }
-      const resolved = ts.resolveModuleName(dep.spec, file, options, ts.sys).resolvedModule?.resolvedFileName;
-      const externalDependency = Boolean(resolved && normPath(resolved).includes('/node_modules/'));
-      if (pureCode && !isTest &&
-          (barePackage || externalDependency) && !policy.allowPureExternal.includes(dep.spec)) {
-        errors.push(`pure-layer-external-package: ${source.relative} -> ${dep.spec}`);
-      }
-      if (!resolved) {
-        if (relativeSpec || projectAlias) errors.push(`${source.relative}: unresolved internal import ${dep.spec}`);
-        continue;
+        // JSON can be pure configuration/data; styles, images, and media cannot
+        // be imported into domain/application/model or pure shared modules.
+        if (pureCode && !isTest && !staticAsset.toLowerCase().endsWith('.json')) {
+          errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
+        }
+      } else {
+        resolved = ts.resolveModuleName(dep.spec, file, options, ts.sys).resolvedModule?.resolvedFileName;
+        const externalDependency = Boolean(resolved && normPath(resolved).includes('/node_modules/'));
+        if (pureCode && !isTest &&
+            (barePackage || externalDependency) && !policy.allowPureExternal.includes(dep.spec)) {
+          errors.push(`pure-layer-external-package: ${source.relative} -> ${dep.spec}`);
+        }
+        if (!resolved) {
+          if (relativeSpec || projectAlias) errors.push(`${source.relative}: unresolved internal import ${dep.spec}`);
+          continue;
+        }
       }
       const target = path.resolve(resolved);
-      if (!known.has(target)) {
+      if (!known.has(target) && !localAsset) {
         // A resolved workspace alias outside src must not bypass all boundary checks.
         // Third-party packages and their declarations in node_modules are external.
         const externalPackage = normPath(target).includes('/node_modules/');
@@ -216,6 +226,10 @@ function check(srcDir) {
       }
       const dest = category(target, root);
       const desc = `${source.relative} -> ${dest.relative}`;
+      if (dest.layer === 'outside') {
+        errors.push(`outside-source-import: ${source.relative} -> ${dep.spec}`);
+        continue;
+      }
       if (source.layer === 'shared' && dest.layer !== 'shared') errors.push(`shared-must-be-independent: ${desc}`);
       // Domain/model/application and pure shared code may depend on pure shared
       // primitives only, never generated API clients, UI, HTTP or test setup.
@@ -260,7 +274,7 @@ function check(srcDir) {
       // and transitively pure shared/lib and shared/domain modules.
       if (source.layer === 'routes' && dest.layer === 'app') errors.push(`routes-import-app: ${desc}`);
       if (source.layer === 'module' && ['app', 'routes'].includes(dest.layer)) errors.push(`module-imports-composition: ${desc}`);
-      edges.get(file).push({ target, runtime: dep.runtime });
+      if (!localAsset) edges.get(file).push({ target, runtime: dep.runtime });
     }
   }
   // DFS detects cycles. Only runtime edges are fatal; type-only edges are inspected separately.
@@ -270,7 +284,7 @@ function check(srcDir) {
     function visit(v, trail) {
       if (visiting.has(v)) {
         const offset = trail.indexOf(v);
-        const cycle = trail.slice(offset).concat(v).map(f => path.relative(root, f)).join(' -> ');
+        const cycle = trail.slice(offset).map(f => path.relative(root, f)).join(' -> ');
         if (!seen.has(cycle)) { seen.add(cycle); result.push(cycle); }
         return;
       }

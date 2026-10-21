@@ -1,70 +1,40 @@
-# Milestone 1 — executable architecture
+# Milestone 1 — Executable architecture
 
-This milestone adds enforcement and a teaching application **without changing the canonical modular-feature-first decision**.
+This milestone makes the [modular, feature-first standard](architecture.md) demonstrable without imposing a mandatory scaffold or a heavyweight architectural framework.
 
-## Architecture checker
+## What is included
 
-`tools/check-boundaries.cjs` uses the TypeScript compiler API to scan static imports, type-only imports, re-exports, `require('literal')` and `import('literal')`, following TypeScript resolution including `tsconfig` aliases.
+- [`tools/check-boundaries.cjs`](../tools/check-boundaries.cjs): AST-based dependency analysis of JS/TS source, declaration files, literal imports/re-exports, import-equals, require/dynamic import, and TypeScript path aliases. It checks module ownership, public APIs, shared purity, layered imports, cycles, and static asset/JSON ownership.
+- [`tools/check-boundaries.test.cjs`](../tools/check-boundaries.test.cjs): positive and negative fixtures for the above boundaries, including pure-layer dependencies, internal modules, shared code, JavaScript public APIs and local assets.
+- [`tools/validate-docs.cjs`](../tools/validate-docs.cjs) and [its tests](../tools/validate-docs.test.cjs): Markdown code-fence and local-link validation.
+- [React reference app](../examples/react-app/README.md): Vite, React, TanStack Router/Query, simple catalog and layered orders capabilities, in-memory persistence, and service-specific Query keys. Checkout has structured validation, accessible labels, a shared in-flight guard and deferred-promise retry tests.
+- [TypeScript orders example](../examples/orders/README.md): dependency inversion with application-owned ports.
+- [Agent instructions](../agents/react-architecture/AGENTS.snippet.md): a copy-ready guide for consumer repositories.
 
-```bash
-node --test tools/check-boundaries.test.cjs
-node tools/check-boundaries.cjs examples/react-app/src
+## How to validate
+
+Requires Node, a working npm registry and authentic package lockfiles in the root, `examples/orders` and `examples/react-app`. Once lockfiles exist:
+
+```sh
+npm ci
+npm --prefix examples/orders ci
+npm --prefix examples/react-app ci
+npm run verify
+npm audit
+npm --prefix examples/orders audit
+npm --prefix examples/react-app audit
 ```
 
-Install `typescript` as a development dependency in real consumer apps. On developer machines with an existing global TypeScript CLI, the script can also locate the global compiler. Its 42 fixture tests assert valid imports and invalid cross-module, deep import, shared leakage, layer, runtime cycle, self-barrel, and unresolved imports; source-only type cycles produce warnings.
+`npm run verify` runs the Markdown tests, architecture fixtures, TypeScript orders checks, and the React app's tests, boundary check, typecheck and Vite production build. Browser smoke tests should also cover navigation, accessible form validation, pending saves, failed saves, retry, and product switches.
 
-**Limitations:** dynamic computed imports cannot be statically resolved, semantic ownership cannot be proved by tooling, and this focused checker does not replace production tools such as dependency-cruiser, TypeScript compilation, ESLint/oxlint, or tests. It does not enforce every possible framework or folder convention. It assumes `src/` under one app and does not interpret path aliases without the corresponding `tsconfig`.
+**Verification status for PR #1:** The authoring environment cannot resolve the npm registry. An authentic lockfile, clean install, full architecture suite, React/Vite/Vitest run and transitive vulnerability audit remain pending. Static source and Markdown inspection do **not** establish their success. Keep the PR in draft until these checks run successfully; do not fabricate dependency metadata.
 
-## Runnable React illustration
+## Boundaries and limitations
 
-`examples/react-app/` demonstrates React with Vite, TanStack Router, TanStack Query, one simple catalog module, one complex orders module, local validation, dependency inversion, business-specific analytics and an app composition root. See [its README](../examples/react-app/README.md).
+The checker reads the consuming project's `tsconfig.json` and optionally `architecture.config.json`. It accepts owned JSON configuration imports; pure layers cannot import presentation assets. Paths resolving outside the scanned `src/` are reported as unverified rather than silently accepted. Read [dependency rules](dependency-rules.md) for approved external pure packages and one-way module API exceptions.
 
-It intentionally uses an in-memory adapter rather than pretending to implement production authorization, persistence or a secure API.
+Computed dynamic imports and semantic use of ambient globals cannot be proved by static import analysis. The checker is not a security sandbox or replacement for a compiler, exhaustive dependency analyzer, browser validation, supply-chain audit, or backend authorization.
 
-## Coding agents
+The React app stores orders in memory and performs UI-level single-flight guarding only. **Real order creation requires trusted server validation, authorization and idempotency.** For SSR, instantiate services and Query clients with request-appropriate scope.
 
-[Copy-ready AGENTS instructions](../agents/react-architecture/AGENTS.snippet.md) can be adapted in each consumer repository. Changes to this guide do not automatically update other repositories or their agents.
-
-## Verification and reproducibility
-
-- Architecture fixture suite and analyzer on the React source tree were tested with a local TypeScript compiler.
-- The React UI compilation, browser launch and Vitest UI tests require npm dependencies and **were not run in the authoring environment**, which cannot access the package registry.
-- The React app uses exact direct package versions, but lacks a generated dependency lockfile; it must be created and verified in a network-enabled environment before calling the app dependency installation fully reproducible.
-- No GitHub Actions workflow was added. Batch local checks and one push when possible, without sacrificing quality/security.
-
-## Code review remediation — October 2026
-
-The implementation addresses the review's principal concerns: external dependency purity, Windows-safe path comparison and globally installed TypeScript discovery, TypeScript `verbatimModuleSyntax` runtime-import semantics, parsing syntax diagnostics and JSX, resolution of `baseUrl` and `paths` aliases, explicit one-way public-module exceptions, service-scoped TanStack Query keys, expanded regression fixtures, and a consolidated `npm run verify` command.
-
-The React example uses Vite **7.3.7** and Vitest **4.1.12** based on published security patches. Pinning direct dependencies **does not** replace a complete `npm audit`, trusted lockfile, verified install, typecheck, UI tests and production build. The authoring environment cannot contact npm's registry; the lockfiles and runtime validation **remain required before merge**. Keep PR #1 in draft until these steps are completed.
-
-
-## Follow-up review corrections
-
-The checker now visits declaration-file dependencies, JavaScript `.mjs`/`.cjs`, and TypeScript `import = require(...)`. It rejects cross-module imports originating from pure domain/model/application layers, even if a public API exception has been granted. Type-only cycles spanning two or more modules fail the architecture gate; purely intra-module type cycles remain warnings.
-
-The architecture test suite now contains **38 top-level tests**, and the Markdown validator has **6 negative/positive tests** for fence syntax and local link integrity.
-
-The React example clears stale checkout messages on selection changes, validates customer input before mutation, and connects validation feedback to the input for assistive technology. Its query-cache scope remains per service instance.
-
-### Remaining external prerequisite
-
-Dependencies were not available from npm in this authoring environment. Actual `package-lock.json` files and `npm ci` / `npm audit` / Vite build / Vitest runtime checks must be generated and run in a network-enabled environment before marking the draft PR merge-ready. Do not substitute fabricated dependency resolution or describe static checks as equivalent to full runtime validation.
-
-## Final enforcement and UI improvements
-
-The checker recognizes bundler static assets without treating stylesheets as TypeScript modules; prevents direct pure-layer imports from generated DTOs or shared HTTP/UI code; enforces the purity of `shared/lib` transitively through locally scanned source; and reports internal workspace aliases outside the scanned root instead of silently skipping them. It also checks multi-argument literal imports. The extension matcher already required a leading dot; it has a regression test rather than an unnecessary implementation change.
-
-The orders reference uses `useId` to avoid duplicate form element IDs and a structured `OrderValidationIssue` to link accessible error messages to their fields. The string-based domain validation helper remains available for compatibility with existing examples.
-
-The revised architecture checker defines **42 regression tests**. Verify that they pass before merging—definition of tests alone is not execution.
-
-**Still required:** npm registry access to generate authentic lockfiles for the root and both example packages, dependency auditing, a full `npm run verify`, and a React browser smoke check. Keep PR #1 as draft until those results are available.
-
-## Pending mutation and public API follow-up
-
-The latest revision introduces an in-flight guard in the `OrderCheckout` wrapper rather than relying solely on a `useMutation` observer. The guard remains active when a product change remounts the keyed checkout form, and the customer-name field is disabled until settlement. The UI tests include deliberately delayed saves to check duplicate-submit prevention and product-switch behavior. The example does not demonstrate server-side idempotency.
-
-The checker now rejects CSS and other presentation assets in pure layers while retaining valid app/UI asset imports. Public `index.*` entry points and self-barrel checks are consistent across all supported TypeScript and JavaScript extensions. The suite defines **42 architecture test cases** and 6 Markdown-validator test cases; this is a count of source tests, not evidence of successful execution.
-
-**Merge still blocked:** Genuine npm lockfiles, dependency audits, full build, typecheck, and Vitest checks require network-enabled package installation. Keep PR #1 as a draft until completed.
+No additional GitHub Actions workflows were added solely for this guide. Existing consumers should integrate necessary architecture rules into their established local/CI gates, batching changes and checks to conserve Actions minutes.

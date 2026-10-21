@@ -1,106 +1,64 @@
-# Dependency ownership and import rules
+# Dependency rules and ownership
 
-A good folder structure is a naming convention. **Import direction** and contracts determine whether modules stay independent.
+Folder names express ownership; **import direction and contracts** make that ownership real. Use the [canonical architecture](architecture.md) to decide whether a module should be simple or complex.
 
-## High-level rules
+## Global dependency boundaries
 
-1. `shared/` never imports `modules/`, `routes/`, or `app/`, **including type-only imports**.
-2. `modules/<A>` does not import `modules/<B>` by default. Instead, compose them in routes/app. Document rare one-way public-API exceptions.
-3. `routes/` may compose multiple modules and shared components. Do not let routes import app setup and create an `app → routes → app` cycle.
-4. `app/` can import routes, modules' public APIs and shared components to configure the application.
-5. Outside a module, import only its explicit public API. Do not deep-import private implementation paths.
-6. Inside a module, use direct relative imports; do not import your own `index.ts` barrel.
-7. Avoid uncontrolled `export *` trees; expose only stable dependencies.
+1. `shared/` never imports `modules/`, `routes/` or `app/`, including type-only imports and static assets.
+2. A business module does not import sibling modules by default. Compose them in `routes/` or `app/`.
+3. Approved one-way sibling exceptions must be declared in the consuming application's `architecture.config.json` and import only the destination module's public `index.*` entry point. They must be acyclic, including for type-only dependencies.
+4. External consumers use module public APIs; internal files import directly rather than through their own module barrel. For JavaScript modules, public entry points and self-barrel restrictions apply to `index.js`, `index.jsx`, `index.mjs` and `index.cjs` as well as TS/TSX/MTS/CTS.
+5. Modules never import routes or app composition. Routes don't import app setup.
+6. Runtime cycles fail. Cycles spanning modules fail even if entirely type-only; purely internal type-only cycles are warnings for structural review.
 
-## Simple internal mode
+## Simple modules
 
-| Importer | May import | Forbidden |
+| Importing layer | Allowed dependencies | Not allowed |
 | --- | --- | --- |
-| `model/` | Other pure model files, relevant shared pure utilities | `ui/`, `api/`, app, routes |
-| `api/` | Model, technical shared API clients | UI, routes, app |
-| `ui/` | Model, API, shared UI | App setup, sibling implementation |
-| Module `index.ts` | Exposes intentional public API | Broad wildcard-export of internals |
+| `model/` | Local model, pure shared utilities | UI, API, framework, generated DTOs |
+| `api/` | Model and technical shared integration | UI, routes, app |
+| `ui/` | Local model and API, generic shared UI | Concrete module-private siblings, app setup |
+| Module `index.*` | Narrow documented exports | Accidental wildcard public surface |
 
-## Complex internal mode
+## Complex modules
 
-| Importer | May import | Forbidden |
+| Importing layer | Allowed dependencies | Not allowed |
 | --- | --- | --- |
-| `domain/` | Domain and pure shared primitives | React, application, infrastructure, UI |
-| `application/` | Domain, application-owned ports | Concrete infrastructure, UI |
-| `infrastructure/` | Application ports, domain, generic shared clients | UI, routes, app |
-| `ui/` | Application use cases, domain, shared UI | Concrete infrastructure in component/hook |
-| Composition root | UI, application and concrete infrastructure to wire dependencies | Owning arbitrary domain business decisions |
+| `domain/` | Local domain and pure shared | Application, infrastructure, UI, HTTP, generated DTOs |
+| `application/` | Local application/domain and pure shared | Concrete infrastructure, presentation, HTTP clients |
+| `infrastructure/` | Local application/domain/infrastructure and generic technical shared | UI, routes, app |
+| `ui/` | Local application/domain, generic shared UI | Concrete infrastructure |
+| Module-local composition | Local ports and implementations | Arbitrary sibling-private imports |
 
-A module-local composition factory can import implementations and expose one small factory from the module public API. This should not give unrelated modules deep access to internals.
+`shared/lib/` and `shared/domain/` are intended to be pure and cannot import React, HTTP clients, generated DTOs or non-pure shared folders. External packages in pure code are rejected by default unless individually reviewed and allowed.
 
-## Avoid the "generic circular dependency" problem
+## JSON and static assets
 
-**Bad**: `shared/analytics.ts` imports `modules/orders/domain/order.ts` only to create a payload. If orders also imports the shared analytics tool, ownership becomes circular or conceptually coupled. Even `import type` creates a source dependency and change propagation.
+CSS, SVG, fonts and images may be imported by presentation and app composition code, provided they exist and do not cross ownership boundaries. Pure domain/model/application/shared utilities cannot import presentation assets. JSON **can** be owned, pure configuration/data: it is allowed only when its location and import path respect the same module ownership and layer rules as source modules.
 
-**Good**: `shared` declares `AnalyticsClient.track(name, primitiveFields)`. `modules/orders/infrastructure/order-analytics.ts` imports the order type and maps it to a generic event payload. Higher-level composition wires the two together. Domain-specific notifications, logging, permission mapping, and API transport follow similar rules.
+Imports resolving outside the validated `src/` tree are reported as outside-source references rather than automatically trusted. A multi-package monorepo must validate its other package roots separately or adapt the checker with reviewed configuration; a successful single-root check does not validate all workspaces.
 
-### Classify cycles
+## Optional policy exceptions
 
-| Cycle | Default response |
-| --- | --- |
-| Runtime dependency cycle | Reject/fix |
-| Type-only cycle | Investigate structural coupling and possible ownership inversion |
-| Shared infrastructure importing domain types | Reject for business-neutral primitives |
-| One-way stable public dependency | May be permitted by an explicitly documented exception |
-| Genuine shared domain model | Establish a small, stable shared kernel with defined ownership; don't dump every common type into `shared` |
+Create `architecture.config.json` next to the consuming app's `tsconfig.json`:
 
-A type-only import does not execute at runtime, but still expresses source-level dependence. Not every one-way dependency merits new layers or factories.
-
-## Enforcing boundaries
-
-Production apps should configure a dependency analysis tool such as [dependency-cruiser](https://github.com/sverweij/dependency-cruiser), including TypeScript aliases and type-only imports. Add targeted rules for `shared`, public API access, sibling modules, complex-layer direction and cycles.
-
-Run this in the existing local/CI quality gate. No ruleset is presented as universal; account for Next.js route conventions, test imports, generated code, source aliases, and justified exceptions. A regex-only check is insufficient for accurate module graph enforcement.
-
-See [Architecture](architecture.md) and [ADR 0003](decisions/0003-generic-services.md).
-
-## Enforced exceptions and pure external dependencies
-
-The executable checker supports an optional `architecture.config.json` file alongside the consuming application's `tsconfig.json` (the parent of `src/`). Use the following **only when reviewed and justified**:
-
-~~~json
+```json
 {
   "allowPureExternal": ["zod"],
   "allowCrossModule": {
     "payments": ["orders"]
   }
 }
-~~~
+```
 
-- `allowPureExternal` names explicitly reviewed packages that can be used by **non-test** pure domain/model/application files and pure shared utilities without making domain behavior depend on React, HTTP or state-management frameworks. Keep this list very small. Any unlisted bare package import in pure code fails by default.
-- `allowCrossModule` lists approved one-way module dependencies. The importer may use only the destination module's **public `index.ts` or `index.tsx`**, never its internal implementation. Runtime cycles always fail; source-level cycles spanning modules also fail, including type-only cycles.
-- TypeScript `baseUrl` and `paths` are read from the consuming project's `tsconfig.json`. Unresolved internal aliases are errors, not silently skipped.
-- Unit test files may import their test framework without being mistaken for production domain code. Import restrictions elsewhere still apply.
+`allowPureExternal` lists explicitly reviewed pure third-party packages used in domain/model/application/pure shared code; it is **not** a blanket exemption for React or HTTP. The checker does not prove that an allowed external package is pure.
 
-This checker implements practical rules for conventional `src/` layouts; it is not a full security sandbox, semantic proof or substitute for production typechecking, vulnerability auditing and a comprehensive dependency graph.
+`allowCrossModule` only permits eligible UI, infrastructure, API and composition importers to consume sibling **public entry points**. Domain, model and application layers cannot depend on another business module's public barrel merely because an exception exists.
 
+## Avoid circular "generic" services
 
-## Important cross-module and declaration-file restrictions
+A generic `shared/analytics` helper must not import an Order type to format an event. Instead, keep primitive analytics transport in shared and an Order-specific adapter inside orders/infrastructure; compose them at the application boundary. The same pattern applies to logging, notification payloads, permissions and API transport. See [ADR 0003](decisions/0003-generic-services.md).
 
-- Pure `domain/`, `model/` and `application/` modules **cannot import another module's public barrel**, even when `allowCrossModule` contains an exception. Use route/app orchestration or move stable concepts into an independently owned, pure contract.
-- `allowCrossModule` permits deliberate imports only by eligible UI, infrastructure, API, or module-composition code through the destination module's declared public API.
-- Circular dependencies **across modules** are rejected, including cycles that contain only type imports. Intra-module type-only cycles are warnings for review. Runtime cycles always fail.
-- Source-owned `.d.ts` declarations and `.mjs`/`.cjs` modules are included in the graph. TypeScript import-equals references are also collected.
+## Scope of enforcement
 
-These restrictions take precedence over the more general discussion of type-only cycles above.
-
-## Full pure-layer dependency rules
-
-The static checker now restricts `domain/`, `model/`, `application/`, `shared/lib/` and `shared/domain/` to other pure code. In particular, these layers cannot import `shared/api/`, `shared/ui/`, `generated/`, or `testing/`. Pure shared subdirectories cannot import React, HTTP SDKs or other packages unless the precise dependency is explicitly reviewed in `allowPureExternal`.
-
-This is **direct dependency enforcement plus recursively checked pure shared source**. It does not prove global-variable purity (e.g., calls to `fetch` without importing a module), and explicit package allowlists must be audited by the adopter.
-
-The checker recognizes relative and `tsconfig.paths`/`baseUrl`-aliased static assets such as CSS, SVG and images. It checks that the target file exists, without treating it as a TypeScript dependency. It also flags resolved internal project aliases pointing **outside the scanned source root** instead of silently ignoring workspace code. For multi-package monorepos, configure project scopes and validate each relevant source root. Workspace exceptions must be documented rather than inferred.
-
-Literal dynamic import/require calls are analyzed even with additional arguments; computed runtime specifiers are not statically checked.
-
-## Asset boundaries and JavaScript entry points
-
-Although a CSS/image asset is not a TypeScript module, importing one is an architectural dependency. Pure `domain/`, `model/`, `application/`, `shared/lib/` and `shared/domain/` code must not import presentation assets. UI and application composition may import existing supported assets; missing local assets are reported as errors.
-
-When JavaScript is used, the checker recognizes module public entry points named `index.js`, `index.jsx`, `index.mjs`, and `index.cjs`, in addition to `index.ts`, `index.tsx`, `index.mts`, and `index.cts`. Self-barrel restrictions apply across these formats, and explicitly allowed sibling dependencies must still target a public entry point.
+Run `node tools/check-boundaries.cjs examples/react-app/src` from the repository root, or `npm run verify` after installation. The checker uses the TypeScript AST and module resolver, not a regex-only import scanner. It checks locally resolved source and asset edges, but cannot reason about nonliteral dynamic imports, runtime globals or semantic ownership of every external package. A production application may also adopt [dependency-cruiser](https://github.com/sverweij/dependency-cruiser) or equivalent tooling; continue to run typechecks, runtime tests, accessibility tests and security audits.

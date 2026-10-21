@@ -1,67 +1,43 @@
-# Instructions for coding agents
+# Agent instructions — React Architecture Guide
 
-This repository defines a React architecture standard; don't convert it into a large application starter without explicit instruction. Read [README.md](README.md) and [architecture](docs/architecture.md) before changing architecture.
+This repository documents a **pragmatic modular/feature-first React architecture**. Read [`docs/architecture.md`](docs/architecture.md), [`docs/dependency-rules.md`](docs/dependency-rules.md), and the relevant ADR before changing any implementation, checker rule or example.
 
-## Ownership and dependencies
+## Architecture and SOLID
 
-- The primary unit is `src/modules/<business-capability>/`. A module is not automatically a DDD bounded context.
-- `shared/` **must never** import `modules/`, `routes/` or `app/`, including type-only imports.
-- Sibling modules have no direct imports by default. Compose cross-module workflows at a route/app integration boundary. Any approved exception requires a documented, acyclic public contract.
-- Outside consumers import a module's deliberate `index.ts` public API. Internal code imports its implementation files directly, never through its own barrel.
-- Simple module: `model/` pure rules, `api/` transport and server-state helpers, `ui/` React components and hooks.
-- Complex module: replace simple mode with `domain/`, `application/`, `infrastructure/`, `ui/` when business complexity warrants it.
-- Domain has no React, fetch, browser, infrastructure, or generated DTO dependencies. Application use cases depend on domain and small consumed ports. Infrastructure implements ports. UI has no dependency on concrete adapters in complex mode.
-- Define interfaces where consumed (usually application), not because every concrete service "needs an interface."
-- Domain-specific analytics, notification formatting, route and permission mapping belongs in its owning module; generic transport remains business-agnostic.
-- Runtime cycles are forbidden. Investigate type-only cycles as conceptual coupling, not necessarily runtime failures.
-- Runtime-validate untrusted API responses. Frontend checks are never a substitute for trusted-server validation and authorization.
+- Own business behavior inside a cohesive `src/modules/<capability>/`. The default is simple `api/model/ui`; optional complex mode is `domain/application/infrastructure/ui`. Don't mix layouts or add empty folders to satisfy a template.
+- Use route/app composition for sibling module interactions. Allow one-way dependencies only when explicitly reviewed in `architecture.config.json`, through destination public `index.*` files. The checker rejects cross-module cycles, including type-only ones.
+- `shared/` never imports business modules, routes or application composition (including assets and types). `domain/`, `model/`, `application/`, `shared/lib/` and `shared/domain/` may depend only on their appropriate pure code and reviewed external pure packages, not UI, HTTP, generated DTOs or presentation assets.
+- Module internals never import their own barrel. External consumers use narrow public APIs; prefer type-only imports when no runtime dependency is required.
+- Favor consuming-layer ports, ordinary function arguments/props and small factories over unconditional repositories, inheritance or global DI frameworks.
+- Do not treat all modules as DDD bounded contexts or claim full Feature-Sliced Design compliance.
 
-## React-specific practice
+## React and application correctness
 
-- Use local state by default; derive rather than synchronize duplicative state.
-- Use Effects only for synchronization with external systems. Keep React-dependent hooks in UI-facing code.
-- Coordinate router loaders and server-state caches; query keys must reflect every input that changes data identity, including relevant tenant/user/source scope.
-- Use semantic, accessible components and write tests for observable behavior.
-- Do not insist on `useMemo` or `useCallback` everywhere; check compiler setup and measure.
+- Follow React's rules of hooks and the project's React/Compiler/router version; do not add blanket memoization.
+- Keep render functions pure. Effects synchronize with external systems, not ordinary derived state.
+- Validate untrusted server data at boundaries and enforce sensitive authorization server-side.
+- Query cache keys must include data ownership/source scope. Handle pending, empty, error, retry and success paths. Resetting a TanStack mutation observer does not cancel an in-flight request.
+- Use semantic accessible markup, stable field associations with `useId`, structured validation errors, and user-observable behavior tests.
+- The reference checkout prevents overlapping saves in one mounted UI, but production orders also need server-side authorization and idempotency.
 
-## Working safely and efficiently
+## Checker and testing
 
-- Identify ownership, dependencies, and framework conventions before adding files.
-- Implement and review coherent batches. Run local formatting, tests, typechecks and architecture checks before pushing.
-- Avoid small, repeated commits/pushes that trigger GitHub Actions. Draft PRs may be useful for complex iteration; do not omit required quality or security checks.
-- For changes here: `python3 scripts/validate_docs.py` and `cd examples/orders && npm test`.
-- Update decision records if the guidance itself changes; identify external-source facts separately from recommendations.
-- Do not claim a check passed unless it actually ran.
+The AST checker supports JS, JSX, MJS, CJS, TS, TSX, MTS, CTS, declaration files, import-equals, literal imports/re-exports and TypeScript path aliases. It enforces import ownership for source and local static assets, including JSON. Its limitations are in [the milestone documentation](docs/implementation-milestone.md); do not claim that it proves semantic SOLID compliance.
 
-## Review questions
+```sh
+npm ci
+npm --prefix examples/orders ci
+npm --prefix examples/react-app ci
+npm run verify
+npm audit
+npm --prefix examples/orders audit
+npm --prefix examples/react-app audit
+```
 
-Does this feature own the new logic? Are import directions acyclic? Is `shared` generic? Are interfaces or new layers justified? Does pure business code remain pure? Are API responses validated? Are React Effects, cache keys, accessible UI and tests correct? Has work been locally validated and remote pushes batched?
+Install dependencies and generate trustworthy registry-backed lockfiles before asserting full test coverage or merge readiness. If installation is blocked, report exactly which checks were and were not run.
 
-## Milestone 1 implementation
+## GitHub work
 
-The new [boundary checker](tools/check-boundaries.cjs) enforces critical rules against TypeScript import graphs. In this repository run `node --test tools/check-boundaries.test.cjs` and `node tools/check-boundaries.cjs examples/react-app/src`. The [React reference app](examples/react-app/README.md) demonstrates the rules; when deps are installed, run its typecheck, tests and build.
+Batch review findings, implement one coherent change, validate locally before pushing, and use a draft PR while checks are incomplete. Minimize GitHub Actions consumption **without removing necessary security, quality, or test checks**. Preserve existing code and user changes. Do not merge a draft PR on unverified assumptions.
 
-When applying these rules to a different repository, adapt [the copy-ready instructions](agents/react-architecture/AGENTS.snippet.md), don't assume this repository's AGENTS.md propagates automatically. Do not claim the React example is built or UI-tested until npm dependencies are available and checks have actually passed.
-
-## Findings remediation and package integrity
-
-Use `npm run verify` after dependencies are installed, and run `python3 scripts/validate_docs.py`. The checker examines third-party imports in pure domain/model/application and shared/lib or shared/domain files (test files excepted); explicitly allow trusted pure packages in the per-project `architecture.config.json` rather than silently bypassing the boundary. Reviewed module-to-module imports must use public APIs and explicit `allowCrossModule` entries; cycles remain forbidden.
-
-The React app is pinned to security-patched Vite/Vitest versions. Until a real npm lockfile is generated and build/tests/audit pass, do not mark PR #1 merge-ready.
-
-
-## Follow-up code review standard
-
-Do not claim that an approved cross-module exception permits domain/application dependencies on another module; such imports remain forbidden. Reject type-only cycles **across** modules and include source declaration files in import checks. Run `npm run verify` after installing dependencies, which also executes Markdown validator regression tests. The expanded milestone suite defines 42 architecture tests and 6 Markdown-validator tests. These counts describe committed tests, not a claim that the revised architecture suite has passed.
-
-## Additional mandatory enforcement
-
-Pure `domain/`, `model/`, `application/`, `shared/lib/`, and `shared/domain/` files must not directly import generated transport DTOs, HTTP clients, UI packages or other technical layers. Treat aliases resolving outside the validated source tree as unverified and fail with an explicit finding. Allow static asset imports only when the referenced file exists. Do not assume architecture rule enforcement is a substitute for `tsc`, runtime tests, or trusted-server authorization.
-
-## Single-flight saves and JavaScript public entry points
-
-The reference checkout must keep a save guard across product-selection remounts, and must not reset an in-flight TanStack Query mutation when customer input changes. Keep both input and submit controls disabled during an active save. Production checkout systems additionally require trusted-server idempotency and authorization.
-
-For modules written in JavaScript, explicit public APIs may use `index.js`, `index.jsx`, `index.mjs` or `index.cjs` (and TS/MTS/CTS counterparts). Internal imports through a module's own barrel remain forbidden.
-
-The checker disallows presentation asset imports from pure domain, model, application, and shared utility layers, even when the asset exists. Presentation/app composition may import existing CSS and other supported assets.
+Instructions here govern this **guide repository only**. To apply the standard elsewhere, adapt the [copy-ready snippet](agents/react-architecture/AGENTS.snippet.md) in that repository; nothing propagates automatically.
