@@ -11,7 +11,7 @@ node --test tools/check-boundaries.test.cjs
 node tools/check-boundaries.cjs examples/react-app/src
 ```
 
-Install `typescript` as a development dependency in real consumer apps. On developer machines with an existing global TypeScript CLI, the script can also locate the global compiler. Its nine fixture tests assert valid imports and invalid cross-module, deep import, shared leakage, layer, runtime cycle, self-barrel, and unresolved imports; source-only type cycles produce warnings.
+Install `typescript` as a development dependency in real consumer apps. On developer machines with an existing global TypeScript CLI, the script can also locate the global compiler. Its 29 fixture tests assert valid imports and invalid cross-module, deep import, shared leakage, layer, runtime cycle, self-barrel, and unresolved imports; source-only type cycles produce warnings.
 
 **Limitations:** dynamic computed imports cannot be statically resolved, semantic ownership cannot be proved by tooling, and this focused checker does not replace production tools such as dependency-cruiser, TypeScript compilation, ESLint/oxlint, or tests. It does not enforce every possible framework or folder convention. It assumes `src/` under one app and does not interpret path aliases without the corresponding `tsconfig`.
 
@@ -34,7 +34,19 @@ It intentionally uses an in-memory adapter rather than pretending to implement p
 
 ## Code review remediation — October 2026
 
-The next revision addresses the review's principal concerns: external dependency purity, Windows-safe path comparison and globally installed TypeScript discovery, TypeScript `verbatimModuleSyntax` runtime-import semantics, parsing syntax diagnostics and JSX, resolution of `baseUrl` and `paths` aliases, explicit one-way public-module exceptions, service-scoped TanStack Query keys, expanded regression fixtures, and a consolidated `npm run verify` command.
+The implementation addresses the review's principal concerns: external dependency purity, Windows-safe path comparison and globally installed TypeScript discovery, TypeScript `verbatimModuleSyntax` runtime-import semantics, parsing syntax diagnostics and JSX, resolution of `baseUrl` and `paths` aliases, explicit one-way public-module exceptions, service-scoped TanStack Query keys, expanded regression fixtures, and a consolidated `npm run verify` command.
 
 The React example uses Vite **7.3.7** and Vitest **4.1.12** based on published security patches. Pinning direct dependencies **does not** replace a complete `npm audit`, trusted lockfile, verified install, typecheck, UI tests and production build. The authoring environment cannot contact npm's registry; the lockfiles and runtime validation **remain required before merge**. Keep PR #1 in draft until these steps are completed.
 
+
+## Follow-up review corrections
+
+The checker now visits declaration-file dependencies, JavaScript `.mjs`/`.cjs`, and TypeScript `import = require(...)`. It rejects cross-module imports originating from pure domain/model/application layers, even if a public API exception has been granted. Type-only cycles spanning two or more modules fail the architecture gate; purely intra-module type cycles remain warnings.
+
+The architecture test suite now contains **29 top-level tests**, and the Markdown validator has **6 negative/positive tests** for fence syntax and local link integrity.
+
+The React example clears stale checkout messages on selection changes, validates customer input before mutation, and connects validation feedback to the input for assistive technology. Its query-cache scope remains per service instance.
+
+### Remaining external prerequisite
+
+Dependencies were not available from npm in this authoring environment. Actual `package-lock.json` files and `npm ci` / `npm audit` / Vite build / Vitest runtime checks must be generated and run in a network-enabled environment before marking the draft PR merge-ready. Do not substitute fabricated dependency resolution or describe static checks as equivalent to full runtime validation.

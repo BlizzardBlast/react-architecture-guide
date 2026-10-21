@@ -49,3 +49,7 @@ Use `npm run verify` after dependencies are installed, and run `python3 scripts/
 
 The React app is pinned to security-patched Vite/Vitest versions. Until a real npm lockfile is generated and build/tests/audit pass, do not mark PR #1 merge-ready.
 
+
+## Follow-up code review standard
+
+Do not claim that an approved cross-module exception permits domain/application dependencies on another module; such imports remain forbidden. Reject type-only cycles **across** modules and include source declaration files in import checks. Run `npm run verify` after installing dependencies, which also executes Markdown validator regression tests. The intended milestone suite has 29 architecture tests and 6 Markdown checks.

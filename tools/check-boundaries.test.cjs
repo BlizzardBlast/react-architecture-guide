@@ -109,9 +109,9 @@ test('syntax errors in TSX are surfaced', () => withFixture({
 }, result => assert.match(result.errors.join(' '), /syntax-error/)));
 test('an explicitly reviewed one-way public API exception can be allowed', () => withFixture({
   ...base, '../architecture.config.json': '{"allowCrossModule":{"payments":["orders"]}}',
-  'modules/payments/application/pay.ts': 'import type { Order } from "../../orders/index"; export type P = Order;',
+  'modules/payments/ui/pay.ts': 'import type { Order } from "../../orders/index"; export type P = Order;',
   'modules/orders/index.ts': 'export type { Order } from "./domain/order";',
-}, result => assert.equal(result.errors.filter(e => /sibling-module-dependency/.test(e)).length, 0)));
+}, result => assert.deepEqual(result.errors, [])));
 test('without the explicit exception, public sibling imports are denied', () => withFixture({
   ...base,
   'modules/payments/application/pay.ts': 'import type { Order } from "../../orders/index"; export type P = Order;',
@@ -136,3 +136,48 @@ test('paths wildcard cannot mask a forbidden external import', () => withFixture
   '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"*":["*"]}}}',
   'modules/orders/domain/order.ts': 'import { useEffect } from "react"; export const f = useEffect;',
 }, result => assert.match(result.errors.join(' '), /pure-layer-external-package|unresolved internal import/)));
+
+test('reject shared coupling to domain declaration files', () => withFixture({
+  'shared/ui/button.ts': 'import type { Order } from "../../modules/orders/order"; export type X = Order;',
+  'modules/orders/order.d.ts': 'export interface Order { id: string; }',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('scan .mjs and .cjs import edges rather than skipping files', () => withFixture({
+  'shared/unsafe.mjs': 'import { x } from "../modules/orders/index.mjs"; export const y = x;',
+  'modules/orders/index.mjs': 'export const x = 1;',
+  'shared/unsafe.cjs': 'const thing = require("../modules/orders/index.cjs"); module.exports = thing;',
+  'modules/orders/index.cjs': 'module.exports = { id: 1 };',
+}, result => {
+  assert.equal(result.count, 4);
+  assert.equal(result.errors.filter(e => /shared-must-be-independent/.test(e)).length, 2);
+}));
+
+test('detect import equals require references in TypeScript', () => withFixture({
+  'shared/ui/button.ts': 'import Order = require("../../modules/orders/index"); export const v = Order;',
+  'modules/orders/index.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('cross-module exceptions never permit domain or application imports', () => withFixture({
+  '../architecture.config.json': '{"allowCrossModule":{"payments":["orders"]}}',
+  'modules/orders/index.ts': 'export { component } from "./ui/component";',
+  'modules/orders/ui/component.ts': 'export const component = 1;',
+  'modules/payments/domain/total.ts': 'import { component } from "../../orders"; export const x = component;',
+  'modules/payments/application/pay.ts': 'import type { component } from "../../orders"; export type T = typeof component;',
+}, result => {
+  assert.equal(result.errors.filter(e => /cross-module-pure-layer/.test(e)).length, 2);
+}));
+
+test('reject approved type-only cycles that span modules', () => withFixture({
+  '../architecture.config.json': '{"allowCrossModule":{"orders":["payments"],"payments":["orders"]}}',
+  'modules/orders/index.ts': 'import type { P } from "../payments"; export type O = { p?: P };',
+  'modules/payments/index.ts': 'import type { O } from "../orders"; export type P = { o?: O };',
+}, result => assert.match(result.errors.join(' '), /cross-module-cycle/)));
+
+test('do not reject independent intra-module type-only cycles', () => withFixture({
+  'modules/orders/model/a.ts': 'import type { B } from "./b"; export type A = { b?: B };',
+  'modules/orders/model/b.ts': 'import type { A } from "./a"; export type B = { a?: A };',
+}, result => { assert.deepEqual(result.errors, []); assert.match(result.warnings.join(' '), /source-level-cycle/); }));
+
+test('reject an empty source tree rather than reporting a misleading pass', () => withFixture({
+  'ignored.md': '# Empty project',
+}, result => assert.match(result.errors.join(' '), /no-source-files/)));

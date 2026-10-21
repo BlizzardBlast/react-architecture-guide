@@ -36,3 +36,12 @@ The documentation checker validates only local markdown targets and code-fence b
 Batch research, code changes and review findings; validate locally; push once per coherent change. Do not repeatedly trigger GitHub Actions unnecessarily, but preserve all required checks.
 
 Do not claim SOLID compliance or tests passed from folder appearance alone.
+
+## Additional boundary-checker regressions
+
+- [ ] Imports resolving to source-owned `.d.ts` files do not bypass cross-module rules.
+- [ ] `.mjs`, `.cjs`, and TypeScript `import = require` syntax are covered.
+- [ ] Approved cross-module public API exceptions do not weaken domain/application purity.
+- [ ] Type-only cycles crossing module boundaries fail; intra-module type-only cycles are reported separately.
+- [ ] Checkout mutation feedback is scoped to its selection and customer-name errors are associated accessibly.
+- [ ] The documentation validator rejects mismatched Markdown fences.

@@ -34,3 +34,7 @@ Each independently created `OrdersService` has a unique `scopeId` used in the Re
 
 Direct dependencies pin Vite 7.3.7 and Vitest 4.1.12 (published patched releases). This environment cannot fetch npm registry dependencies; therefore **do not call the React app verified** until `npm install`, `npm run verify`, and `npm audit` complete successfully. Commit a genuinely generated `package-lock.json`; never fabricate a partial lockfile.
 
+
+## Accessibility and checkout behavior
+
+Customer-name validation is applied before making a mutation and announced through a linked error message (`aria-invalid` and `aria-describedby`). Editing the field clears the error. Changing the selected product begins a fresh checkout form and clears the previous product's success or error status while order history remains scoped to the active service's cache identity.

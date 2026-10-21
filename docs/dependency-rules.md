@@ -79,3 +79,12 @@ The executable checker supports an optional `architecture.config.json` file alon
 
 This checker implements practical rules for conventional `src/` layouts; it is not a full security sandbox, semantic proof or substitute for production typechecking, vulnerability auditing and a comprehensive dependency graph.
 
+
+## Important cross-module and declaration-file restrictions
+
+- Pure `domain/`, `model/` and `application/` modules **cannot import another module's public barrel**, even when `allowCrossModule` contains an exception. Use route/app orchestration or move stable concepts into an independently owned, pure contract.
+- `allowCrossModule` permits deliberate imports only by eligible UI, infrastructure, API, or module-composition code through the destination module's declared public API.
+- Circular dependencies **across modules** are rejected, including cycles that contain only type imports. Intra-module type-only cycles are warnings for review. Runtime cycles always fail.
+- Source-owned `.d.ts` declarations and `.mjs`/`.cjs` modules are included in the graph. TypeScript import-equals references are also collected.
+
+These restrictions take precedence over the more general discussion of type-only cycles above.

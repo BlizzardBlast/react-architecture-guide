@@ -7,8 +7,18 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execSync } = require('node:child_process');
+const { createRequire } = require('node:module');
 
-function loadTypeScript() {
+function loadTypeScript(projectDir = process.argv[2]) {
+  // Resolve from the consuming application first, not the directory containing this tool.
+  if (projectDir && fs.existsSync(projectDir)) {
+    try {
+      const consumerRequire = createRequire(path.join(path.resolve(projectDir), '__architecture_checker__.cjs'));
+      return consumerRequire('typescript');
+    } catch (error) {
+      if (error.code !== 'MODULE_NOT_FOUND') throw error;
+    }
+  }
   try { return require('typescript'); }
   catch {
     // Allows local smoke tests on machines with a globally installed compiler.
@@ -18,7 +28,7 @@ function loadTypeScript() {
   }
 }
 const ts = loadTypeScript();
-const sourceExt = /\.(?:tsx?|jsx?|mts|cts)$/;
+const sourceExt = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 function walk(root) {
   if (!fs.existsSync(root)) throw new Error(`Source directory not found: ${root}`);
   const result = [];
@@ -26,7 +36,7 @@ function walk(root) {
     if (['node_modules', 'dist', 'coverage', '.git'].includes(item.name)) continue;
     const full = path.join(root, item.name);
     if (item.isDirectory()) result.push(...walk(full));
-    else if (sourceExt.test(item.name) && !/\.d\.[cm]?ts$/.test(item.name)) result.push(full);
+    else if (sourceExt.test(item.name)) result.push(full);
   }
   return result;
 }
@@ -57,6 +67,10 @@ function runtimeImport(node, options) {
   return true;
 }
 function imports(node, list, options) {
+  if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+    const spec = literalString(node.moduleReference.expression);
+    if (spec) list.push({ spec, runtime: !node.isTypeOnly, line: node.getStart() });
+  }
   if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
     const spec = literalString(node.moduleSpecifier);
     if (spec) list.push({ spec, runtime: runtimeImport(node, options), line: node.getStart() });
@@ -106,6 +120,7 @@ function check(srcDir) {
   const options = configFor(path.dirname(root)).options;
   const policy = loadBoundaryConfig(path.dirname(root));
   const files = walk(root).map(f => path.resolve(f));
+  if (files.length === 0) errors.push('no-source-files: No supported source files found');
   const known = new Set(files);
   const edges = new Map(files.map(f => [f, []]));
   for (const file of files) {
@@ -145,6 +160,10 @@ function check(srcDir) {
       const desc = `${source.relative} -> ${dest.relative}`;
       if (source.layer === 'shared' && dest.layer !== 'shared') errors.push(`shared-must-be-independent: ${desc}`);
       if (source.layer === 'module' && dest.layer === 'module' && source.module !== dest.module) {
+        // Pure/application layers must not depend on another module's potentially UI-facing barrel.
+        if (['domain', 'model', 'application'].includes(source.part)) {
+          errors.push(`cross-module-pure-layer: ${desc}`);
+        }
         const exceptions = policy.allowCrossModule[source.module] || [];
         if (!Array.isArray(exceptions) || !exceptions.includes(dest.module) ||
             !['index.ts', 'index.tsx'].some(name => dest.relative === `modules/${dest.module}/${name}`)) {
@@ -196,7 +215,15 @@ function check(srcDir) {
     return result;
   }
   for (const cyc of detect(true)) errors.push(`runtime-cycle: ${cyc}`);
-  if (!errors.some(x => x.startsWith('runtime-cycle'))) for (const cyc of detect(false)) warnings.push(`source-level-cycle (may be type-only): ${cyc}`);
+  for (const cyc of detect(false)) {
+    const modules = new Set(cyc.split(' -> ').map(f => {
+      const match = f.match(/^modules\/([^/]+)\//);
+      return match ? match[1] : null;
+    }).filter(Boolean));
+    if (modules.size > 1) errors.push(`cross-module-cycle: ${cyc}`);
+    else if (!errors.some(x => x.startsWith('runtime-cycle:') && x.includes(cyc)))
+      warnings.push(`source-level-cycle (may be type-only): ${cyc}`);
+  }
   return { errors: [...new Set(errors)], warnings: [...new Set(warnings)], count: files.length };
 }
 

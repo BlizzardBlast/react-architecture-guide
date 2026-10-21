@@ -107,3 +107,9 @@ The boundary checker supports optional `architecture.config.json` project except
 
 **Network limitation:** secure package versions were updated, but a trustworthy npm lockfile could not be generated in this isolated environment. Run `npm install --package-lock-only --ignore-scripts` in the project root and each example on a network-enabled development machine, review the dependency audit, commit the generated files and complete all checks *before merging*. No fabricated or partial lockfiles are committed.
 
+
+## Final review hardening
+
+The checker includes source declaration files, ESM/CommonJS JavaScript extensions, TypeScript import-equals statements and stronger cross-module rules. Checkout selection changes reset earlier mutation feedback and field validation is announced accessibly. The documentation checker tests matched fenced blocks and local links.
+
+For a fresh machine, generate lockfiles from the actual npm registry (not by hand) before merging the PR. Install at the root, in `examples/orders` and in `examples/react-app`, audit dependencies, run `npm run verify`, and smoke-test the app in a browser. Until this is completed, the reference app is intentionally not represented as fully verified.

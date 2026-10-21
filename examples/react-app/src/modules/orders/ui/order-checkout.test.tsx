@@ -14,7 +14,10 @@ describe('OrderCheckout', () => {
     renderCheckout({ scopeId: 'invalid-test', listOrders: async () => [], placeOrder });
     await userEvent.click(screen.getByRole('button', { name: /place order/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/customer name/i);
-    expect(placeOrder).toHaveBeenCalledOnce();
+    expect(placeOrder).not.toHaveBeenCalled();
+    const field = screen.getByRole('textbox', { name: /customer name/i });
+    expect(field).toHaveAttribute('aria-invalid', 'true');
+    expect(field).toHaveAttribute('aria-describedby', 'customer-error');
   });
   it('creates an order and refreshes history', async () => {
     const orders: Array<{ id: string; customerName: string; productId: string; priceCents: number }> = [];
@@ -63,4 +66,37 @@ it('handles history errors and retry without leaking an exception', async () => 
   expect(await screen.findByRole('alert')).toHaveTextContent(/couldn't load orders/i);
   await userEvent.click(screen.getByRole('button', { name: /retry/i }));
   expect(await screen.findByText(/no orders yet/i)).toBeInTheDocument();
+});
+
+it('clears successful checkout feedback when another product is selected', async () => {
+  const service: OrdersService = {
+    scopeId: 'selection-switch',
+    listOrders: async () => [],
+    placeOrder: async draft => ({ ...draft, id: 'saved-1' }),
+  };
+  const first = { productId: 'tea', productName: 'Green tea', priceCents: 250 };
+  const second = { productId: 'coffee', productName: 'Coffee', priceCents: 375 };
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { rerender } = render(
+    <QueryClientProvider client={client}><OrderCheckout service={service} selection={first} /></QueryClientProvider>,
+  );
+  await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
+  await userEvent.click(screen.getByRole('button', { name: /place order/i }));
+  expect(await screen.findByText('Order saved.')).toBeInTheDocument();
+  rerender(
+    <QueryClientProvider client={client}><OrderCheckout service={service} selection={second} /></QueryClientProvider>,
+  );
+  expect(screen.queryByText('Order saved.')).not.toBeInTheDocument();
+  expect(screen.getByText(/selected: coffee/i)).toBeInTheDocument();
+});
+it('clears field-level error when the user corrects the input', async () => {
+  const placeOrder = vi.fn();
+  renderCheckout({ scopeId: 'aria-reset', listOrders: async () => [], placeOrder });
+  await userEvent.click(screen.getByRole('button', { name: /place order/i }));
+  const field = screen.getByRole('textbox', { name: /customer name/i });
+  expect(field).toHaveAttribute('aria-invalid', 'true');
+  await userEvent.type(field, 'Alice');
+  expect(field).toHaveAttribute('aria-invalid', 'false');
+  expect(field).not.toHaveAttribute('aria-describedby');
+  expect(screen.queryByText(/enter a customer name/i)).not.toBeInTheDocument();
 });
