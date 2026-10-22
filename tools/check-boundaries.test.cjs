@@ -765,3 +765,75 @@ test('multi-target Sass imports and computed load-css cannot bypass stylesheet o
     'modules/orders/ui/private.css': '.private { color: red }',
   }, result => assert.match(result.errors.join(' '), /unsupported-css-dependency/));
 });
+
+test('a stylesheet api-to-ui edge uses the same direction rules as TypeScript', () => withFixture({
+  'modules/orders/api/request.ts': 'import "./request.css"; export const request = 1;',
+  'modules/orders/api/request.css': '@import "../ui/form.css";',
+  'modules/orders/ui/form.css': '.order { color: red }',
+}, result => assert.match(result.errors.join(' '), /api-imports-ui/)));
+
+test('a stylesheet infrastructure-to-ui edge is rejected by the shared layer policy', () => withFixture({
+  'modules/orders/infrastructure/client.ts': 'import "./client.css"; export const client = 1;',
+  'modules/orders/infrastructure/client.css': '@import "../ui/form.css";',
+  'modules/orders/ui/form.css': '.order { color: red }',
+}, result => assert.match(result.errors.join(' '), /infrastructure-import/)));
+
+test('same-module UI stylesheet imports remain permitted', () => withFixture({
+  'modules/orders/ui/panel.tsx': 'import "./panel.css"; export const panel = 1;',
+  'modules/orders/ui/panel.css': '@import "./tokens.css";',
+  'modules/orders/ui/tokens.css': ':root { --accent: red }',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Less line comments do not invent cross-module imports', () => withFixture({
+  'shared/ui/widget.ts': 'import "./widget.less"; export const widget = 1;',
+  'shared/ui/widget.less': '// @import "../../modules/orders/ui/private.less";\\n.widget { color: red }',
+  'modules/orders/ui/private.less': '.private { color: red }',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Less reference and inline imports within ownership are valid', () => withFixture({
+  'shared/ui/widget.ts': 'import "./widget.less"; export const widget = 1;',
+  'shared/ui/widget.less': '@import (reference, optional) "./tokens.less"; @import (inline) "./base.css";',
+  'shared/ui/tokens.less': '@accent: red;',
+  'shared/ui/base.css': '.base { color: red }',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Less reference and inline imports still reject private business dependencies', () => withFixture({
+  'shared/ui/widget.ts': 'import "./widget.less"; export const widget = 1;',
+  'shared/ui/widget.less': '@import (reference) "../../modules/orders/ui/private.less";',
+  'modules/orders/ui/private.less': '.private { color: red }',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('image-set quoted alternatives cannot bypass stylesheet ownership', () => withFixture({
+  'shared/ui/widget.ts': 'import "./widget.css"; export const widget = 1;',
+  'shared/ui/widget.css': '.widget { background: image-set("../../modules/orders/ui/private.svg" 2x); }',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('valid same-owned image-set choices remain legal', () => withFixture({
+  'shared/ui/widget.ts': 'import "./widget.css"; export const widget = 1;',
+  'shared/ui/widget.css': '.widget { background: image-set("./a.svg" 1x, url("./b.svg") 2x); }',
+  'shared/ui/a.svg': '<svg/>',
+  'shared/ui/b.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('unresolved image-set expressions are reported instead of silently accepted', () => withFixture({
+  'shared/ui/widget.ts': 'import "./widget.css"; export const widget = 1;',
+  'shared/ui/widget.css': '.widget { background: image-set(var(--asset) 1x); }',
+}, result => assert.match(result.errors.join(' '), /unsupported-css-image-set/)));
+
+test('missing optional Less imports are permitted without bypassing existing-file ownership', () => {
+  withFixture({
+    'shared/ui/view.ts': 'import "./view.less"; export const view = 1;',
+    'shared/ui/view.less': '@import (optional) "./missing.less";',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    'shared/ui/view.ts': 'import "./view.less"; export const view = 1;',
+    'shared/ui/view.less': '@import (optional) "../../modules/orders/ui/private.less";',
+    'modules/orders/ui/private.less': '.private { color: red }',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('Sass string interpolation cannot masquerade as a harmless fragment', () => withFixture({
+  'shared/ui/view.ts': 'import "./view.scss"; export const view = 1;',
+  'shared/ui/view.scss': '.view { background: url("#{${asset}}/private.svg"); }',
+}, result => assert.match(result.errors.join(' '), /unsupported-css-dependency/)));

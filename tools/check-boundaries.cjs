@@ -347,6 +347,71 @@ function verifyViteAliases(projectDir, policy, errors) {
 }
 
 
+
+// One ownership/layer policy for script, stylesheet and static-asset edges.
+// Only the resolution mechanism and runtime cycle semantics differ.
+function checkOwnedDependency(source, dest, policy, errors, { asset = false, isTest = false, stylesheet = false } = {}) {
+  const desc = `${source.relative} -> ${dest.relative}`;
+  const pureCode = isPureModule(source) ||
+    (source.layer === 'shared' && isPureShared(source.relative));
+      if (source.layer === 'shared' && dest.layer !== 'shared') errors.push(`shared-must-be-independent: ${desc}`);
+      // Domain/model/application and pure shared code may depend on pure shared
+      // primitives only, never generated API clients, UI, HTTP or test setup.
+      if (pureCode && !(source.layer === 'shared' && isTest)) {
+        if (dest.layer === 'shared' && !isPureShared(dest.relative)) {
+          errors.push(`pure-layer-imports-technical-shared: ${desc}`);
+        }
+        if (dest.layer === 'generated' || dest.layer === 'testing' ||
+            (dest.layer === 'shared' && !isPureShared(dest.relative))) {
+          if (dest.layer !== 'shared') errors.push(`pure-layer-imports-technical: ${desc}`);
+        }
+      }
+      if (source.layer === 'module' && dest.layer === 'module' && source.module !== dest.module) {
+        // Pure/application layers must not depend on another module's potentially UI-facing barrel.
+        if (['domain', 'model', 'application'].includes(source.part)) {
+          errors.push(`cross-module-pure-layer: ${desc}`);
+        }
+        const exceptions = Object.hasOwn(policy.allowCrossModule, source.module)
+          ? policy.allowCrossModule[source.module] : [];
+        if (!Array.isArray(exceptions) || !exceptions.includes(dest.module) ||
+            (asset || !isPublicEntrypoint(dest))) {
+          errors.push(`sibling-module-dependency: ${desc}`);
+        }
+      }
+      if (source.layer === 'module' && dest.layer === 'module' && source.module === dest.module) {
+        if (!asset && isSelfBarrel(source, dest)) errors.push(`no-self-barrel: ${desc}`);
+        const part = source.part, targetPart = dest.part;
+        if (part === 'domain' && targetPart !== 'domain') errors.push(`pure-domain-import: ${desc}`);
+        if (part === 'application' && !['domain', 'application'].includes(targetPart)) errors.push(`application-import: ${desc}`);
+        if (part === 'infrastructure' && !['application', 'domain', 'infrastructure'].includes(targetPart)) errors.push(`infrastructure-import: ${desc}`);
+        if (part === 'ui' && targetPart === 'infrastructure') errors.push(`ui-imports-infrastructure: ${desc}`);
+        if (part === 'model' && !['model'].includes(targetPart)) errors.push(`pure-model-import: ${desc}`);
+        if (part === 'api' && targetPart === 'ui') errors.push(`api-imports-ui: ${desc}`);
+        if (['api', 'model'].includes(part) &&
+            ['domain', 'application', 'infrastructure'].includes(targetPart)) {
+          errors.push(`mixed-mode-import: ${desc}`);
+        }
+        if (['domain', 'application', 'infrastructure'].includes(part) &&
+            ['api', 'model'].includes(targetPart)) {
+          errors.push(`mixed-mode-import: ${desc}`);
+        }
+      }
+      if (dest.layer === 'module' && source.layer !== 'module' && source.layer !== 'app' && source.layer !== 'routes' && source.layer !== 'shared') {
+        errors.push(`invalid-external-module-use: ${desc}`);
+      }
+      if (dest.layer === 'module' && source.layer !== 'module') {
+        const allowedPublic = !asset && isPublicEntrypoint(dest);
+        if (!allowedPublic && !['testing'].includes(source.layer)) errors.push(`deep-module-import: ${desc}`);
+      }
+      // Pure-layer checks above apply consistently to domain, model, application
+      // and transitively pure shared/lib and shared/domain modules.
+      if (source.layer === 'routes' && dest.layer === 'app') errors.push(`routes-import-app: ${desc}`);
+      if (source.layer === 'module' && ['app', 'routes'].includes(dest.layer)) errors.push(`module-imports-composition: ${desc}`);
+  // Source imports already distinguish pure JSON from presentation assets.
+  // Only stylesheet-originated dependencies need this additional asset guard.
+  if (stylesheet && pureCode && !isTest) errors.push(`pure-layer-static-asset: ${desc}`);
+}
+
 function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
   function scanDir(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -363,11 +428,20 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
       return;
     }
     const source = category(physicalFile, physicalRoot);
-    const scanned = scanCssDependencies(fs.readFileSync(logicalFile, 'utf8'));
+    const scanned = scanCssDependencies(fs.readFileSync(logicalFile, 'utf8'), { filename: logicalFile });
     for (const issue of scanned.errors) errors.push(issue + ': ' + source.relative);
     for (const ref of scanned.references) {
       const spec = fileSpecifier(ref.spec);
-      if (!spec || spec.startsWith('#') || /^(?:data:|https?:|\/\/|sass:)/i.test(spec)) continue;
+      if (!spec || /^(?:data:|https?:|\/\/|sass:)/i.test(spec)) continue;
+      if (/[#@]\{|\$\{/.test(ref.spec)) {
+        errors.push('unsupported-css-dependency: interpolated reference ' + source.relative + ' -> ' + ref.spec);
+        continue;
+      }
+      if (spec.startsWith('#')) {
+        if (ref.kind === 'url' && /^#[\w-]+$/.test(spec)) continue;
+        errors.push('unsupported-css-dependency: unresolved hash reference ' + source.relative + ' -> ' + ref.spec);
+        continue;
+      }
       const projectDir = path.dirname(root);
       const alias = resolveViteAlias(spec, policy.viteAliases, projectDir);
       const candidates = [];
@@ -407,6 +481,7 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
       }
       const found = expanded.find(candidate => fs.existsSync(candidate) && fs.statSync(candidate).isFile());
       if (!found) {
+        if (ref.optional) continue; // Valid Less (optional) when the file is absent.
         errors.push('missing-static-asset: ' + source.relative + ' -> ' + ref.spec);
         continue;
       }
@@ -416,22 +491,7 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
         continue;
       }
       const dest = category(actual, physicalRoot);
-      const desc = source.relative + ' -> ' + dest.relative;
-      if (source.layer === 'shared' && dest.layer !== 'shared') errors.push('shared-must-be-independent: ' + desc);
-      if (source.layer === 'module' && dest.layer === 'module' && source.module !== dest.module) {
-        errors.push('sibling-module-dependency: ' + desc);
-      }
-      if (source.layer === 'module' && ['app', 'routes'].includes(dest.layer)) {
-        errors.push('module-imports-composition: ' + desc);
-      }
-      if (source.layer === 'routes' && dest.layer === 'app') errors.push('routes-import-app: ' + desc);
-      if (dest.layer === 'module' && source.layer !== 'module' && source.layer !== 'shared') {
-        errors.push('deep-module-import: ' + desc);
-      }
-      if (source.layer === 'module' && ['domain', 'model', 'application'].includes(source.part) ||
-          source.layer === 'shared' && isPureShared(source.relative)) {
-        errors.push('pure-layer-static-asset: ' + desc);
-      }
+      checkOwnedDependency(source, dest, policy, errors, { asset: true, stylesheet: true });
     }
   }
   scanDir(root);
@@ -579,58 +639,7 @@ function check(srcDir) {
         errors.push(`outside-source-import: ${source.relative} -> ${dep.spec}`);
         continue;
       }
-      if (source.layer === 'shared' && dest.layer !== 'shared') errors.push(`shared-must-be-independent: ${desc}`);
-      // Domain/model/application and pure shared code may depend on pure shared
-      // primitives only, never generated API clients, UI, HTTP or test setup.
-      if (pureCode && !(source.layer === 'shared' && isTest)) {
-        if (dest.layer === 'shared' && !isPureShared(dest.relative)) {
-          errors.push(`pure-layer-imports-technical-shared: ${desc}`);
-        }
-        if (dest.layer === 'generated' || dest.layer === 'testing' ||
-            (dest.layer === 'shared' && !isPureShared(dest.relative))) {
-          if (dest.layer !== 'shared') errors.push(`pure-layer-imports-technical: ${desc}`);
-        }
-      }
-      if (source.layer === 'module' && dest.layer === 'module' && source.module !== dest.module) {
-        // Pure/application layers must not depend on another module's potentially UI-facing barrel.
-        if (['domain', 'model', 'application'].includes(source.part)) {
-          errors.push(`cross-module-pure-layer: ${desc}`);
-        }
-        const exceptions = policy.allowCrossModule[source.module] || [];
-        if (!Array.isArray(exceptions) || !exceptions.includes(dest.module) ||
-            !isPublicEntrypoint(dest)) {
-          errors.push(`sibling-module-dependency: ${desc}`);
-        }
-      }
-      if (source.layer === 'module' && dest.layer === 'module' && source.module === dest.module) {
-        if (isSelfBarrel(source, dest)) errors.push(`no-self-barrel: ${desc}`);
-        const part = source.part, targetPart = dest.part;
-        if (part === 'domain' && targetPart !== 'domain') errors.push(`pure-domain-import: ${desc}`);
-        if (part === 'application' && !['domain', 'application'].includes(targetPart)) errors.push(`application-import: ${desc}`);
-        if (part === 'infrastructure' && !['application', 'domain', 'infrastructure'].includes(targetPart)) errors.push(`infrastructure-import: ${desc}`);
-        if (part === 'ui' && targetPart === 'infrastructure') errors.push(`ui-imports-infrastructure: ${desc}`);
-        if (part === 'model' && !['model'].includes(targetPart)) errors.push(`pure-model-import: ${desc}`);
-        if (part === 'api' && targetPart === 'ui') errors.push(`api-imports-ui: ${desc}`);
-        if (['api', 'model'].includes(part) &&
-            ['domain', 'application', 'infrastructure'].includes(targetPart)) {
-          errors.push(`mixed-mode-import: ${desc}`);
-        }
-        if (['domain', 'application', 'infrastructure'].includes(part) &&
-            ['api', 'model'].includes(targetPart)) {
-          errors.push(`mixed-mode-import: ${desc}`);
-        }
-      }
-      if (dest.layer === 'module' && source.layer !== 'module' && source.layer !== 'app' && source.layer !== 'routes' && source.layer !== 'shared') {
-        errors.push(`invalid-external-module-use: ${desc}`);
-      }
-      if (dest.layer === 'module' && source.layer !== 'module') {
-        const allowedPublic = isPublicEntrypoint(dest);
-        if (!allowedPublic && !['testing'].includes(source.layer)) errors.push(`deep-module-import: ${desc}`);
-      }
-      // Pure-layer checks above apply consistently to domain, model, application
-      // and transitively pure shared/lib and shared/domain modules.
-      if (source.layer === 'routes' && dest.layer === 'app') errors.push(`routes-import-app: ${desc}`);
-      if (source.layer === 'module' && ['app', 'routes'].includes(dest.layer)) errors.push(`module-imports-composition: ${desc}`);
+      checkOwnedDependency(source, dest, policy, errors, { asset: localAsset, isTest });
       // ?raw and ?url treat source files as bytes/data, not executable imports.
       // ?worker imports are bundled entrypoints and must remain graph edges.
       const query = dep.spec.slice(filesystemSpec.length);

@@ -3,12 +3,19 @@
 // Deliberately conservative static stylesheet dependency scanner. Each
 // @import/@use/@forward and url() must be literal, or validation fails.
 // Projects with custom PostCSS/preprocessor plugins must also verify output.
-function scanCssDependencies(css) {
+function scanCssDependencies(css, { filename = 'style.css' } = {}) {
+  const lineComments = /\.(?:scss|sass|less)$/i.test(filename);
   const references = [];
   const errors = [];
-  let clean = '', quote = null, inComment = false, escape = false;
+  let clean = '', quote = null, inComment = false, lineComment = false;
+  let escape = false, urlDepth = 0;
   for (let i = 0; i < css.length; i++) {
     const c = css[i], n = css[i + 1];
+    if (lineComment) {
+      clean += c === '\n' ? '\n' : ' ';
+      if (c === '\n') lineComment = false;
+      continue;
+    }
     if (inComment) {
       if (c === '*' && n === '/') { clean += '  '; i++; inComment = false; }
       else clean += c === '\n' ? '\n' : ' ';
@@ -22,7 +29,15 @@ function scanCssDependencies(css) {
       continue;
     }
     if (c === '/' && n === '*') { clean += '  '; i++; inComment = true; continue; }
+    // In SCSS/Sass/Less, // begins a line comment, except in url(//cdn...)
+    // and unquoted URL schemes. Plain CSS does not have // comments.
+    if (lineComments && c === '/' && n === '/' && urlDepth === 0 &&
+        clean.at(-1) !== ':') {
+      clean += '  '; i++; lineComment = true; continue;
+    }
     if (c === '"' || c === "'") quote = c;
+    if (c === '(' && /\burl\s*$/i.test(clean)) urlDepth++;
+    else if (c === ')' && urlDepth) urlDepth--;
     clean += c;
   }
   // Mask strings so quoted content cannot introduce a fake @import or url().
@@ -69,6 +84,28 @@ function scanCssDependencies(css) {
   for (const m of mask.matchAll(/@(import|use|forward)\b/gi)) {
     let cursor = m.index + m[0].length;
     while (/\s/.test(clean[cursor] || '') && cursor < clean.length) cursor++;
+    const directive = m[1].toLowerCase();
+    let optional = false;
+    if (directive === 'import' && clean[cursor] === '(') {
+      if (!lineComments || !/\.less$/i.test(filename)) {
+        errors.push('unsupported-css-dependency: Less options outside .less at offset ' + m.index);
+        continue;
+      }
+      const close = clean.indexOf(')', cursor + 1);
+      if (close < 0) {
+        errors.push('unsupported-css-dependency: unterminated Less options at offset ' + m.index);
+        continue;
+      }
+      const options = clean.slice(cursor + 1, close).split(',').map(x => x.trim());
+      if (!options.length || options.some(x =>
+          !['reference', 'inline', 'less', 'css', 'once', 'multiple', 'optional'].includes(x))) {
+        errors.push('unsupported-css-dependency: invalid Less import options at offset ' + m.index);
+        continue;
+      }
+      optional = options.includes('optional');
+      cursor = close + 1;
+      while (/\s/.test(clean[cursor] || '') && cursor < clean.length) cursor++;
+    }
     let found = null;
     if (/^url\s*\(/i.test(mask.slice(cursor))) {
       importedUrls.add(cursor);
@@ -78,14 +115,16 @@ function scanCssDependencies(css) {
       errors.push('unsupported-css-dependency: ' + m[0] + ' at offset ' + m.index);
       continue;
     }
-    if (m[1].toLowerCase() === 'import') {
+    if (directive === 'import') {
       const end = clean.indexOf(';', found.end);
       const suffix = clean.slice(found.end, end === -1 ? clean.length : end);
       if (/,\s*(?:["']|url\s*\()/i.test(suffix)) {
         errors.push('unsupported-css-dependency: multiple @import targets at offset ' + m.index);
       }
     }
-    references.push({ spec: found.value.trim(), kind: m[1].toLowerCase() });
+    const reference = { spec: found.value.trim(), kind: directive };
+    if (optional) reference.optional = true;
+    references.push(reference);
   }
   for (const m of mask.matchAll(/\burl\s*\(/gi)) {
     if (importedUrls.has(m.index)) continue;
@@ -96,7 +135,52 @@ function scanCssDependencies(css) {
     }
     references.push({ spec: found.value.trim(), kind: 'url' });
   }
-  for (const m of mask.matchAll(/\bload-css\s*\(/g)) {
+  // CSS image-set() can use quoted image paths instead of url(). Follow
+  // those literal references too, while leaving nested url() to the loop above.
+  for (const m of mask.matchAll(/\b(?:-webkit-)?image-set\s*\(/gi)) {
+    const open = clean.indexOf('(', m.index);
+    let depth = 1, quote = null, escaped = false, start = open + 1;
+    const choices = [];
+    let closed = false;
+    for (let i = start; i < clean.length; i++) {
+      const c = clean[i];
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (c === '\\') escaped = true;
+        else if (c === quote) quote = null;
+        continue;
+      }
+      if (c === '"' || c === "'") { quote = c; continue; }
+      if (c === '(') depth++;
+      if (c === ')') {
+        depth--;
+        if (depth === 0) {
+          choices.push(clean.slice(start, i).trim());
+          closed = true;
+          break;
+        }
+      }
+      if (c === ',' && depth === 1) {
+        choices.push(clean.slice(start, i).trim());
+        start = i + 1;
+      }
+    }
+    if (!closed) {
+      errors.push('unsupported-css-image-set: unterminated image-set at offset ' + m.index);
+      continue;
+    }
+    for (const choice of choices) {
+      const first = choice[0];
+      if (first === '"' || first === "'") {
+        const escaped = choice.slice(1).indexOf(first);
+        if (escaped < 0) errors.push('unsupported-css-image-set: invalid image string at offset ' + m.index);
+        else references.push({ spec: choice.slice(1, escaped + 1), kind: 'image-set' });
+      } else if (!/^url\s*\(|^(?:linear|radial|conic)-gradient\s*\(/i.test(choice)) {
+        errors.push('unsupported-css-image-set: dynamic choice at offset ' + m.index);
+      }
+    }
+  }
+  for (const m of mask.matchAll(/\bload-css\s*\(/gi)) {
     errors.push('unsupported-css-dependency: computed Sass load-css at offset ' + m.index);
   }
   return { references, errors };
