@@ -418,13 +418,24 @@ function checkOwnedDependency(source, dest, policy, errors, { asset = false, isT
       if (source.layer === 'shared' && dest.layer !== 'shared') errors.push(`shared-must-be-independent: ${desc}`);
       // Domain/model/application and pure shared code may depend on pure shared
       // primitives only, never generated API clients, UI, HTTP or test setup.
-      if (pureCode && !(source.layer === 'shared' && isTest)) {
-        if (dest.layer === 'shared' && !isPureShared(dest.relative)) {
-          errors.push(`pure-layer-imports-technical-shared: ${desc}`);
-        }
-        if (dest.layer === 'generated' || dest.layer === 'testing' ||
-            (dest.layer === 'shared' && !isPureShared(dest.relative))) {
-          if (dest.layer !== 'shared') errors.push(`pure-layer-imports-technical: ${desc}`);
+      if (pureCode && !isTest) {
+        // Only known-pure shared folders and permitted same-module layers can
+        // be imported. Unknown source-root directories are not implicitly pure.
+        const pureSharedTarget = dest.layer === 'shared' && isPureShared(dest.relative);
+        const sameModule = source.layer === 'module' && dest.layer === 'module' &&
+          source.module === dest.module;
+        const pureModuleTarget = sameModule && (
+          (source.part === 'domain' && dest.part === 'domain') ||
+          (source.part === 'model' && dest.part === 'model') ||
+          (source.part === 'application' && ['application', 'domain'].includes(dest.part)));
+        if (!pureSharedTarget && !pureModuleTarget) {
+          if (dest.layer === 'shared') {
+            errors.push(`pure-layer-imports-technical-shared: ${desc}`);
+          } else if (['generated', 'testing'].includes(dest.layer)) {
+            errors.push(`pure-layer-imports-technical: ${desc}`);
+          } else {
+            errors.push(`pure-layer-imports-nonpure-source: ${desc}`);
+          }
         }
       }
       if (source.layer === 'module' && dest.layer === 'module' && source.module !== dest.module) {
@@ -637,10 +648,15 @@ function check(srcDir) {
           errors.push(`missing-static-asset: ${source.relative} -> ${dep.spec}`);
           continue;
         }
-        // JSON can be pure configuration/data; styles, images, and media cannot
-        // be imported into domain/application/model or pure shared modules.
-        if (pureCode && !isTest && !filesystemSpec.toLowerCase().endsWith('.json') &&
-            !sourceExt.test(filesystemSpec)) {
+        // Pure data imports require ordinary, unmodified JSON. Any query
+        // (?raw/?url/?worker/etc.) or new URL() produces an asset value,
+        // even when the referenced file ends in .json or .ts.
+        const querySuffix = dep.spec.slice(filesystemSpec.length);
+        const plainJson = !querySuffix && !dep.fromUrl &&
+          filesystemSpec.toLowerCase().endsWith('.json');
+        const plainSource = !querySuffix && !dep.fromUrl &&
+          sourceExt.test(filesystemSpec);
+        if (pureCode && !isTest && !plainJson && !plainSource) {
           errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
         }
       } else {

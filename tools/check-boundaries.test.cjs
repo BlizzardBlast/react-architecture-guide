@@ -10,11 +10,7 @@ function setup(entries) {
   for (const [name, contents] of Object.entries(entries)) {
     const file = path.join(home, 'src', name);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    // Real static Vite URL aliases require the Node helper import.
-    const text = name === '../vite.config.ts' && contents.includes('fileURLToPath(') &&
-      !contents.includes('import { fileURLToPath }') && !contents.includes('const fileURLToPath')
-      ? 'import { fileURLToPath } from "node:url";\n' + contents : contents;
-    fs.writeFileSync(file, text);
+    fs.writeFileSync(file, contents);
   }
   return { root: path.join(home, 'src'), cleanup: () => fs.rmSync(home, { force: true, recursive: true }) };
 }
@@ -469,7 +465,7 @@ test('Vite-only alias definitions must be explicitly mirrored in checker config'
 }, result => assert.match(result.errors.join(' '), /unverified-vite-alias/)));
 
 test('configured Vite aliases enforce the same module ownership rules', () => withFixture({
-  '../vite.config.ts': 'export default { resolve: { alias: { "@orders-private": fileURLToPath(new URL("./src/modules/orders/ui/form.ts", import.meta.url)) } } };',
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@orders-private": fileURLToPath(new URL("./src/modules/orders/ui/form.ts", import.meta.url)) } } };',
   '../architecture.config.json': '{"viteAliases":{"@orders-private":"src/modules/orders/ui/form.ts"}}',
   'shared/ui/button.ts': 'import { form } from "@orders-private"; export const b = form;',
   'modules/orders/ui/form.ts': 'export const form = 1;',
@@ -479,7 +475,7 @@ test('configured Vite aliases enforce the same module ownership rules', () => wi
 }));
 
 test('configured Vite alias can import permitted public API', () => withFixture({
-  '../vite.config.ts': 'export default { resolve: { alias: { "@orders": fileURLToPath(new URL("./src/modules/orders", import.meta.url)) } } };',
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@orders": fileURLToPath(new URL("./src/modules/orders", import.meta.url)) } } };',
   '../architecture.config.json': '{"viteAliases":{"@orders":"src/modules/orders"}}',
   'app/setup.ts': 'import { order } from "@orders"; export const setup = order;',
   'modules/orders/index.ts': 'export const order = 1;',
@@ -509,7 +505,7 @@ test('an explicitly documented own-property migration exception is honored', () 
 }, result => assert.deepEqual(result.errors, [])));
 
 test('Vite aliases that disagree with checker map are rejected', () => withFixture({
-  '../vite.config.ts': 'export default { resolve: { alias: { "@safe": fileURLToPath(new URL("./src/modules/orders/ui/private.ts", import.meta.url)) } } };',
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@safe": fileURLToPath(new URL("./src/modules/orders/ui/private.ts", import.meta.url)) } } };',
   '../architecture.config.json': '{"viteAliases":{"@safe":"src/shared/lib/safe.ts"}}',
   'app/setup.ts': 'export const setup = 1;',
 }, result => assert.match(result.errors.join(' '), /vite-alias-target-mismatch/)));
@@ -605,7 +601,7 @@ test('Vite template dynamic imports are rejected rather than silently bundled', 
 test('Vite aliased asset directives resolve actual files', () => {
   for (const directive of ['url', 'raw', 'inline', 'no-inline']) {
     withFixture({
-      '../vite.config.ts': 'export default { resolve: { alias: { "@assets": fileURLToPath(new URL("./src/shared/ui/assets", import.meta.url)) } } };',
+      '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@assets": fileURLToPath(new URL("./src/shared/ui/assets", import.meta.url)) } } };',
       '../architecture.config.json': '{"viteAliases":{"@assets":"src/shared/ui/assets"}}',
       'shared/ui/view.ts': 'import icon from "@assets/logo.svg?' + directive + '"; export const view = icon;',
       'shared/ui/assets/logo.svg': '<svg/>',
@@ -615,13 +611,13 @@ test('Vite aliased asset directives resolve actual files', () => {
 
 test('aliased asset query imports still respect ownership and presence', () => {
   withFixture({
-    '../vite.config.ts': 'export default { resolve: { alias: { "@orders": fileURLToPath(new URL("./src/modules/orders/ui", import.meta.url)) } } };',
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@orders": fileURLToPath(new URL("./src/modules/orders/ui", import.meta.url)) } } };',
     '../architecture.config.json': '{"viteAliases":{"@orders":"src/modules/orders/ui"}}',
     'shared/ui/view.ts': 'import icon from "@orders/logo.svg?url"; export const view = icon;',
     'modules/orders/ui/logo.svg': '<svg/>',
   }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
   withFixture({
-    '../vite.config.ts': 'export default { resolve: { alias: { "@assets": fileURLToPath(new URL("./src/shared/ui/assets", import.meta.url)) } } };',
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@assets": fileURLToPath(new URL("./src/shared/ui/assets", import.meta.url)) } } };',
     '../architecture.config.json': '{"viteAliases":{"@assets":"src/shared/ui/assets"}}',
     'shared/ui/view.ts': 'import icon from "@assets/absent.svg?url"; export const view = icon;',
   }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
@@ -654,20 +650,20 @@ test('query-modified worker modules still contribute runtime cycle edges', () =>
 }, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
 
 test('Vite aliases without trailing slash resolve prefix assets safely', () => withFixture({
-  '../vite.config.ts': 'export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared/ui/assets", import.meta.url)) } } };',
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared/ui/assets", import.meta.url)) } } };',
   '../architecture.config.json': '{"viteAliases":{"@":"src/shared/ui/assets"}}',
   'shared/ui/view.ts': 'import icon from "@/logo.svg?url"; export const view = icon;',
   'shared/ui/assets/logo.svg': '<svg/>',
 }, result => assert.deepEqual(result.errors, [])));
 
 test('Vite alias precedence/order cannot silently disagree with checker config', () => withFixture({
-  '../vite.config.ts': 'export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)), "@/orders": fileURLToPath(new URL("./src/modules/orders", import.meta.url)) } } };',
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)), "@/orders": fileURLToPath(new URL("./src/modules/orders", import.meta.url)) } } };',
   '../architecture.config.json': '{"viteAliases":{"@/orders":"src/modules/orders","@":"src/shared"}}',
   'app/main.ts': 'export const main = 1;',
 }, result => assert.match(result.errors.join(' '), /vite-alias-order-mismatch/)));
 
 test('trailing slash aliases do not claim support that Vite does not provide', () => withFixture({
-  '../vite.config.ts': 'export default { resolve: { alias: { "@/": fileURLToPath(new URL("./src/shared/ui", import.meta.url)) } } };',
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@/": fileURLToPath(new URL("./src/shared/ui", import.meta.url)) } } };',
   '../architecture.config.json': '{"viteAliases":{"@/":"src/shared/ui"}}',
   'shared/ui/view.ts': 'export const view = 1;',
 }, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/)));
@@ -699,7 +695,7 @@ test('CSS imports within shared ownership are valid', () => withFixture({
 }, result => assert.deepEqual(result.errors, [])));
 
 test('CSS aliases are resolved before stylesheet ownership checks', () => withFixture({
-  '../vite.config.ts': 'export default { resolve: { alias: { "@orders": fileURLToPath(new URL("./src/modules/orders/ui", import.meta.url)) } } };',
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@orders": fileURLToPath(new URL("./src/modules/orders/ui", import.meta.url)) } } };',
   '../architecture.config.json': '{"viteAliases":{"@orders":"src/modules/orders/ui"}}',
   'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
   'shared/ui/button.css': '@import "@orders/private.css";',
@@ -875,3 +871,66 @@ test('stylesheets honor the same most-specific paths mapping', () => withFixture
   'shared/ui/orders/ui/private.svg': '<svg/>',
   'modules/orders/ui/private.svg': '<svg/>',
 }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('fixture setup preserves unbound Vite helpers without rewriting config', () => {
+  const config = 'export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)) } } };';
+  const fixture = setup({
+    '../vite.config.ts': config,
+    '../architecture.config.json': '{"viteAliases":{"@":"src/shared"}}',
+    'shared/lib/number.ts': 'export const number = 1;',
+  });
+  try {
+    assert.equal(fs.readFileSync(path.join(fixture.root, '../vite.config.ts'), 'utf8'), config);
+    assert.match(check(fixture.root).errors.join(' '), /untrusted-vite-alias-helper/);
+  } finally { fixture.cleanup(); }
+});
+
+test('pure domain, application and model reject unknown technical folders', () => {
+  for (const layer of ['domain', 'application', 'model']) {
+    withFixture({
+      'integrations/http-client.ts': 'export const httpClient = () => 1;',
+      ['modules/orders/' + layer + '/order.ts']:
+        'import { httpClient } from "../../../integrations/http-client"; export const value = httpClient;',
+    }, result => assert.match(result.errors.join(' '), /pure-layer-imports-nonpure-source/));
+  }
+});
+
+test('pure shared rejects arbitrary top-level technical folders', () => withFixture({
+  'utils/telemetry.ts': 'export const send = () => 1;',
+  'shared/lib/metric.ts': 'import { send } from "../../utils/telemetry"; export const metric = send;',
+}, result => assert.match(result.errors.join(' '), /pure-layer-imports-nonpure-source/)));
+
+test('permitted pure module and shared dependencies remain valid', () => withFixture({
+  'shared/lib/money.ts': 'export const cents = 5;',
+  'modules/orders/domain/order.ts': 'import { cents } from "../../../shared/lib/money"; export const amount = cents;',
+  'modules/orders/application/place.ts': 'import { amount } from "../domain/order"; export const price = amount;',
+  'modules/catalog/model/product.ts': 'import { cents } from "../../../shared/lib/money"; export const price = cents;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('query-modified JSON is not pure data', () => {
+  for (const query of ['url', 'raw', 'inline', 'no-inline', 'worker', 'unknown-plugin']) {
+    withFixture({
+      'modules/orders/domain/config.json': '{"tax":1}',
+      'modules/orders/domain/order.ts': 'import config from "./config.json?' + query + '"; export const value = config;',
+    }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+  }
+});
+
+test('query-modified TypeScript source is not a pure import', () => {
+  for (const query of ['url', 'raw', 'worker', 'sharedworker']) {
+    withFixture({
+      'modules/orders/domain/source.ts': 'export const source = 1;',
+      'modules/orders/domain/order.ts': 'import source from "./source.ts?' + query + '"; export const value = source;',
+    }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+  }
+});
+
+test('new URL assets cannot masquerade as JSON configuration in pure code', () => withFixture({
+  'modules/orders/domain/config.json': '{"tax":1}',
+  'modules/orders/domain/order.ts': 'export const configUrl = new URL("./config.json", import.meta.url);',
+}, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/)));
+
+test('ordinary owned JSON configuration in domain remains allowed', () => withFixture({
+  'modules/orders/domain/config.json': '{"tax":1}',
+  'modules/orders/domain/order.ts': 'import config from "./config.json"; export const value = config;',
+}, result => assert.deepEqual(result.errors, [])));

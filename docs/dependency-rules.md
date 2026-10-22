@@ -124,3 +124,12 @@ Run `node tools/check-boundaries.cjs examples/react-app/src` from the repository
 The architecture checker checks **physical destinations**, not just recognizable import prefixes. Bare `baseUrl` imports resolving to local files outside the validated `src/` tree are rejected. For TypeScript `paths` imports of styles and assets, the most-specific path pattern wins; mirror any bundler-specific resolution (including Vite aliases) with a real build and conformance tests.
 
 To use the supported Vite expression `fileURLToPath(new URL('./src/...', import.meta.url))`, **import `fileURLToPath` directly from `node:url`**, and do not shadow either that function or the global `URL` constructor. The checker does not evaluate arbitrary Vite JavaScript or plugin aliases, so such configurations need independent bundler-level validation.
+
+
+### Pure dependency target policy and Vite import modes
+
+Pure `domain/`, `model/`, and `application/` code can depend only on the allowed layers within the **same module** and domain-neutral `shared/lib/` or `shared/domain/` helpers. Pure shared helpers can depend only on pure shared helpers. Any unfamiliar top-level source folder (for example `integrations/` or `utils/`) is **not implicitly pure**; decide its ownership and place it in the correct known layer instead of inventing exceptions. Test files may use development-only dependencies without turning production code into a technical dependency.
+
+Ordinary, owned JSON data may be consumed by pure modules. A Vite suffix such as `?raw`, `?url`, `?worker` or a plugin-specific query changes the import mode, so a `.json` or `.ts` filename alone does not make the resulting value pure. Pure modules reject these query-modified local assets, as well as static `new URL(..., import.meta.url)` asset handles. Presentation code may still use supported Vite asset modes subject to source ownership checks.
+
+Architecture test fixtures must store their exact declared contents. Valid Vite URL helper fixtures explicitly import `fileURLToPath` from `node:url`; fixture setup must never supply missing imports on their behalf.

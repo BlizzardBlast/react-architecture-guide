@@ -67,3 +67,27 @@ test('unresolved reference labels are reported', () => fixture(
   '[Guide][does-not-exist]', root =>
     assert.match(checkAll(root).issues.join(' '), /missing reference definition/),
 ));
+
+test('single-line HTML comments do not create dependencies', () => fixture(
+  '<!-- [hidden](missing.md) -->', root => assert.deepEqual(checkAll(root).issues, []),
+));
+test('multiline HTML comments do not create links or definitions', () => fixture(
+  '<!--\n[hidden][ref]\n[ref]: missing.md\n-->\n', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));
+test('links outside a closed HTML comment remain checked', () => fixture(
+  '<!-- [ignored](missing.md) -->\n[visible](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+test('indented code blocks do not create missing links', () => fixture(
+  '\n    [ignored](missing.md)\n\n[Self](README.md)\n', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));
+test('indented paragraph continuation is still checked for links', () => fixture(
+  'A paragraph\n    [visible](missing.md)\n', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+test('HTML-like syntax in a fence cannot suppress later links', () => fixture(
+  '~~~md\n<!--\n~~~\n[visible](missing.md)\n', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));

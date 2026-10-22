@@ -8,17 +8,68 @@ function inspectMarkdown(relative, contents, root) {
   const fullpath = path.join(root, relative);
   const lines = contents.split(/\r?\n/);
   let fence = null;
+  let inComment = false;
+  let inIndentedCode = false;
+  let previousBlank = true;
   const active = [];
+  // HTML comments may span lines; preserve line positions when masking them.
+  function maskHtmlComments(line) {
+    let result = '';
+    let cursor = 0;
+    while (cursor < line.length) {
+      if (inComment) {
+        const close = line.indexOf('-->', cursor);
+        if (close === -1) {
+          result += ' '.repeat(line.length - cursor);
+          break;
+        }
+        result += ' '.repeat(close + 3 - cursor);
+        cursor = close + 3;
+        inComment = false;
+      } else {
+        const open = line.indexOf('<!--', cursor);
+        if (open === -1) {
+          result += line.slice(cursor);
+          break;
+        }
+        result += line.slice(cursor, open) + '    ';
+        cursor = open + 4;
+        inComment = true;
+      }
+    }
+    return result;
+  }
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    const raw = lines[i];
     if (fence) {
-      if (marker && marker[1][0] === fence.char &&
-          marker[1].length >= fence.length && /^\s*$/.test(marker[2])) fence = null;
+      const closing = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(raw);
+      if (closing && closing[1][0] === fence.char &&
+          closing[1].length >= fence.length && /^\s*$/.test(closing[2])) fence = null;
       continue;
     }
-    if (marker) { fence = { char: marker[1][0], length: marker[1].length, line: i + 1 }; continue; }
+    const line = maskHtmlComments(raw);
+    if (!line.trim()) {
+      previousBlank = true;
+      continue;
+    }
+    // Four spaces or a tab form an indented code block only when they do
+    // not interrupt a paragraph. Use the original indentation rather than
+    // whitespace introduced while masking comments.
+    const indented = /^(?: {4}|\t)/.test(raw);
+    if (indented && (previousBlank || inIndentedCode)) {
+      inIndentedCode = true;
+      previousBlank = false;
+      continue;
+    }
+    inIndentedCode = false;
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (marker) {
+      fence = { char: marker[1][0], length: marker[1].length, line: i + 1 };
+      previousBlank = false;
+      continue;
+    }
     active.push({ text: line, number: i + 1 });
+    previousBlank = false;
   }
   if (fence) issues.push(relative + ':' + fence.line + ': unclosed ' +
     fence.char.repeat(fence.length) + ' code fence');

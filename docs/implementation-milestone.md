@@ -44,3 +44,10 @@ No additional GitHub Actions workflows were added solely for this guide. Existin
 Architecture fixture tests now include bare `baseUrl` imports resolving beyond `src/`, shadowed Vite URL helper identifiers, and overlapping TypeScript asset aliases in both JavaScript and stylesheets. The stylesheet scanner includes escaped CSS-string and hexadecimal-escape cases. Markdown link validation covers balanced parentheses, angle-bracket destinations with spaces, reference definitions, and local images.
 
 These source-level tests do **not** replace the required registry-backed lockfiles, clean installation, complete architecture/React suite, browser build and smoke test, or dependency audit. The PR must remain draft while those requirements cannot be verified.
+
+
+### Latest remediation: pure-source and documentation validation
+
+The boundary checker now fail-closes on arbitrary top-level directories imported from pure layers, and distinguishes unmodified JSON data from `?raw`, `?url`, `?worker`, other query modes and `new URL()` assets. Regression fixtures explicitly contain their Vite `node:url` import instead of modifying Vite configuration at setup time. Markdown link validation ignores HTML comments (including multiline comments) and indented code blocks while preserving detection of active links.
+
+Targeted source-level policy/import-mode probes and the documentation fixture suite were exercised without the npm registry. Full installation, full architecture fixture execution, React production build, browser verification, and audits **remain pending** until authentic lockfiles and dependency access are available. Do not infer merge readiness from targeted tests alone.
