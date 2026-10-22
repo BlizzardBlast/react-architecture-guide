@@ -72,7 +72,7 @@ Source-file symlinks are checked against their physical targets, not just their 
 
 `import.meta.glob` and `import.meta.globEager` are **unsupported and fail closed** in the current checker. They are never silently treated as safe. Prefer explicit imports until auditable glob expansion is implemented, including for eager and lazy globs.
 
-When a project defines Vite `resolve.alias` in `vite.config.ts`, mirror each literal alias name in `architecture.config.json` under `viteAliases`. Values are target paths relative to the app directory (the parent of `src/`). The checker compares mirrored paths against statically inspectable Vite targets and rejects mismatches or unverifiable computed aliases. Supported Vite forms are absolute target string literals and `fileURLToPath(new URL('./src/...', import.meta.url))`. Dynamic alias factories and regex/array configurations fail closed. Vite root-absolute `/src/...` paths are also checked against normal module ownership.
+When a project defines Vite `resolve.alias` in `vite.config.ts`, mirror each literal alias name in `architecture.config.json` under `viteAliases`. Values are target paths relative to the app directory (the parent of `src/`). The checker compares mirrored paths against statically inspectable Vite targets and rejects mismatches or unverifiable computed aliases. Supported Vite forms are absolute target string literals and `fileURLToPath(new URL('./src/...', import.meta.url))`. Shorthand or computed `resolve`, configuration spreads, dynamic alias factories, regex/array aliases and imported configuration factories fail closed. An alias declared in `architecture.config.json` but missing from the Vite config is also a violation. The two maps must preserve alias order, because overlapping prefixes can otherwise resolve to different files. Slash-terminated prefix aliases (for example `@/`) are supported. Plugin-created aliases are not inspected by this static checker; production builds should additionally validate the effective Vite resolver. Vite root-absolute `/src/...` paths are also checked against normal module ownership.
 
 For example, in `vite.config.ts`:
 
@@ -92,6 +92,16 @@ Mirror its resolved target:
 ```
 
 The checker does not execute the Vite config. Unverifiable dynamic configuration must be changed or explicitly integrated into a trusted module resolver; never silently bypass the architecture check. Alias targets cannot be used to evade shared or sibling module boundaries.
+
+### Vite dynamic imports, worker modules and URL assets
+
+Vite can compile variable dynamic `import()` expressions into module dependencies. The checker **fails closed** on nonliteral dynamic `import()` and computed `require()` rather than silently overlooking their edges. Replace them with reviewed explicit imports or implement a separate trusted enumeration policy.
+
+For Vite's `new URL('./asset.ext', import.meta.url)` and `new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })` syntax, the checker records statically specified local URLs as dependencies. They must pass ownership, pure-layer and cross-module checks. Dynamic URL targets fail closed. Generic external URLs are not treated as local source dependencies.
+
+Vite import query suffixes such as `?url`, `?raw`, `?inline`, `?no-inline`, and `?worker` are removed **only for filesystem resolution**. The full import specifier is retained in diagnostics; query-modified worker/source entrypoints still participate in the runtime graph, while `?raw` and `?url` data imports do not create execution-cycle edges.
+
+These AST rules cover documented syntax, not arbitrary plugin transformations or the complete bundler graph. For complex Vite customizations, independently inspect the production output and effective bundler configuration rather than claiming the source checker provides a full security boundary.
 
 ## Avoid circular "generic" services
 

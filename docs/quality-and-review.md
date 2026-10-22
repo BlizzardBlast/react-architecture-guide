@@ -12,7 +12,9 @@ Use this checklist when reviewing a change to the guide or adopting its rules in
 - [ ] JSON, CSS/images, and JS/TS source imports stay within their physical ownership and source-root boundaries, including symlinks and path aliases.
 - [ ] A module does not mix simple (`api/model`) and complex (`domain/application/infrastructure`) layers without a reviewed, justified migration exception; direct cross-mode imports remain forbidden.
 - [ ] Cross-module type-only cycles and runtime cycles are rejected; internal type-only cycles are reviewed.
-- [ ] Vite globs fail closed and any Vite-only aliases have inspectable targets that match `architecture.config.json` `viteAliases`, including root-absolute imports.
+- [ ] Vite globs and computed dynamic imports fail closed; static new URL/Worker references obey source ownership.
+- [ ] Vite-only aliases have matching targets in `architecture.config.json` `viteAliases`; unresolved spreads, shorthand and computed resolve configuration fail closed.
+- [ ] Query-modified Vite asset imports resolve their physical filenames while preserving ownership and runtime graph checks.
 - [ ] Migration exceptions require own property keys, not inherited Object prototype fields.
 - [ ] Complex domain/application/infrastructure/UI layers point inward as documented, without unnecessary DI/repositories.
 

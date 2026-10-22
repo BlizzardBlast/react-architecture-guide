@@ -31,8 +31,14 @@ const ts = loadTypeScript();
 // The dot is required: filenames such as "assets" are not source files.
 const sourceExt = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const assetExt = /\.(?:css|scss|sass|less|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|mp4|webm|json)$/i;
+function fileSpecifier(spec) {
+  // Vite query directives are compilation modes, not filesystem path components.
+  // Preserve Node/TypeScript '#imports' specifiers: the leading # is a name,
+  // not a URL fragment.
+  return spec.startsWith('#') ? spec : spec.split(/[?#]/, 1)[0];
+}
 function assetPath(spec) {
-  const filename = spec.split(/[?#]/, 1)[0];
+  const filename = fileSpecifier(spec);
   return assetExt.test(filename) ? filename : null;
 }
 function isPureShared(relative) {
@@ -85,7 +91,25 @@ function isViteGlobExpression(node) {
     node.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
     node.expression.name.text === 'meta';
 }
+function isImportMetaUrl(node) {
+  return ts.isPropertyAccessExpression(node) && node.name.text === 'url' &&
+    ts.isMetaProperty(node.expression) &&
+    node.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+    node.expression.name.text === 'meta';
+}
 function imports(node, list, options) {
+  // Vite transforms statically analyzable new URL(...) references into bundled
+  // assets or worker entrypoints; they need the same ownership validation.
+  if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) &&
+      node.expression.text === 'URL' && node.arguments?.length === 2 &&
+      isImportMetaUrl(node.arguments[1])) {
+    const spec = literalString(node.arguments[0]);
+    if (spec === null) {
+      list.push({ unsupported: 'dynamic-url', line: node.getStart() });
+    } else if (spec.startsWith('.') || spec.startsWith('/')) {
+      list.push({ spec, runtime: true, fromUrl: true, line: node.getStart() });
+    }
+  }
   // Vite expands glob imports to real module dependencies. Until glob semantics
   // are fully resolved, reject every glob call rather than silently missing edges.
   if (ts.isCallExpression(node) && isViteGlobExpression(node.expression)) {
@@ -99,9 +123,18 @@ function imports(node, list, options) {
     const spec = literalString(node.moduleSpecifier);
     if (spec) list.push({ spec, runtime: runtimeImport(node, options), line: node.getStart() });
   }
-  if (ts.isCallExpression(node) && node.arguments.length >= 1 && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+  if (ts.isCallExpression(node) &&
+      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
     const spec = literalString(node.arguments[0]);
-    if (spec) list.push({ spec, runtime: true, line: node.getStart() });
+    if (spec === null) {
+      // Vite can expand variable dynamic imports, so a missing literal cannot
+      // be interpreted as an absence of internal source dependencies.
+      list.push({ unsupported: node.expression.kind === ts.SyntaxKind.ImportKeyword
+        ? 'dynamic-import' : 'dynamic-require', line: node.getStart() });
+    } else {
+      list.push({ spec, runtime: true, line: node.getStart() });
+    }
   }
   ts.forEachChild(node, child => imports(child, list, options));
 }
@@ -169,7 +202,11 @@ function resolveViteAlias(spec, aliases, projectDir) {
   // Vite matches exact alias names or name + "/". The configured value is a
   // path relative to the project root, never an executable config expression.
   for (const [find, destination] of Object.entries(aliases)) {
-    if (spec === find || spec.startsWith(find + '/')) {
+    // An alias ending in '/' is a prefix already; do not append a second '/'.
+    const matches = find.endsWith('/')
+      ? spec.startsWith(find)
+      : (spec === find || spec.startsWith(find + '/'));
+    if (matches) {
       const suffix = spec.slice(find.length).replace(/^\//, '');
       return path.resolve(projectDir, destination, suffix);
     }
@@ -183,58 +220,123 @@ function resolveLocalSource(candidate, options) {
   return ts.resolveModuleName(basename, importer, options, ts.sys).resolvedModule?.resolvedFileName;
 }
 function verifyViteAliases(projectDir, policy, errors) {
-  const vitePath = ['vite.config.ts', 'vite.config.mts', 'vite.config.js', 'vite.config.mjs']
-    .map(name => path.join(projectDir, name)).find(fs.existsSync);
-  if (!vitePath) return;
+  const vitePaths = ['vite.config.ts', 'vite.config.mts', 'vite.config.js', 'vite.config.mjs']
+    .map(name => path.join(projectDir, name)).filter(fs.existsSync);
+  if (vitePaths.length !== 1) {
+    if (vitePaths.length > 1 || Object.keys(policy.viteAliases).length) {
+      errors.push('unsupported-vite-alias-config: expected one recognizable Vite config');
+    }
+    return;
+  }
+  const vitePath = vitePaths[0];
   const source = ts.createSourceFile(vitePath, fs.readFileSync(vitePath, 'utf8'),
     ts.ScriptTarget.Latest, true, ts.getScriptKindFromFileName(vitePath));
+  if (source.parseDiagnostics.length) {
+    errors.push('unsupported-vite-alias-config: Vite configuration has syntax errors');
+    return;
+  }
   function propertyName(prop) {
     if (!prop || !ts.isPropertyAssignment(prop)) return null;
     const name = prop.name;
     return ts.isIdentifier(name) || ts.isStringLiteral(name) ? name.text : null;
   }
-  function visit(node) {
-    if (ts.isPropertyAssignment(node) && propertyName(node) === 'resolve' &&
-        ts.isObjectLiteralExpression(node.initializer)) {
-      for (const prop of node.initializer.properties) {
-        if (propertyName(prop) !== 'alias') continue;
-        if (!ts.isObjectLiteralExpression(prop.initializer)) {
-          errors.push('unsupported-vite-alias-config: resolve.alias must be a static object mirrored in architecture.config.json viteAliases');
-          continue;
-        }
-        for (const item of prop.initializer.properties) {
-          const find = propertyName(item);
-          if (!find || !Object.hasOwn(policy.viteAliases, find)) {
-            errors.push(`unverified-vite-alias: ${find || '<computed>'} missing from architecture.config.json viteAliases`);
-            continue;
-          }
-          const expected = path.resolve(projectDir, policy.viteAliases[find]);
-          // Never trust a manually mirrored map if the actual Vite alias differs.
-          // Accept static absolute literals or fileURLToPath(new URL('./...', import.meta.url)).
-          let actual = null;
-          if (ts.isStringLiteral(item.initializer) && path.isAbsolute(item.initializer.text)) {
-            actual = path.resolve(item.initializer.text);
-          } else if (ts.isCallExpression(item.initializer) &&
-              item.initializer.expression.getText(source) === 'fileURLToPath' &&
-              item.initializer.arguments.length === 1) {
-            const expr = item.initializer.arguments[0];
-            if (ts.isNewExpression(expr) && expr.expression.getText(source) === 'URL' &&
-                expr.arguments?.length === 2 && ts.isStringLiteral(expr.arguments[0]) &&
-                expr.arguments[1].getText(source) === 'import.meta.url') {
-              actual = path.resolve(projectDir, expr.arguments[0].text);
-            }
-          }
-          if (!actual) {
-            errors.push(`unverifiable-vite-alias-target: ${find}; use an absolute path literal or fileURLToPath(new URL('./...', import.meta.url))`);
-          } else if (actual !== expected) {
-            errors.push(`vite-alias-target-mismatch: ${find}; actual Vite path differs from architecture.config.json`);
+  const exports = source.statements.filter(statement =>
+    ts.isExportAssignment(statement) && !statement.isExportEquals);
+  if (exports.length !== 1) {
+    errors.push('unsupported-vite-alias-config: one default config export is required');
+    return;
+  }
+  let config = exports[0].expression;
+  if (ts.isCallExpression(config) && ts.isIdentifier(config.expression) &&
+      config.expression.text === 'defineConfig' && config.arguments.length === 1) {
+    config = config.arguments[0];
+  }
+  // A config factory, spread or local reference may inject aliases into Vite.
+  // Reject unknown effective resolution instead of accepting a missing alias.
+  if (!ts.isObjectLiteralExpression(config)) {
+    errors.push('unsupported-vite-alias-config: use an inline static defineConfig object');
+    return;
+  }
+  function objectProperties(object, scope) {
+    const properties = new Map();
+    for (const prop of object.properties) {
+      if (!ts.isPropertyAssignment(prop)) {
+        errors.push('unsupported-vite-alias-config: ' + scope +
+          ' contains computed/spread/shorthand configuration');
+        continue;
+      }
+      const name = propertyName(prop);
+      if (!name || properties.has(name)) {
+        errors.push('unsupported-vite-alias-config: ' + scope +
+          ' contains an unsupported or repeated property');
+        continue;
+      }
+      properties.set(name, prop.initializer);
+    }
+    return properties;
+  }
+  const top = objectProperties(config, 'top-level');
+  const configured = top.get('resolve');
+  const aliases = new Map();
+  if (configured) {
+    if (!ts.isObjectLiteralExpression(configured)) {
+      errors.push('unsupported-vite-alias-config: resolve must be a static object');
+    } else {
+      const resolve = objectProperties(configured, 'resolve');
+      if (resolve.has('alias')) {
+        const aliasValue = resolve.get('alias');
+        if (!ts.isObjectLiteralExpression(aliasValue)) {
+          errors.push('unsupported-vite-alias-config: resolve.alias must be a static object');
+        } else {
+          for (const [find, value] of objectProperties(aliasValue, 'resolve.alias')) {
+            aliases.set(find, value);
           }
         }
       }
     }
-    ts.forEachChild(node, visit);
   }
-  visit(source);
+  // Vite aliases are ordered rules. The checker map must preserve this order
+  // so overlapping prefixes cannot resolve to a different physical target.
+  const configuredOrder = Object.keys(policy.viteAliases);
+  const viteOrder = [...aliases.keys()];
+  if (configuredOrder.length === viteOrder.length &&
+      configuredOrder.some((name, i) => name !== viteOrder[i])) {
+    errors.push('vite-alias-order-mismatch: architecture.config.json must preserve Vite alias order');
+  }
+  for (const [find, value] of aliases) {
+    if (!Object.hasOwn(policy.viteAliases, find)) {
+      errors.push('unverified-vite-alias: ' + find +
+        ' missing from architecture.config.json viteAliases');
+      continue;
+    }
+    const expected = path.resolve(projectDir, policy.viteAliases[find]);
+    let actual = null;
+    if (ts.isStringLiteral(value) && path.isAbsolute(value.text)) {
+      actual = path.resolve(value.text);
+    } else if (ts.isCallExpression(value) &&
+        value.expression.getText(source) === 'fileURLToPath' &&
+        value.arguments.length === 1) {
+      const expr = value.arguments[0];
+      if (ts.isNewExpression(expr) && expr.expression.getText(source) === 'URL' &&
+          expr.arguments?.length === 2 && ts.isStringLiteral(expr.arguments[0]) &&
+          expr.arguments[1].getText(source) === 'import.meta.url') {
+        actual = path.resolve(projectDir, expr.arguments[0].text);
+      }
+    }
+    if (!actual) {
+      errors.push('unverifiable-vite-alias-target: ' + find +
+        '; use an absolute literal or fileURLToPath(new URL(..., import.meta.url))');
+    } else if (actual !== expected) {
+      errors.push('vite-alias-target-mismatch: ' + find +
+        '; actual Vite path differs from architecture.config.json');
+    }
+  }
+  for (const name of Object.keys(policy.viteAliases)) {
+    if (!aliases.has(name)) {
+      errors.push('unverified-vite-alias: ' + name +
+        ' is configured in architecture.config.json but absent from Vite');
+    }
+  }
 }
 
 function check(srcDir) {
@@ -278,28 +380,36 @@ function check(srcDir) {
     imports(sf, dependencies, options);
     for (const dep of dependencies) {
       const source = actual;
+      if (dep.unsupported) {
+        errors.push(`unsupported-${dep.unsupported}: ${source.relative} at offset ${dep.line}; dependency targets cannot be verified`);
+        continue;
+      }
       if (dep.viteGlob) {
         errors.push(`unsupported-vite-glob: ${source.relative} uses ${dep.spec}; use explicit imports or implement audited glob expansion`);
         continue;
       }
-      const relativeSpec = dep.spec.startsWith('.');
-      const rootAbsolute = dep.spec.startsWith('/');
-      const rootPath = rootAbsolute ? path.resolve(path.dirname(root), '.' + dep.spec) : null;
-      const viteAlias = resolveViteAlias(dep.spec, policy.viteAliases, path.dirname(root));
-      const projectAlias = rootAbsolute || Boolean(viteAlias) || matchesAlias(dep.spec, options.paths) ||
-        (Boolean(options.baseUrl) && /^(?:modules|shared|routes|app|testing|generated)\//.test(dep.spec));
+      const filesystemSpec = fileSpecifier(dep.spec);
+      const relativeSpec = filesystemSpec.startsWith('.');
+      const rootAbsolute = filesystemSpec.startsWith('/');
+      const rootPath = rootAbsolute ? path.resolve(path.dirname(root), '.' + filesystemSpec) : null;
+      const viteAlias = resolveViteAlias(filesystemSpec, policy.viteAliases, path.dirname(root));
+      const projectAlias = rootAbsolute || Boolean(viteAlias) || matchesAlias(filesystemSpec, options.paths) ||
+        (Boolean(options.baseUrl) && /^(?:modules|shared|routes|app|testing|generated)\//.test(filesystemSpec));
       const barePackage = !relativeSpec && !projectAlias;
       const isTest = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file);
       const pureCode = isPureModule(source) ||
         (source.layer === 'shared' && isPureShared(source.relative));
-      const staticAsset = assetPath(dep.spec);
-      const localAsset = Boolean(staticAsset && (relativeSpec || projectAlias));
+      const staticAsset = assetPath(dep.spec) ||
+        ((dep.fromUrl || filesystemSpec !== dep.spec) && !sourceExt.test(filesystemSpec)
+          ? filesystemSpec : null);
+      const localAsset = Boolean((staticAsset || filesystemSpec !== dep.spec) &&
+        (relativeSpec || projectAlias));
       // Assets are still architectural dependencies. Resolve the physical path,
       // then apply the same ownership/layer checks used for source imports.
       let resolved;
       if (localAsset) {
         const candidates = [];
-        if (relativeSpec) candidates.push(path.resolve(path.dirname(file), staticAsset));
+        if (relativeSpec) candidates.push(path.resolve(path.dirname(file), filesystemSpec));
         if (rootPath) candidates.push(rootPath);
         if (viteAlias) candidates.push(viteAlias);
         if (projectAlias) {
@@ -309,17 +419,17 @@ function check(srcDir) {
           for (const [pattern, targets] of Object.entries(options.paths || {})) {
             const star = pattern.indexOf('*');
             const match = star < 0
-              ? (staticAsset === pattern ? '' : null)
-              : (staticAsset.startsWith(pattern.slice(0, star)) &&
-                  staticAsset.endsWith(pattern.slice(star + 1))
-                    ? staticAsset.slice(star, staticAsset.length - (pattern.length - star - 1))
+              ? (filesystemSpec === pattern ? '' : null)
+              : (filesystemSpec.startsWith(pattern.slice(0, star)) &&
+                  filesystemSpec.endsWith(pattern.slice(star + 1))
+                    ? filesystemSpec.slice(star, filesystemSpec.length - (pattern.length - star - 1))
                     : null);
             if (match === null) continue;
             for (const targetSpec of targets) {
               candidates.push(path.resolve(baseDir, targetSpec.replace('*', match)));
             }
           }
-          if (options.baseUrl) candidates.push(path.resolve(baseDir, staticAsset));
+          if (options.baseUrl) candidates.push(path.resolve(baseDir, filesystemSpec));
         }
         const candidate = candidates.find(candidate =>
           fs.existsSync(candidate) && fs.statSync(candidate).isFile());
@@ -331,13 +441,14 @@ function check(srcDir) {
         }
         // JSON can be pure configuration/data; styles, images, and media cannot
         // be imported into domain/application/model or pure shared modules.
-        if (pureCode && !isTest && !staticAsset.toLowerCase().endsWith('.json')) {
+        if (pureCode && !isTest && !filesystemSpec.toLowerCase().endsWith('.json') &&
+            !sourceExt.test(filesystemSpec)) {
           errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
         }
       } else {
         resolved = viteAlias || rootPath
           ? resolveLocalSource(viteAlias || rootPath, options)
-          : ts.resolveModuleName(dep.spec, file, options, ts.sys).resolvedModule?.resolvedFileName;
+          : ts.resolveModuleName(filesystemSpec, file, options, ts.sys).resolvedModule?.resolvedFileName;
         const externalDependency = Boolean(resolved && normPath(resolved).includes('/node_modules/'));
         if (pureCode && !isTest &&
             (barePackage || externalDependency) && !policy.allowPureExternal.includes(dep.spec)) {
@@ -421,7 +532,14 @@ function check(srcDir) {
       // and transitively pure shared/lib and shared/domain modules.
       if (source.layer === 'routes' && dest.layer === 'app') errors.push(`routes-import-app: ${desc}`);
       if (source.layer === 'module' && ['app', 'routes'].includes(dest.layer)) errors.push(`module-imports-composition: ${desc}`);
-      if (!localAsset) edges.get(file).push({ target, runtime: dep.runtime });
+      // ?raw and ?url treat source files as bytes/data, not executable imports.
+      // ?worker imports are bundled entrypoints and must remain graph edges.
+      const query = dep.spec.slice(filesystemSpec.length);
+      const dataQuery = /(?:[?&])(?:raw|url|inline|no-inline)(?:[=&]|$)/.test(query) &&
+        !/(?:[?&])worker(?:[=&]|$)/.test(query);
+      if (!localAsset || (sourceExt.test(filesystemSpec) && !dataQuery)) {
+        edges.get(file).push({ target, runtime: dep.runtime });
+      }
     }
   }
   for (const [name, layout] of moduleLayouts) {
