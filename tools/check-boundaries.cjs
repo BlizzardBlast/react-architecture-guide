@@ -217,6 +217,31 @@ function resolveViteAlias(spec, aliases, projectDir) {
   }
   return null;
 }
+
+function resolveMappedAssetCandidates(spec, options, projectDir) {
+  const mappings = options.paths || {};
+  let selected = null;
+  for (const [pattern, targets] of Object.entries(mappings)) {
+    const star = pattern.indexOf('*');
+    const prefix = star < 0 ? pattern : pattern.slice(0, star);
+    const suffix = star < 0 ? '' : pattern.slice(star + 1);
+    if (star >= 0 && suffix.includes('*')) continue; // Not valid TypeScript paths.
+    if (star < 0 ? spec !== pattern :
+        !(spec.startsWith(prefix) && spec.endsWith(suffix) &&
+          spec.length >= prefix.length + suffix.length)) continue;
+    const replacement = star < 0 ? '' : spec.slice(prefix.length, spec.length - suffix.length);
+    // Match TypeScript: exact keys first, then longest prefix, then longest suffix.
+    const rank = star < 0 ? [1, 0, 0] : [0, prefix.length, suffix.length];
+    if (!selected || rank[0] > selected.rank[0] ||
+        rank[0] === selected.rank[0] && (rank[1] > selected.rank[1] ||
+        rank[1] === selected.rank[1] && rank[2] > selected.rank[2])) {
+      selected = { rank, targets, replacement };
+    }
+  }
+  if (!selected) return [];
+  const base = options.baseUrl || options.pathsBasePath || projectDir;
+  return selected.targets.map(target => path.resolve(base, target.replace('*', selected.replacement)));
+}
 function resolveLocalSource(candidate, options) {
   const importer = path.join(path.dirname(candidate), '__architecture_alias__.ts');
   // TypeScript handles file extensions, directory indexes and declaration files.
@@ -239,6 +264,38 @@ function verifyViteAliases(projectDir, policy, errors) {
     errors.push('unsupported-vite-alias-config: Vite configuration has syntax errors');
     return;
   }
+  // The alias helper must really be imported from Node, not merely named
+  // fileURLToPath; Vite config is executable and identifiers can be shadowed.
+  const trustedHelper = source.statements.some(statement => {
+    if (!ts.isImportDeclaration(statement) ||
+        literalString(statement.moduleSpecifier) !== 'node:url') return false;
+    const clause = statement.importClause;
+    const bindings = clause?.namedBindings;
+    return !clause?.isTypeOnly && bindings && ts.isNamedImports(bindings) &&
+      bindings.elements.some(binding => !binding.isTypeOnly &&
+        binding.name.text === 'fileURLToPath' && !binding.propertyName);
+  });
+  const shadows = name => source.statements.some(statement => {
+    if (ts.isVariableStatement(statement)) {
+      return statement.declarationList.declarations.some(declaration =>
+        declaration.name.getText(source).split(/[^A-Za-z0-9_$]/).includes(name));
+    }
+    if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+        statement.name?.text === name) return true;
+    if (ts.isImportDeclaration(statement)) {
+      const clause = statement.importClause;
+      if (clause?.name?.text === name) return true;
+      const bindings = clause?.namedBindings;
+      if (bindings && ts.isNamespaceImport(bindings) && bindings.name.text === name) return true;
+      if (bindings && ts.isNamedImports(bindings)) return bindings.elements.some(binding =>
+        binding.name.text === name && !(name === 'fileURLToPath' &&
+          literalString(statement.moduleSpecifier) === 'node:url' &&
+          !binding.propertyName && !binding.isTypeOnly));
+    }
+    return false;
+  });
+  const verifiedUrlHelpers = trustedHelper &&
+    !shadows('fileURLToPath') && !shadows('URL');
   function propertyName(prop) {
     if (!prop || !ts.isPropertyAssignment(prop)) return null;
     const name = prop.name;
@@ -321,11 +378,15 @@ function verifyViteAliases(projectDir, policy, errors) {
     if (ts.isStringLiteral(value) && path.isAbsolute(value.text)) {
       actual = path.resolve(value.text);
     } else if (ts.isCallExpression(value) &&
-        value.expression.getText(source) === 'fileURLToPath' &&
+        ts.isIdentifier(value.expression) && value.expression.text === 'fileURLToPath' &&
         value.arguments.length === 1) {
       const expr = value.arguments[0];
-      if (ts.isNewExpression(expr) && expr.expression.getText(source) === 'URL' &&
-          expr.arguments?.length === 2 && ts.isStringLiteral(expr.arguments[0]) &&
+      if (!verifiedUrlHelpers) {
+        errors.push('untrusted-vite-alias-helper: ' + find +
+          '; import fileURLToPath from node:url and do not shadow URL');
+      } else if (ts.isNewExpression(expr) && ts.isIdentifier(expr.expression) &&
+          expr.expression.text === 'URL' && expr.arguments?.length === 2 &&
+          ts.isStringLiteral(expr.arguments[0]) &&
           expr.arguments[1].getText(source) === 'import.meta.url') {
         actual = path.resolve(projectDir, expr.arguments[0].text);
       }
@@ -449,15 +510,7 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
       else if (spec.startsWith('.')) candidates.push(path.resolve(path.dirname(logicalFile), spec));
       else if (spec.startsWith('/src/')) candidates.push(path.resolve(projectDir, '.' + spec));
       else {
-        const baseDir = options.baseUrl || projectDir;
-        for (const [pattern, targets] of Object.entries(options.paths || {})) {
-          const star = pattern.indexOf('*');
-          const match = star < 0 ? (spec === pattern ? '' : null)
-            : (spec.startsWith(pattern.slice(0, star)) && spec.endsWith(pattern.slice(star + 1))
-              ? spec.slice(star, spec.length - (pattern.length - star - 1)) : null);
-          if (match === null) continue;
-          for (const destination of targets) candidates.push(path.resolve(baseDir, destination.replace('*', match)));
-        }
+        candidates.push(...resolveMappedAssetCandidates(spec, options, projectDir));
       }
       if (!candidates.length) {
         errors.push('unverified-css-dependency: ' + source.relative + ' -> ' + ref.spec);
@@ -569,26 +622,12 @@ function check(srcDir) {
       if (localAsset) {
         const candidates = [];
         if (relativeSpec) candidates.push(path.resolve(path.dirname(file), filesystemSpec));
-        if (rootPath) candidates.push(rootPath);
-        if (viteAlias) candidates.push(viteAlias);
-        if (projectAlias) {
-          const baseDir = options.baseUrl || path.dirname(root);
-          // Match tsconfig.paths before falling back to baseUrl; otherwise a
-          // same-named local file can hide the intended aliased dependency.
-          for (const [pattern, targets] of Object.entries(options.paths || {})) {
-            const star = pattern.indexOf('*');
-            const match = star < 0
-              ? (filesystemSpec === pattern ? '' : null)
-              : (filesystemSpec.startsWith(pattern.slice(0, star)) &&
-                  filesystemSpec.endsWith(pattern.slice(star + 1))
-                    ? filesystemSpec.slice(star, filesystemSpec.length - (pattern.length - star - 1))
-                    : null);
-            if (match === null) continue;
-            for (const targetSpec of targets) {
-              candidates.push(path.resolve(baseDir, targetSpec.replace('*', match)));
-            }
-          }
-          if (options.baseUrl) candidates.push(path.resolve(baseDir, filesystemSpec));
+        else if (rootPath) candidates.push(rootPath);
+        else if (viteAlias) candidates.push(viteAlias); // Effective Vite alias takes precedence.
+        else if (projectAlias) {
+          const mapped = resolveMappedAssetCandidates(filesystemSpec, options, path.dirname(root));
+          if (mapped.length) candidates.push(...mapped);
+          else if (options.baseUrl) candidates.push(path.resolve(options.baseUrl, filesystemSpec));
         }
         const candidate = candidates.find(candidate =>
           fs.existsSync(candidate) && fs.statSync(candidate).isFile());
@@ -623,7 +662,9 @@ function check(srcDir) {
         // Ordinary package imports are not owned source files. Keep them separate
         // from relative/aliased workspace references, which must be validated.
         const externalPackage = normPath(target).includes('/node_modules/');
-        if (!externalPackage && (relativeSpec || projectAlias)) {
+        // Bare baseUrl imports may resolve to local files with arbitrary names.
+        // Classify their actual physical location, never their specifier prefix.
+        if (!externalPackage) {
           errors.push(`outside-source-import: ${source.relative} -> ${dep.spec}`);
         }
         continue;

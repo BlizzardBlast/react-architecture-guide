@@ -84,3 +84,17 @@ test('an optional Less import retains the optional flag for resolution', () => {
   assert.deepEqual(scan('@import (optional) "./missing.less";', { filename: 'x.less' }).references,
     [{ spec: './missing.less', kind: 'import', optional: true }]);
 });
+
+test('image-set parses escaped quotes and backslashes without truncation', () => {
+  const r = scan(String.raw`.x { background: image-set("a\"b.svg" 1x, "folder\\icon.svg" 2x); }`);
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(r.references.map(x => x.spec), ['a"b.svg', 'folder\\icon.svg']);
+});
+test('image-set resolves CSS hex escape sequences before checking asset paths', () => {
+  const r = scan(String.raw`.x { background: image-set("icons/a\2e svg" 1x); }`);
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(r.references.map(x => x.spec), ['icons/a.svg']);
+});
+test('unterminated quoted image-set choices are not silently accepted', () => {
+  assert.ok(scan('.x{background:image-set("no-end 1x)}').errors.length);
+});

@@ -118,3 +118,9 @@ A generic `shared/analytics` helper must not import an Order type to format an e
 ## Scope of enforcement
 
 Run `node tools/check-boundaries.cjs examples/react-app/src` from the repository root, or `npm run verify` after installation. The checker uses the TypeScript AST and module resolver, not a regex-only import scanner. It checks locally resolved source and asset edges, but cannot reason about nonliteral dynamic imports, runtime globals or semantic ownership of every external package. A production application may also adopt [dependency-cruiser](https://github.com/sverweij/dependency-cruiser) or equivalent tooling; continue to run typechecks, runtime tests, accessibility tests and security audits.
+
+### Resolver integrity and alias trust
+
+The architecture checker checks **physical destinations**, not just recognizable import prefixes. Bare `baseUrl` imports resolving to local files outside the validated `src/` tree are rejected. For TypeScript `paths` imports of styles and assets, the most-specific path pattern wins; mirror any bundler-specific resolution (including Vite aliases) with a real build and conformance tests.
+
+To use the supported Vite expression `fileURLToPath(new URL('./src/...', import.meta.url))`, **import `fileURLToPath` directly from `node:url`**, and do not shadow either that function or the global `URL` constructor. The checker does not evaluate arbitrary Vite JavaScript or plugin aliases, so such configurations need independent bundler-level validation.

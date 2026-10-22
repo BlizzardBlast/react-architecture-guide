@@ -36,3 +36,34 @@ test('valid local links and anchors pass', () => fixture(
 test('attempts to link outside the repository are rejected', () => fixture(
   '# Title\n[escape](../outside.md)\n', root => assert.match(checkAll(root).issues.join(' '), /outside-repository/),
 ));
+
+test('local links with balanced filename parentheses pass', () => fixture(
+  '[Release](release(v2).md)', root => {
+    fs.writeFileSync(path.join(root, 'release(v2).md'), '# Release');
+    assert.deepEqual(checkAll(root).issues, []);
+  },
+));
+test('angle-bracket destinations may contain spaces', () => fixture(
+  '[Guide](<My Guide.md>)', root => {
+    fs.writeFileSync(path.join(root, 'My Guide.md'), '# Guide');
+    assert.deepEqual(checkAll(root).issues, []);
+  },
+));
+test('references to missing local files fail even for reference-style links', () => fixture(
+  '[Guide][ref]\n[ref]: docs/missing.md\n', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+test('forward reference links are accepted when the target exists', () => fixture(
+  '[Guide][ref]\n[ref]: guide.md\n', root => {
+    fs.writeFileSync(path.join(root, 'guide.md'), '# Guide');
+    assert.deepEqual(checkAll(root).issues, []);
+  },
+));
+test('local image links are validated just like text links', () => fixture(
+  '![Icon](missing.svg)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+test('unresolved reference labels are reported', () => fixture(
+  '[Guide][does-not-exist]', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing reference definition/),
+));

@@ -10,7 +10,11 @@ function setup(entries) {
   for (const [name, contents] of Object.entries(entries)) {
     const file = path.join(home, 'src', name);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, contents);
+    // Real static Vite URL aliases require the Node helper import.
+    const text = name === '../vite.config.ts' && contents.includes('fileURLToPath(') &&
+      !contents.includes('import { fileURLToPath }') && !contents.includes('const fileURLToPath')
+      ? 'import { fileURLToPath } from "node:url";\n' + contents : contents;
+    fs.writeFileSync(file, text);
   }
   return { root: path.join(home, 'src'), cleanup: () => fs.rmSync(home, { force: true, recursive: true }) };
 }
@@ -837,3 +841,37 @@ test('Sass string interpolation cannot masquerade as a harmless fragment', () =>
   'shared/ui/view.ts': 'import "./view.scss"; export const view = 1;',
   'shared/ui/view.scss': '.view { background: url("#{${asset}}/private.svg"); }',
 }, result => assert.match(result.errors.join(' '), /unsupported-css-dependency/)));
+
+test('bare baseUrl imports outside src cannot masquerade as packages', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"."}}',
+  '../internal/secret.ts': 'export const secret = 1;',
+  'shared/ui/button.ts': 'import { secret } from "internal/secret"; export const button = secret;',
+}, result => assert.match(result.errors.join(' '), /outside-source-import/)));
+test('Vite helper locally shadowed as a function cannot certify aliases', () => withFixture({
+  '../vite.config.ts': 'const fileURLToPath = () => "/tmp/private"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared"}}',
+  'shared/ui/button.ts': 'export const button = 1;',
+}, result => assert.match(result.errors.join(' '), /untrusted-vite-alias-helper/)));
+test('shadowed URL constructor is not a trusted Vite alias expression', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; const URL = () => ({ pathname: "/tmp/private" }); export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared"}}',
+  'shared/ui/button.ts': 'export const button = 1;',
+}, result => assert.match(result.errors.join(' '), /untrusted-vite-alias-helper/)));
+test('a directly imported Node URL helper remains supported', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared"}}',
+  'shared/ui/button.ts': 'export const button = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+test('more specific path mappings win over generic mappings for source assets', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@*":["shared/ui/*"],"@orders/*":["modules/orders/*"]}}}',
+  'shared/ui/widget.ts': 'import img from "@orders/ui/private.svg"; export const imgUrl = img;',
+  'shared/ui/orders/ui/private.svg': '<svg/>',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+test('stylesheets honor the same most-specific paths mapping', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@*":["shared/ui/*"],"@orders/*":["modules/orders/*"]}}}',
+  'shared/ui/widget.ts': 'import "./widget.css"; export const widget = 1;',
+  'shared/ui/widget.css': '.widget { background: url("@orders/ui/private.svg") }',
+  'shared/ui/orders/ui/private.svg': '<svg/>',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));

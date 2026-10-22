@@ -38,3 +38,9 @@ Unverifiable computed imports are rejected, but arbitrary plugin-injected aliase
 The React app stores orders in memory and performs UI-level single-flight guarding only. **Real order creation requires trusted server validation, authorization and idempotency.** For SSR, instantiate services and Query clients with request-appropriate scope.
 
 No additional GitHub Actions workflows were added solely for this guide. Existing consumers should integrate necessary architecture rules into their established local/CI gates, batching changes and checks to conserve Actions minutes.
+
+### Additional conformance regression coverage
+
+Architecture fixture tests now include bare `baseUrl` imports resolving beyond `src/`, shadowed Vite URL helper identifiers, and overlapping TypeScript asset aliases in both JavaScript and stylesheets. The stylesheet scanner includes escaped CSS-string and hexadecimal-escape cases. Markdown link validation covers balanced parentheses, angle-bracket destinations with spaces, reference definitions, and local images.
+
+These source-level tests do **not** replace the required registry-backed lockfiles, clean installation, complete architecture/React suite, browser build and smoke test, or dependency audit. The PR must remain draft while those requirements cannot be verified.

@@ -51,13 +51,23 @@ function scanCssDependencies(css, { filename = 'style.css' } = {}) {
     } else if (ch === '"' || ch === "'") { q = ch; mask += ' '; }
     else mask += ch;
   }
-  const readQuoted = start => {
-    const q = clean[start];
+  const readQuoted = (start, input = clean) => {
+    const q = input[start];
     if (q !== '"' && q !== "'") return null;
     let value = '', escaped = false;
-    for (let i = start + 1; i < clean.length; i++) {
-      const c = clean[i];
-      if (escaped) { value += c; escaped = false; continue; }
+    for (let i = start + 1; i < input.length; i++) {
+      const c = input[i];
+      if (escaped) {
+        if (/[0-9a-f]/i.test(c)) {
+          let hex = c;
+          while (hex.length < 6 && /[0-9a-f]/i.test(input[i + 1] || '')) hex += input[++i];
+          const number = parseInt(hex, 16);
+          value += String.fromCodePoint(number && number <= 0x10ffff ? number : 0xfffd);
+          if (/\s/.test(input[i + 1] || '')) i++;
+        } else if (!/[\r\n\f]/.test(c)) value += c;
+        escaped = false;
+        continue;
+      }
       if (c === '\\') { escaped = true; continue; }
       if (c === q) return { value, end: i + 1 };
       value += c;
@@ -172,9 +182,12 @@ function scanCssDependencies(css, { filename = 'style.css' } = {}) {
     for (const choice of choices) {
       const first = choice[0];
       if (first === '"' || first === "'") {
-        const escaped = choice.slice(1).indexOf(first);
-        if (escaped < 0) errors.push('unsupported-css-image-set: invalid image string at offset ' + m.index);
-        else references.push({ spec: choice.slice(1, escaped + 1), kind: 'image-set' });
+        const quoted = readQuoted(0, choice);
+        if (!quoted || !quoted.value.trim()) {
+          errors.push('unsupported-css-image-set: invalid image string at offset ' + m.index);
+        } else {
+          references.push({ spec: quoted.value, kind: 'image-set' });
+        }
       } else if (!/^url\s*\(|^(?:linear|radial|conic)-gradient\s*\(/i.test(choice)) {
         errors.push('unsupported-css-image-set: dynamic choice at offset ' + m.index);
       }
