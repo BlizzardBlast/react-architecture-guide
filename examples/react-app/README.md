@@ -17,7 +17,7 @@ npm audit
 
 Generate and commit an authentic `package-lock.json` with `npm install --package-lock-only --ignore-scripts` before relying on `npm ci`. This branch does **not** yet include verified dependency lockfiles, build/typecheck/audit results, or browser smoke-test results because the authoring environment cannot reach the npm registry.
 
-`npm run verify` runs ESLint (React Hooks, TypeScript and JSX accessibility), Vitest, architecture checks, TypeScript typechecking and the Vite build. The architecture checker accepts Vite-style CSS/image/query assets within owned presentation code, checks static URL/worker dependencies, rejects unsupported dynamic imports and Vite globs, and checks source and owned JSON dependencies separately.
+`npm run verify` runs ESLint (React Hooks, TypeScript and JSX accessibility), Vitest, architecture checks, TypeScript typechecking and the Vite build. The architecture checker accepts Vite-style CSS/image/query assets within owned presentation code, checks static URL/worker and transitive stylesheet dependencies, rejects unsupported dynamic imports and Vite globs, and checks source and owned JSON dependencies separately.
 
 ## Catalog behavior
 

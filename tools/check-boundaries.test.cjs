@@ -649,9 +649,9 @@ test('query-modified worker modules still contribute runtime cycle edges', () =>
   'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
 }, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
 
-test('slash-terminated Vite aliases resolve prefix assets safely', () => withFixture({
-  '../vite.config.ts': 'export default { resolve: { alias: { "@/": fileURLToPath(new URL("./src/shared/ui/assets", import.meta.url)) } } };',
-  '../architecture.config.json': '{"viteAliases":{"@/":"src/shared/ui/assets"}}',
+test('Vite aliases without trailing slash resolve prefix assets safely', () => withFixture({
+  '../vite.config.ts': 'export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared/ui/assets", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared/ui/assets"}}',
   'shared/ui/view.ts': 'import icon from "@/logo.svg?url"; export const view = icon;',
   'shared/ui/assets/logo.svg': '<svg/>',
 }, result => assert.deepEqual(result.errors, [])));
@@ -661,3 +661,107 @@ test('Vite alias precedence/order cannot silently disagree with checker config',
   '../architecture.config.json': '{"viteAliases":{"@/orders":"src/modules/orders","@":"src/shared"}}',
   'app/main.ts': 'export const main = 1;',
 }, result => assert.match(result.errors.join(' '), /vite-alias-order-mismatch/)));
+
+test('trailing slash aliases do not claim support that Vite does not provide', () => withFixture({
+  '../vite.config.ts': 'export default { resolve: { alias: { "@/": fileURLToPath(new URL("./src/shared/ui", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@/":"src/shared/ui"}}',
+  'shared/ui/view.ts': 'export const view = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/)));
+
+test('transitive CSS @import cannot connect generic shared UI to business modules', () => withFixture({
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'shared/ui/button.css': '@import "../../modules/orders/ui/private.css";',
+  'modules/orders/ui/private.css': '.private { color: blue }',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('CSS url() references cannot reach business-owned assets from shared code', () => withFixture({
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'shared/ui/button.css': '.button { background-image: url("../../modules/orders/ui/private.svg") }',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('nested CSS import chains still enforce ownership', () => withFixture({
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'shared/ui/button.css': '@import "./tokens.css";',
+  'shared/ui/tokens.css': '@import "../../modules/orders/ui/private.css";',
+  'modules/orders/ui/private.css': '.private { color: blue }',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('CSS imports within shared ownership are valid', () => withFixture({
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'shared/ui/button.css': '@import "./tokens.css"; .button { background: url("./icon.svg") }',
+  'shared/ui/tokens.css': ':root { --accent: red; }',
+  'shared/ui/icon.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('CSS aliases are resolved before stylesheet ownership checks', () => withFixture({
+  '../vite.config.ts': 'export default { resolve: { alias: { "@orders": fileURLToPath(new URL("./src/modules/orders/ui", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@orders":"src/modules/orders/ui"}}',
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'shared/ui/button.css': '@import "@orders/private.css";',
+  'modules/orders/ui/private.css': '.private { color: red }',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('Sass @use and @forward cannot bypass module ownership', () => withFixture({
+  'shared/ui/button.tsx': 'import "./button.scss"; export const Button = () => 1;',
+  'shared/ui/button.scss': '@use "../../modules/orders/ui/_tokens.scss";',
+  'modules/orders/ui/_tokens.scss': '$accent: red;',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('CSS references to nonexistent files and dynamic URLs fail closed', () => {
+  withFixture({
+    'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+    'shared/ui/button.css': '@import "./missing.css";',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+  withFixture({
+    'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+    'shared/ui/button.css': '.button { background: url(var(--external)) }',
+  }, result => assert.match(result.errors.join(' '), /unsupported-css-url/));
+});
+
+test('same-owner stylesheet comments and data URLs do not create false violations', () => withFixture({
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'shared/ui/button.css': '/* @import "../../modules/orders/ui/private.css" */ .button { background: url(data:image/png;base64,abc) }',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('standalone new URL references enforce ownership without causing runtime cycles', () => withFixture({
+  'modules/orders/ui/a.ts': 'export const ref = new URL("./b.ts", import.meta.url);',
+  'modules/orders/ui/b.ts': 'import { ref } from "./a"; export const b = ref;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('workers created from new URL remain executable dependency edges', () => withFixture({
+  'modules/orders/ui/a.ts': 'export const worker = new Worker(new URL("./b.ts", import.meta.url), { type: "module" });',
+  'modules/orders/ui/b.ts': 'import { worker } from "./a"; export const b = worker;',
+}, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+test('standalone URL imports still respect shared ownership', () => withFixture({
+  'shared/ui/icon.ts': 'export const privateUrl = new URL("../../modules/orders/ui/worker.ts", import.meta.url);',
+  'modules/orders/ui/worker.ts': 'export const code = 1;',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('uppercase CSS imports and Sass partial filename resolution respect ownership', () => {
+  withFixture({
+    'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+    'shared/ui/button.css': '@IMPORT "../../modules/orders/ui/private.css";',
+    'modules/orders/ui/private.css': '.private { color: red }',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  withFixture({
+    'shared/ui/button.tsx': 'import "./button.scss"; export const Button = () => 1;',
+    'shared/ui/button.scss': '@use "../../modules/orders/ui/tokens.scss";',
+    'modules/orders/ui/_tokens.scss': '$accent: red;',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('multi-target Sass imports and computed load-css cannot bypass stylesheet ownership', () => {
+  withFixture({
+    'shared/ui/view.tsx': 'import "./view.scss"; export const View = () => 1;',
+    'shared/ui/view.scss': '@import "./safe.css", "../../modules/orders/ui/private.css";',
+    'shared/ui/safe.css': '.safe { color: blue }',
+    'modules/orders/ui/private.css': '.private { color: red }',
+  }, result => assert.match(result.errors.join(' '), /unsupported-css-dependency/));
+  withFixture({
+    'shared/ui/view.tsx': 'import "./view.scss"; export const View = () => 1;',
+    'shared/ui/view.scss': '@include meta.load-css("../../modules/orders/ui/private.css");',
+    'modules/orders/ui/private.css': '.private { color: red }',
+  }, result => assert.match(result.errors.join(' '), /unsupported-css-dependency/));
+});

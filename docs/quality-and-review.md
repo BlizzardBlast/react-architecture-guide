@@ -10,10 +10,11 @@ Use this checklist when reviewing a change to the guide or adopting its rules in
 - [ ] External consumers use module public `index.*` files. Internal code does not import its own barrel.
 - [ ] Pure domain/model/application and pure shared utilities do not depend on technical integrations, generated DTOs or presentation assets.
 - [ ] JSON, CSS/images, and JS/TS source imports stay within their physical ownership and source-root boundaries, including symlinks and path aliases.
+- [ ] Transitive CSS @import, Sass @use/@forward, and CSS url() references cannot import private assets across shared/module ownership boundaries.
 - [ ] A module does not mix simple (`api/model`) and complex (`domain/application/infrastructure`) layers without a reviewed, justified migration exception; direct cross-mode imports remain forbidden.
 - [ ] Cross-module type-only cycles and runtime cycles are rejected; internal type-only cycles are reviewed.
-- [ ] Vite globs and computed dynamic imports fail closed; static new URL/Worker references obey source ownership.
-- [ ] Vite-only aliases have matching targets in `architecture.config.json` `viteAliases`; unresolved spreads, shorthand and computed resolve configuration fail closed.
+- [ ] Vite globs and computed dynamic imports fail closed; static new URL/Worker references obey source ownership, but only worker and true executable imports create runtime-cycle edges.
+- [ ] Vite-only aliases have matching targets in `architecture.config.json` `viteAliases`; no trailing-slash alias names, and unresolved spreads, shorthand and computed resolve configuration fail closed.
 - [ ] Query-modified Vite asset imports resolve their physical filenames while preserving ownership and runtime graph checks.
 - [ ] Migration exceptions require own property keys, not inherited Object prototype fields.
 - [ ] Complex domain/application/infrastructure/UI layers point inward as documented, without unnecessary DI/repositories.

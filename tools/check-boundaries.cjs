@@ -28,9 +28,11 @@ function loadTypeScript(projectDir = process.argv[2]) {
   }
 }
 const ts = loadTypeScript();
+const { scanCssDependencies } = require('./css-dependencies.cjs');
 // The dot is required: filenames such as "assets" are not source files.
 const sourceExt = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const assetExt = /\.(?:css|scss|sass|less|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|mp4|webm|json)$/i;
+const styleExt = /\.(?:css|scss|sass|less)$/i;
 function fileSpecifier(spec) {
   // Vite query directives are compilation modes, not filesystem path components.
   // Preserve Node/TypeScript '#imports' specifiers: the leading # is a name,
@@ -107,7 +109,12 @@ function imports(node, list, options) {
     if (spec === null) {
       list.push({ unsupported: 'dynamic-url', line: node.getStart() });
     } else if (spec.startsWith('.') || spec.startsWith('/')) {
-      list.push({ spec, runtime: true, fromUrl: true, line: node.getStart() });
+      const parent = node.parent;
+      const workerEntry = Boolean(parent && ts.isNewExpression(parent) &&
+        ts.isIdentifier(parent.expression) &&
+        ['Worker', 'SharedWorker'].includes(parent.expression.text) &&
+        parent.arguments?.[0] === node);
+      list.push({ spec, runtime: workerEntry, fromUrl: true, workerEntry, line: node.getStart() });
     }
   }
   // Vite expands glob imports to real module dependencies. Until glob semantics
@@ -202,11 +209,8 @@ function resolveViteAlias(spec, aliases, projectDir) {
   // Vite matches exact alias names or name + "/". The configured value is a
   // path relative to the project root, never an executable config expression.
   for (const [find, destination] of Object.entries(aliases)) {
-    // An alias ending in '/' is a prefix already; do not append a second '/'.
-    const matches = find.endsWith('/')
-      ? spec.startsWith(find)
-      : (spec === find || spec.startsWith(find + '/'));
-    if (matches) {
+    // Match Vite/Rollup: exact match or the next character must be '/'.
+    if (spec === find || spec.startsWith(find + '/')) {
       const suffix = spec.slice(find.length).replace(/^\//, '');
       return path.resolve(projectDir, destination, suffix);
     }
@@ -304,6 +308,9 @@ function verifyViteAliases(projectDir, policy, errors) {
     errors.push('vite-alias-order-mismatch: architecture.config.json must preserve Vite alias order');
   }
   for (const [find, value] of aliases) {
+    if (find.endsWith('/')) {
+      errors.push('unsupported-vite-alias-config: trailing-slash alias does not follow Vite matching semantics: ' + find);
+    }
     if (!Object.hasOwn(policy.viteAliases, find)) {
       errors.push('unverified-vite-alias: ' + find +
         ' missing from architecture.config.json viteAliases');
@@ -339,6 +346,97 @@ function verifyViteAliases(projectDir, policy, errors) {
   }
 }
 
+
+function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
+  function scanDir(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (['node_modules', 'dist', 'coverage', '.git'].includes(entry.name)) continue;
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) scanDir(file);
+      else if (styleExt.test(entry.name)) scanFile(file);
+    }
+  }
+  function scanFile(logicalFile) {
+    const physicalFile = fs.realpathSync(logicalFile);
+    if (!isWithinRoot(physicalFile, physicalRoot)) {
+      errors.push('outside-source-symlink: ' + path.relative(root, logicalFile));
+      return;
+    }
+    const source = category(physicalFile, physicalRoot);
+    const scanned = scanCssDependencies(fs.readFileSync(logicalFile, 'utf8'));
+    for (const issue of scanned.errors) errors.push(issue + ': ' + source.relative);
+    for (const ref of scanned.references) {
+      const spec = fileSpecifier(ref.spec);
+      if (!spec || spec.startsWith('#') || /^(?:data:|https?:|\/\/|sass:)/i.test(spec)) continue;
+      const projectDir = path.dirname(root);
+      const alias = resolveViteAlias(spec, policy.viteAliases, projectDir);
+      const candidates = [];
+      if (alias) candidates.push(alias);
+      else if (spec.startsWith('.')) candidates.push(path.resolve(path.dirname(logicalFile), spec));
+      else if (spec.startsWith('/src/')) candidates.push(path.resolve(projectDir, '.' + spec));
+      else {
+        const baseDir = options.baseUrl || projectDir;
+        for (const [pattern, targets] of Object.entries(options.paths || {})) {
+          const star = pattern.indexOf('*');
+          const match = star < 0 ? (spec === pattern ? '' : null)
+            : (spec.startsWith(pattern.slice(0, star)) && spec.endsWith(pattern.slice(star + 1))
+              ? spec.slice(star, spec.length - (pattern.length - star - 1)) : null);
+          if (match === null) continue;
+          for (const destination of targets) candidates.push(path.resolve(baseDir, destination.replace('*', match)));
+        }
+      }
+      if (!candidates.length) {
+        errors.push('unverified-css-dependency: ' + source.relative + ' -> ' + ref.spec);
+        continue;
+      }
+      const expanded = [];
+      for (const candidate of candidates) {
+        expanded.push(candidate);
+        if (ref.kind !== 'url') {
+          const extname = path.extname(candidate);
+          if (extname) {
+            // Sass partials can be referenced using their public filename.
+            expanded.push(path.join(path.dirname(candidate), '_' + path.basename(candidate)));
+          } else {
+            for (const ext of ['.css', '.scss', '.sass', '.less']) {
+              expanded.push(candidate + ext);
+              expanded.push(path.join(path.dirname(candidate), '_' + path.basename(candidate) + ext));
+            }
+          }
+        }
+      }
+      const found = expanded.find(candidate => fs.existsSync(candidate) && fs.statSync(candidate).isFile());
+      if (!found) {
+        errors.push('missing-static-asset: ' + source.relative + ' -> ' + ref.spec);
+        continue;
+      }
+      const actual = fs.realpathSync(found);
+      if (!isWithinRoot(actual, physicalRoot)) {
+        errors.push('outside-source-import: ' + source.relative + ' -> ' + ref.spec);
+        continue;
+      }
+      const dest = category(actual, physicalRoot);
+      const desc = source.relative + ' -> ' + dest.relative;
+      if (source.layer === 'shared' && dest.layer !== 'shared') errors.push('shared-must-be-independent: ' + desc);
+      if (source.layer === 'module' && dest.layer === 'module' && source.module !== dest.module) {
+        errors.push('sibling-module-dependency: ' + desc);
+      }
+      if (source.layer === 'module' && ['app', 'routes'].includes(dest.layer)) {
+        errors.push('module-imports-composition: ' + desc);
+      }
+      if (source.layer === 'routes' && dest.layer === 'app') errors.push('routes-import-app: ' + desc);
+      if (dest.layer === 'module' && source.layer !== 'module' && source.layer !== 'shared') {
+        errors.push('deep-module-import: ' + desc);
+      }
+      if (source.layer === 'module' && ['domain', 'model', 'application'].includes(source.part) ||
+          source.layer === 'shared' && isPureShared(source.relative)) {
+        errors.push('pure-layer-static-asset: ' + desc);
+      }
+    }
+  }
+  scanDir(root);
+}
+
 function check(srcDir) {
   const errors = [];
   const warnings = [];
@@ -352,6 +450,7 @@ function check(srcDir) {
   const known = new Set(files);
   const edges = new Map(files.map(f => [f, []]));
   const moduleLayouts = new Map();
+  scanOwnedStylesheets(root, physicalRoot, policy, options, errors);
   for (const file of files) {
     const logical = category(file, root);
     const physicalFile = fs.realpathSync(file);
@@ -402,7 +501,7 @@ function check(srcDir) {
       const staticAsset = assetPath(dep.spec) ||
         ((dep.fromUrl || filesystemSpec !== dep.spec) && !sourceExt.test(filesystemSpec)
           ? filesystemSpec : null);
-      const localAsset = Boolean((staticAsset || filesystemSpec !== dep.spec) &&
+      const localAsset = Boolean((staticAsset || dep.fromUrl || filesystemSpec !== dep.spec) &&
         (relativeSpec || projectAlias));
       // Assets are still architectural dependencies. Resolve the physical path,
       // then apply the same ownership/layer checks used for source imports.
@@ -537,7 +636,8 @@ function check(srcDir) {
       const query = dep.spec.slice(filesystemSpec.length);
       const dataQuery = /(?:[?&])(?:raw|url|inline|no-inline)(?:[=&]|$)/.test(query) &&
         !/(?:[?&])worker(?:[=&]|$)/.test(query);
-      if (!localAsset || (sourceExt.test(filesystemSpec) && !dataQuery)) {
+      if (!localAsset || (sourceExt.test(filesystemSpec) && !dataQuery &&
+          (!dep.fromUrl || dep.workerEntry))) {
         edges.get(file).push({ target, runtime: dep.runtime });
       }
     }
