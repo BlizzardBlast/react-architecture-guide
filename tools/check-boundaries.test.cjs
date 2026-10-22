@@ -443,3 +443,75 @@ test('independent simple and complex modules can coexist in one app', () => with
   'modules/orders/domain/order.ts': 'export type Order = { id: string };',
   'modules/orders/application/use-case.ts': 'import type { Order } from "../domain/order"; export type Save = (order: Order) => void;',
 }, result => assert.deepEqual(result.errors, [])));
+
+test('Vite lazy and eager glob imports fail closed rather than skipping private dependencies', () => {
+  withFixture({
+    'shared/ui/collection.ts': 'export const all = import.meta.glob("../../modules/orders/ui/*.tsx");',
+    'modules/orders/ui/form.tsx': 'export const Form = () => 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-glob/));
+  withFixture({
+    'modules/orders/ui/collection.ts': 'export const all = import.meta.glob("./*.tsx", { eager: true });',
+    'modules/orders/ui/form.tsx': 'export const Form = () => 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-glob/));
+  withFixture({
+    'shared/ui/collection.ts': 'export const all = import.meta.globEager("../../modules/orders/ui/*.tsx");',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-glob/));
+});
+
+test('Vite-only alias definitions must be explicitly mirrored in checker config', () => withFixture({
+  '../vite.config.ts': 'export default { resolve: { alias: { "@orders-private": "/src/modules/orders/ui/form" } } };',
+  'shared/ui/button.ts': 'import { form } from "@orders-private"; export const b = form;',
+  'modules/orders/ui/form.ts': 'export const form = 1;',
+}, result => assert.match(result.errors.join(' '), /unverified-vite-alias/)));
+
+test('configured Vite aliases enforce the same module ownership rules', () => withFixture({
+  '../vite.config.ts': 'export default { resolve: { alias: { "@orders-private": fileURLToPath(new URL("./src/modules/orders/ui/form.ts", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@orders-private":"src/modules/orders/ui/form.ts"}}',
+  'shared/ui/button.ts': 'import { form } from "@orders-private"; export const b = form;',
+  'modules/orders/ui/form.ts': 'export const form = 1;',
+}, result => {
+  assert.match(result.errors.join(' '), /shared-must-be-independent/);
+  assert.match(result.errors.join(' '), /deep-module-import/);
+}));
+
+test('configured Vite alias can import permitted public API', () => withFixture({
+  '../vite.config.ts': 'export default { resolve: { alias: { "@orders": fileURLToPath(new URL("./src/modules/orders", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@orders":"src/modules/orders"}}',
+  'app/setup.ts': 'import { order } from "@orders"; export const setup = order;',
+  'modules/orders/index.ts': 'export const order = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('computed Vite alias config fails closed', () => withFixture({
+  '../vite.config.ts': 'export default { resolve: { alias: buildAliases() } };',
+  'app/setup.ts': 'export const setup = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/)));
+
+test('Vite root-absolute source imports cannot bypass shared ownership', () => withFixture({
+  'shared/ui/button.ts': 'import { order } from "/src/modules/orders/index"; export const b = order;',
+  'modules/orders/index.ts': 'export const order = 1;',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('configuration prototype properties are never treated as layout exemptions', () => withFixture({
+  'modules/toString/domain/order.ts': 'export const order = 1;',
+  'modules/toString/model/order.ts': 'export const draft = 1;',
+  'modules/constructor/domain/order.ts': 'export const order = 1;',
+  'modules/constructor/api/order.ts': 'export const api = 1;',
+}, result => assert.equal(result.errors.filter(e => e.includes('mixed-module-layout')).length, 2)));
+
+test('an explicitly documented own-property migration exception is honored', () => withFixture({
+  '../architecture.config.json': '{"allowMixedLayouts":{"toString":"Migration in review"}}',
+  'modules/toString/domain/order.ts': 'export const order = 1;',
+  'modules/toString/model/order.ts': 'export const draft = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite aliases that disagree with checker map are rejected', () => withFixture({
+  '../vite.config.ts': 'export default { resolve: { alias: { "@safe": fileURLToPath(new URL("./src/modules/orders/ui/private.ts", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@safe":"src/shared/lib/safe.ts"}}',
+  'app/setup.ts': 'export const setup = 1;',
+}, result => assert.match(result.errors.join(' '), /vite-alias-target-mismatch/)));
+
+test('dynamic alias expressions without inspectable targets fail closed', () => withFixture({
+  '../vite.config.ts': 'export default { resolve: { alias: { "@safe": resolveAliasDynamically() } } };',
+  '../architecture.config.json': '{"viteAliases":{"@safe":"src/shared/lib/safe.ts"}}',
+  'app/setup.ts': 'export const setup = 1;',
+}, result => assert.match(result.errors.join(' '), /unverifiable-vite-alias-target/)));

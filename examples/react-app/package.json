@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "arch": "node ../../tools/check-boundaries.cjs src",
-    "verify": "npm test && npm run build"
+    "verify": "npm run lint && npm test && npm run build",
+    "lint": "eslint src vite.config.ts vitest.setup.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "5.90.0",
@@ -30,6 +31,10 @@
     "jsdom": "26.1.0",
     "typescript": "5.9.3",
     "vite": "7.3.7",
-    "vitest": "4.1.12"
+    "vitest": "4.1.12",
+    "eslint": "9.39.5",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-jsx-a11y": "6.10.2",
+    "typescript-eslint": "8.71.1"
   }
 }

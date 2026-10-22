@@ -78,7 +78,19 @@ function runtimeImport(node, options) {
   if (ts.isExportDeclaration(node)) return !node.isTypeOnly && (!node.exportClause || !ts.isNamedExports(node.exportClause) || node.exportClause.elements.length === 0 || node.exportClause.elements.some(e => !e.isTypeOnly) || Boolean(options.verbatimModuleSyntax));
   return true;
 }
+function isViteGlobExpression(node) {
+  return ts.isPropertyAccessExpression(node) &&
+    (node.name.text === 'glob' || node.name.text === 'globEager') &&
+    ts.isMetaProperty(node.expression) &&
+    node.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+    node.expression.name.text === 'meta';
+}
 function imports(node, list, options) {
+  // Vite expands glob imports to real module dependencies. Until glob semantics
+  // are fully resolved, reject every glob call rather than silently missing edges.
+  if (ts.isCallExpression(node) && isViteGlobExpression(node.expression)) {
+    list.push({ spec: node.expression.getText(), viteGlob: true, line: node.getStart() });
+  }
   if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
     const spec = literalString(node.moduleReference.expression);
     if (spec) list.push({ spec, runtime: !node.isTypeOnly, line: node.getStart() });
@@ -131,22 +143,100 @@ function matchesAlias(spec, patterns) {
 }
 function loadBoundaryConfig(parent) {
   const file = path.join(parent, 'architecture.config.json');
-  if (!fs.existsSync(file)) return { allowPureExternal: [], allowCrossModule: {}, allowMixedLayouts: {} };
+  if (!fs.existsSync(file)) return { allowPureExternal: [], allowCrossModule: {}, allowMixedLayouts: {}, viteAliases: {} };
   const data = JSON.parse(fs.readFileSync(file, 'utf8'));
   const mixed = data.allowMixedLayouts || {};
+  const aliases = data.viteAliases || {};
   if (!Array.isArray(data.allowPureExternal || []) ||
       typeof (data.allowCrossModule || {}) !== 'object' ||
       Array.isArray(data.allowCrossModule || {}) ||
-      typeof mixed !== 'object' || Array.isArray(mixed) ||
-      Object.values(mixed).some(reason => typeof reason !== 'string' || !reason.trim())) {
+      typeof mixed !== 'object' || mixed === null || Array.isArray(mixed) ||
+      Object.values(mixed).some(reason => typeof reason !== 'string' || !reason.trim()) ||
+      typeof aliases !== 'object' || aliases === null || Array.isArray(aliases) ||
+      Object.entries(aliases).some(([alias, target]) =>
+        !alias.trim() || typeof target !== 'string' || !target.trim())) {
     throw Error('Invalid architecture.config.json: allowPureExternal must be an array, allowCrossModule an object, and allowMixedLayouts a map of nonempty migration reasons');
   }
   return {
     allowPureExternal: data.allowPureExternal || [],
     allowCrossModule: data.allowCrossModule || {},
     allowMixedLayouts: mixed,
+    viteAliases: aliases,
   };
 }
+
+function resolveViteAlias(spec, aliases, projectDir) {
+  // Vite matches exact alias names or name + "/". The configured value is a
+  // path relative to the project root, never an executable config expression.
+  for (const [find, destination] of Object.entries(aliases)) {
+    if (spec === find || spec.startsWith(find + '/')) {
+      const suffix = spec.slice(find.length).replace(/^\//, '');
+      return path.resolve(projectDir, destination, suffix);
+    }
+  }
+  return null;
+}
+function resolveLocalSource(candidate, options) {
+  const importer = path.join(path.dirname(candidate), '__architecture_alias__.ts');
+  // TypeScript handles file extensions, directory indexes and declaration files.
+  const basename = './' + path.basename(candidate);
+  return ts.resolveModuleName(basename, importer, options, ts.sys).resolvedModule?.resolvedFileName;
+}
+function verifyViteAliases(projectDir, policy, errors) {
+  const vitePath = ['vite.config.ts', 'vite.config.mts', 'vite.config.js', 'vite.config.mjs']
+    .map(name => path.join(projectDir, name)).find(fs.existsSync);
+  if (!vitePath) return;
+  const source = ts.createSourceFile(vitePath, fs.readFileSync(vitePath, 'utf8'),
+    ts.ScriptTarget.Latest, true, ts.getScriptKindFromFileName(vitePath));
+  function propertyName(prop) {
+    if (!prop || !ts.isPropertyAssignment(prop)) return null;
+    const name = prop.name;
+    return ts.isIdentifier(name) || ts.isStringLiteral(name) ? name.text : null;
+  }
+  function visit(node) {
+    if (ts.isPropertyAssignment(node) && propertyName(node) === 'resolve' &&
+        ts.isObjectLiteralExpression(node.initializer)) {
+      for (const prop of node.initializer.properties) {
+        if (propertyName(prop) !== 'alias') continue;
+        if (!ts.isObjectLiteralExpression(prop.initializer)) {
+          errors.push('unsupported-vite-alias-config: resolve.alias must be a static object mirrored in architecture.config.json viteAliases');
+          continue;
+        }
+        for (const item of prop.initializer.properties) {
+          const find = propertyName(item);
+          if (!find || !Object.hasOwn(policy.viteAliases, find)) {
+            errors.push(`unverified-vite-alias: ${find || '<computed>'} missing from architecture.config.json viteAliases`);
+            continue;
+          }
+          const expected = path.resolve(projectDir, policy.viteAliases[find]);
+          // Never trust a manually mirrored map if the actual Vite alias differs.
+          // Accept static absolute literals or fileURLToPath(new URL('./...', import.meta.url)).
+          let actual = null;
+          if (ts.isStringLiteral(item.initializer) && path.isAbsolute(item.initializer.text)) {
+            actual = path.resolve(item.initializer.text);
+          } else if (ts.isCallExpression(item.initializer) &&
+              item.initializer.expression.getText(source) === 'fileURLToPath' &&
+              item.initializer.arguments.length === 1) {
+            const expr = item.initializer.arguments[0];
+            if (ts.isNewExpression(expr) && expr.expression.getText(source) === 'URL' &&
+                expr.arguments?.length === 2 && ts.isStringLiteral(expr.arguments[0]) &&
+                expr.arguments[1].getText(source) === 'import.meta.url') {
+              actual = path.resolve(projectDir, expr.arguments[0].text);
+            }
+          }
+          if (!actual) {
+            errors.push(`unverifiable-vite-alias-target: ${find}; use an absolute path literal or fileURLToPath(new URL('./...', import.meta.url))`);
+          } else if (actual !== expected) {
+            errors.push(`vite-alias-target-mismatch: ${find}; actual Vite path differs from architecture.config.json`);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+}
+
 function check(srcDir) {
   const errors = [];
   const warnings = [];
@@ -154,6 +244,7 @@ function check(srcDir) {
   const physicalRoot = fs.realpathSync(root);
   const options = configFor(path.dirname(root)).options;
   const policy = loadBoundaryConfig(path.dirname(root));
+  verifyViteAliases(path.dirname(root), policy, errors);
   const files = walk(root).map(f => path.resolve(f));
   if (files.length === 0) errors.push('no-source-files: No supported source files found');
   const known = new Set(files);
@@ -187,8 +278,15 @@ function check(srcDir) {
     imports(sf, dependencies, options);
     for (const dep of dependencies) {
       const source = actual;
+      if (dep.viteGlob) {
+        errors.push(`unsupported-vite-glob: ${source.relative} uses ${dep.spec}; use explicit imports or implement audited glob expansion`);
+        continue;
+      }
       const relativeSpec = dep.spec.startsWith('.');
-      const projectAlias = matchesAlias(dep.spec, options.paths) ||
+      const rootAbsolute = dep.spec.startsWith('/');
+      const rootPath = rootAbsolute ? path.resolve(path.dirname(root), '.' + dep.spec) : null;
+      const viteAlias = resolveViteAlias(dep.spec, policy.viteAliases, path.dirname(root));
+      const projectAlias = rootAbsolute || Boolean(viteAlias) || matchesAlias(dep.spec, options.paths) ||
         (Boolean(options.baseUrl) && /^(?:modules|shared|routes|app|testing|generated)\//.test(dep.spec));
       const barePackage = !relativeSpec && !projectAlias;
       const isTest = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file);
@@ -202,6 +300,8 @@ function check(srcDir) {
       if (localAsset) {
         const candidates = [];
         if (relativeSpec) candidates.push(path.resolve(path.dirname(file), staticAsset));
+        if (rootPath) candidates.push(rootPath);
+        if (viteAlias) candidates.push(viteAlias);
         if (projectAlias) {
           const baseDir = options.baseUrl || path.dirname(root);
           // Match tsconfig.paths before falling back to baseUrl; otherwise a
@@ -235,7 +335,9 @@ function check(srcDir) {
           errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
         }
       } else {
-        resolved = ts.resolveModuleName(dep.spec, file, options, ts.sys).resolvedModule?.resolvedFileName;
+        resolved = viteAlias || rootPath
+          ? resolveLocalSource(viteAlias || rootPath, options)
+          : ts.resolveModuleName(dep.spec, file, options, ts.sys).resolvedModule?.resolvedFileName;
         const externalDependency = Boolean(resolved && normPath(resolved).includes('/node_modules/'));
         if (pureCode && !isTest &&
             (barePackage || externalDependency) && !policy.allowPureExternal.includes(dep.spec)) {
@@ -323,7 +425,7 @@ function check(srcDir) {
     }
   }
   for (const [name, layout] of moduleLayouts) {
-    if (layout.simple.size && layout.complex.size && !policy.allowMixedLayouts[name]) {
+    if (layout.simple.size && layout.complex.size && !Object.hasOwn(policy.allowMixedLayouts, name)) {
       errors.push(`mixed-module-layout: ${name} has both simple (${[...layout.simple].join(', ')}) and complex (${[...layout.complex].join(', ')}) layers; use an explicitly justified allowMixedLayouts migration exception`);
     }
   }

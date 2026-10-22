@@ -22,7 +22,7 @@ This repository documents a **pragmatic modular/feature-first React architecture
 
 ## Checker and testing
 
-The AST checker supports JS, JSX, MJS, CJS, TS, TSX, MTS, CTS, declaration files, import-equals, literal imports/re-exports and TypeScript path aliases. It checks physical source-file symlink ownership and module-layout consistency; `allowMixedLayouts` requires a documented migration justification and never permits cross-mode imports. It enforces import ownership for source and local static assets, including JSON. Its limitations are in [the milestone documentation](docs/implementation-milestone.md); do not claim that it proves semantic SOLID compliance.
+The AST checker supports JS, JSX, MJS, CJS, TS, TSX, MTS, CTS, declaration files, import-equals, literal imports/re-exports and TypeScript path aliases. It checks physical source-file symlink ownership and module-layout consistency; `allowMixedLayouts` requires a documented migration justification and never permits cross-mode imports. It explicitly rejects `import.meta.glob` until glob expansion can be audited; supports root-absolute Vite imports and checks Vite aliases against an explicit `viteAliases` map with inspectable matching targets. Object prototype properties never act as migration exemptions. It enforces import ownership for source and local static assets, including JSON. Its limitations are in [the milestone documentation](docs/implementation-milestone.md); do not claim that it proves semantic SOLID compliance.
 
 ```sh
 npm ci
@@ -34,7 +34,7 @@ npm --prefix examples/orders audit
 npm --prefix examples/react-app audit
 ```
 
-Install dependencies and generate trustworthy registry-backed lockfiles before asserting full test coverage or merge readiness. If installation is blocked, report exactly which checks were and were not run.
+The React example also runs ESLint's maintained React Hooks, JSX accessibility and TypeScript rules through its `verify` script. Install dependencies and generate trustworthy registry-backed lockfiles before asserting full test coverage or merge readiness. If installation is blocked, report exactly which checks were and were not run.
 
 ## GitHub work
 

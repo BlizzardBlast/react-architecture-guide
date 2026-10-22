@@ -36,7 +36,7 @@ For complex business workflows, **replace**, rather than combine blindly, the si
 - Domain, model, application, and pure shared utilities do not depend on React, HTTP clients, generated DTOs, technical shared services, or presentation assets. Pure packages need explicit, reviewed allowlisting.
 - A module's internal code imports its own files directly, not its public barrel. External consumers access the public API, not private implementation paths.
 - Runtime cycles and cross-module type cycles are rejected. Intra-module type-only cycles require review.
-- Presentation code may import local styles/images/JSON within ownership boundaries; pure code may import owned JSON data without importing technical layers. Physical source-file symlinks cannot change module ownership.
+- Unverifiable `import.meta.glob` is rejected explicitly (fail closed). Vite `resolve.alias` imports must be mirrored in `architecture.config.json` as `viteAliases`, with matching inspectable targets. Vite root-absolute `/src/...` imports are checked. Presentation code may import local styles/images/JSON within ownership boundaries; pure code may import owned JSON data without importing technical layers. Physical source-file symlinks cannot change module ownership.
 - React Hooks follow React's rules. Query identity reflects data scope; mutations, errors, loading, accessibility, and server validation need meaningful tests.
 
 ## Guides and examples
@@ -71,7 +71,7 @@ npm --prefix examples/orders audit
 npm --prefix examples/react-app audit
 ```
 
-`npm run verify` runs the Markdown fixture and link checks, architecture fixture tests, standalone orders example, and React example tests/typecheck/architecture/build. The individual checker can be run with `node tools/check-boundaries.cjs examples/react-app/src`. Do not interpret a test existing as a test having passed.
+`npm run verify` runs Markdown checks, architecture regression tests, the standalone orders example, and the React example's ESLint React Hooks/JSX accessibility rules, tests, typecheck, architecture check and Vite build. The individual checker can be run with `node tools/check-boundaries.cjs examples/react-app/src`. Do not interpret a test existing as a test having passed.
 
 **Current draft-PR limitation:** This execution environment cannot reach the npm registry, and this branch has no authentic committed lockfiles. First generate and commit lockfiles with real registry access (`npm install --package-lock-only --ignore-scripts` in each directory), then perform the clean installations, audits and browser smoke tests above. Do not merge before full verification.
 

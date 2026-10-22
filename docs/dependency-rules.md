@@ -68,6 +68,31 @@ For an incremental migration, `allowMixedLayouts` maps a module name to a **none
 
 Source-file symlinks are checked against their physical targets, not just their apparent paths. Aliases that point into a different module/layer, or outside the validated source root, are rejected. Same-owner aliases remain possible. Ownership enforcement applies to type-only and runtime imports.
 
+### Vite imports and alias integrity
+
+`import.meta.glob` and `import.meta.globEager` are **unsupported and fail closed** in the current checker. They are never silently treated as safe. Prefer explicit imports until auditable glob expansion is implemented, including for eager and lazy globs.
+
+When a project defines Vite `resolve.alias` in `vite.config.ts`, mirror each literal alias name in `architecture.config.json` under `viteAliases`. Values are target paths relative to the app directory (the parent of `src/`). The checker compares mirrored paths against statically inspectable Vite targets and rejects mismatches or unverifiable computed aliases. Supported Vite forms are absolute target string literals and `fileURLToPath(new URL('./src/...', import.meta.url))`. Dynamic alias factories and regex/array configurations fail closed. Vite root-absolute `/src/...` paths are also checked against normal module ownership.
+
+For example, in `vite.config.ts`:
+
+```ts
+import { fileURLToPath } from 'node:url';
+export default {
+  resolve: {
+    alias: { '@orders': fileURLToPath(new URL('./src/modules/orders', import.meta.url)) },
+  },
+};
+```
+
+Mirror its resolved target:
+
+```json
+{ "viteAliases": { "@orders": "src/modules/orders" } }
+```
+
+The checker does not execute the Vite config. Unverifiable dynamic configuration must be changed or explicitly integrated into a trusted module resolver; never silently bypass the architecture check. Alias targets cannot be used to evade shared or sibling module boundaries.
+
 ## Avoid circular "generic" services
 
 A generic `shared/analytics` helper must not import an Order type to format an event. Instead, keep primitive analytics transport in shared and an Order-specific adapter inside orders/infrastructure; compose them at the application boundary. The same pattern applies to logging, notification payloads, permissions and API transport. See [ADR 0003](decisions/0003-generic-services.md).

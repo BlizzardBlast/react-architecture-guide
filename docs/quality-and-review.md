@@ -12,6 +12,8 @@ Use this checklist when reviewing a change to the guide or adopting its rules in
 - [ ] JSON, CSS/images, and JS/TS source imports stay within their physical ownership and source-root boundaries, including symlinks and path aliases.
 - [ ] A module does not mix simple (`api/model`) and complex (`domain/application/infrastructure`) layers without a reviewed, justified migration exception; direct cross-mode imports remain forbidden.
 - [ ] Cross-module type-only cycles and runtime cycles are rejected; internal type-only cycles are reviewed.
+- [ ] Vite globs fail closed and any Vite-only aliases have inspectable targets that match `architecture.config.json` `viteAliases`, including root-absolute imports.
+- [ ] Migration exceptions require own property keys, not inherited Object prototype fields.
 - [ ] Complex domain/application/infrastructure/UI layers point inward as documented, without unnecessary DI/repositories.
 
 ## React, state and security
@@ -21,7 +23,8 @@ Use this checklist when reviewing a change to the guide or adopting its rules in
 - [ ] Query keys include source/security scope; catalog and checkout expose accessible loading, empty, error and retry states.
 - [ ] Saving cannot be accidentally submitted twice while pending; a rejected save releases guards and enables retry.
 - [ ] Product/service changes during a pending save do not unlock another save.
-- [ ] Inputs have stable accessible labels, validation associations and meaningful status announcements.
+- [ ] Inputs have stable accessible labels, validation associations and meaningful status announcements; a save failure remains visible after switching products.
+- [ ] React lint checks enforce Hooks, TypeScript and JSX accessibility rules in the local verification command.
 - [ ] Untrusted server data is validated; authorization/idempotency is enforced by a trusted backend.
 - [ ] SSR services and query clients are scoped correctly; server-only data is not bundled into clients.
 

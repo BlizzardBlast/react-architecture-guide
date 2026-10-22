@@ -17,6 +17,7 @@ interface SaveGuard {
   readonly isSaving: boolean;
   readonly beginSave: () => boolean;
   readonly finishSave: () => void;
+  readonly reportSaveError: (message: string, productName: string) => void;
 }
 
 export function OrderCheckout(props: Props) {
@@ -24,9 +25,11 @@ export function OrderCheckout(props: Props) {
   // must not unlock another save while the first operation remains in flight.
   const inFlight = useRef(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   function beginSave() {
     if (inFlight.current) return false;
     inFlight.current = true;
+    setSaveError(null);
     setIsSaving(true);
     return true;
   }
@@ -34,12 +37,23 @@ export function OrderCheckout(props: Props) {
     inFlight.current = false;
     setIsSaving(false);
   }
+  function reportSaveError(message: string, productName: string) {
+    // Hook-level callbacks still run after the keyed form unmounts. Keep the
+    // error visible even if a user switches to another product mid-request.
+    setSaveError(`Couldn't save ${productName}: ${message}`);
+  }
   // Remounting clears previous product's feedback, but not the pending save guard.
   const key = [props.service.scopeId, props.selection?.productId ?? '', props.selection?.priceCents ?? 0].join(':');
-  return <CheckoutForm key={key} {...props} isSaving={isSaving} beginSave={beginSave} finishSave={finishSave} />;
+  return (
+    <>
+      <CheckoutForm key={key} {...props} isSaving={isSaving} beginSave={beginSave}
+        finishSave={finishSave} reportSaveError={reportSaveError} />
+      {saveError && <p role="alert">{saveError}</p>}
+    </>
+  );
 }
 
-function CheckoutForm({ service, selection, isSaving, beginSave, finishSave }: Props & SaveGuard) {
+function CheckoutForm({ service, selection, isSaving, beginSave, finishSave, reportSaveError }: Props & SaveGuard) {
   const [customerName, setCustomerName] = useState('');
   const [validationError, setValidationError] = useState<OrderValidationIssue | null>(null);
   const id = useId();
@@ -55,6 +69,7 @@ function CheckoutForm({ service, selection, isSaving, beginSave, finishSave }: P
       setCustomerName('');
       await queryClient.invalidateQueries({ queryKey: orderKey });
     },
+    onError: error => reportSaveError(error.message, selection?.productName ?? 'product'),
     // Mutation reset does not cancel requests. Release the cross-form guard only
     // after the actual asynchronous mutation has settled.
     onSettled: finishSave,
@@ -99,7 +114,6 @@ function CheckoutForm({ service, selection, isSaving, beginSave, finishSave }: P
           {isSaving || mutation.isPending ? 'Saving…' : 'Place order'}
         </button>
         {validationError && <p id={customerNameError ? customerErrorId : undefined} role="alert">{validationError.message}</p>}
-        {mutation.isError && <p role="alert">{mutation.error.message}</p>}
         {mutation.isSuccess && <p role="status">Order saved.</p>}
       </form>
       <h3>Order history</h3>

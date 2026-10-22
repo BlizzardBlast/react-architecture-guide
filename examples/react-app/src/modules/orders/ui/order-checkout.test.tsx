@@ -216,3 +216,33 @@ it('releases the save guard and permits retry after a rejected save', async () =
   expect(placeOrder).toHaveBeenCalledTimes(2);
   expect(await screen.findByText('Order saved.')).toBeInTheDocument();
 });
+
+it('keeps a prior product save failure visible after switching products mid-flight', async () => {
+  let fail!: (error: Error) => void;
+  const pending = new Promise<Awaited<ReturnType<OrdersService['placeOrder']>>>(
+    (_resolve, reject) => { fail = reject; },
+  );
+  const placeOrder = vi.fn().mockImplementation(() => pending);
+  const service: OrdersService = {
+    scopeId: 'old-product-rejection',
+    listOrders: async () => [],
+    placeOrder,
+  };
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const tea = { productId: 'tea', productName: 'Green tea', priceCents: 250 };
+  const coffee = { productId: 'coffee', productName: 'Coffee', priceCents: 375 };
+  const view = (selection: typeof tea) => (
+    <QueryClientProvider client={client}>
+      <OrderCheckout service={service} selection={selection} />
+    </QueryClientProvider>
+  );
+  const { rerender } = render(view(tea));
+  await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  rerender(view(coffee));
+  expect(screen.getByRole('button', { name: /saving/i })).toBeDisabled();
+  fail(new Error('Network unavailable'));
+  expect(await screen.findByRole('alert')).toHaveTextContent(/green tea.*network unavailable/i);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled());
+  expect(placeOrder).toHaveBeenCalledTimes(1);
+});
