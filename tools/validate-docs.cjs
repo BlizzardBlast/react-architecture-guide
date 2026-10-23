@@ -43,6 +43,11 @@ function inspectMarkdown(relative, contents, root) {
   // an HTML-looking "<!--" inside a URL/title must not start a comment.
   // Return a SAME-LENGTH detection mask; retain original text for link checks.
   function maskLinkMetadata(line) {
+    // CommonMark reference definitions are block-level link syntax. A title
+    // containing <!-- must not open an HTML comment. Keep the original row
+    // intact so the existing reference destination check still executes.
+    const definition = /^ {0,3}\[[^\]\n]+\]:[ \t]*(?:<(?:\\.|[^>])*?>|\S+)(?:[ \t]+(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\((?:\\.|[^)])*\)))?[ \t]*$/.test(line);
+    if (definition) return ' '.repeat(line.length);
     // match.index uses UTF-16 offsets; splitting by code points shifts emoji.
     const chars = line.split('');
     const opener = /!?\[[^\]\n]*\]\(/g;

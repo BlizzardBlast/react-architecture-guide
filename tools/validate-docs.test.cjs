@@ -270,3 +270,34 @@ test('Unicode before link metadata preserves HTML comment detection offsets', ()
     assert.match(issues[0], /README\.md:2: missing local link/);
   },
 ));
+
+test('reference-definition quoted title with HTML-looking text does not hide later broken links', () => fixture(
+  '[safe]: README.md "<!--"\n[Safe][safe]\n[Broken](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /README\.md:3: missing local link: missing\.md/);
+  },
+));
+
+test('reference-definition destination with a query comment opener is still link metadata', () => fixture(
+  '[safe]: README.md?value=<!--\n[Safe][safe]\n[Broken](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /README\.md:3: missing local link/);
+  },
+));
+
+test('reference title containing HTML-looking text does not hide its own invalid destination', () => fixture(
+  '[broken]: missing.md "<!--"\n[Broken][broken]', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link: missing\.md/),
+));
+
+test('quoted reference titles with Unicode preceding them preserve comment masking offsets', () => fixture(
+  '[🔥]: README.md "<!--"\n[Link][🔥]\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /README\.md:3: missing local link/),
+));
+
+test('real comments after definitions still conceal inactive links', () => fixture(
+  '[safe]: README.md "<!--"\n<!-- [Inactive](missing.md) -->\n[Safe][safe]', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));

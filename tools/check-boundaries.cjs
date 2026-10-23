@@ -259,7 +259,7 @@ function verifyViteAliases(projectDir, policy, errors) {
     .map(ext => path.join(projectDir, 'vite.config.' + ext)).filter(fs.existsSync);
   const packageFile = path.join(projectDir, 'package.json');
   const scripts = fs.existsSync(packageFile)
-    ? Object.values(JSON.parse(fs.readFileSync(packageFile, 'utf8')).scripts || {}) : [];
+    ? JSON.parse(fs.readFileSync(packageFile, 'utf8')).scripts || {} : {};
   const selections = new Set();
   let usesDefault = false;
   // Split compound scripts without treating separators inside quoted arguments
@@ -338,7 +338,8 @@ function verifyViteAliases(projectDir, policy, errors) {
   // Vite accepts --host with an optional value. It must not consume another CLI flag.
   const optionalArgumentOptions = new Set(['--host']);
   const booleanOptions = new Set(['--strictPort', '--force', '--clearScreen', '--cors', '--help', '--version']);
-  for (const script of scripts) {
+  const buildScript = name => /^(?:build|bundle|dev|serve|start|preview|watch)(?::|$)/i.test(name);
+  for (const [scriptName, script] of Object.entries(scripts)) {
     if (typeof script !== 'string') continue;
     const commands = splitShell(script);
     if (!commands) {
@@ -371,6 +372,40 @@ function verifyViteAliases(projectDir, policy, errors) {
     }
     const commandsWithVite = tokens.map(words => ({ words, args: viteArguments(words) }))
       .filter(entry => entry.args !== null);
+    // For build/dev entrypoints, the actual Vite invocation must be visible.
+    // An opaque Node/tsx build file or an unrelated npm script can invoke Vite
+    // programmatically with a different config after validation.
+    if (buildScript(scriptName)) {
+      // Keep this allowlist narrow: unknown build tools can hide a Vite
+      // invocation via an external script, even without saying 'vite'.
+      const opaque = /\$\(|`/.test(script) || tokens.some(words => {
+        if (viteArguments(words) !== null) return false;
+        const executable = (words[0] || '').replace(/\\/g, '/');
+        if (['echo', 'printf', 'tsc', 'eslint', 'biome', 'oxlint', 'oxfmt'].includes(executable)) {
+          return false;
+        }
+        if (executable === 'node' || executable === 'node.exe') {
+          return !/^(?:\.\.\/)*tools\/check-boundaries\.cjs$/.test(
+            (words[1] || '').replace(/\\/g, '/'));
+        }
+        if (['npm', 'pnpm', 'yarn'].includes(executable) && words[1] === 'run') {
+          const target = words[2] === '--silent' ? words[3] : words[2];
+          if (!['arch', 'check:arch', 'test:architecture'].includes(target)) return true;
+          // An actual npm script may not repurpose an instrumentation name
+          // to secretly launch a Vite build.
+          if (Object.hasOwn(scripts, target)) {
+            const expected = scripts[target].trim();
+            if (!/^node\s+(?:\.\.\/)*tools\/check-boundaries\.cjs(?:\s|$)/.test(expected)) return true;
+          }
+          return false;
+        }
+        return true;
+      });
+      if (opaque) {
+        errors.push('unsupported-vite-custom-config: opaque build script may execute an unverified Vite config: ' + scriptName);
+        return;
+      }
+    }
     if (!commandsWithVite.length) {
       // Unknown launchers (npx --yes, cross-env, custom wrappers) must not
       // accidentally fall through to default Vite configuration discovery.
@@ -534,17 +569,33 @@ function verifyViteAliases(projectDir, policy, errors) {
       (cjsFile ? 'module.exports assignment' : 'default config export'));
     return;
   }
-  // Do not trust any additional executable CommonJS statement, including
-  // const declarations whose initializers mutate module.exports indirectly.
-  // Only inert directive string literals are safe alongside the one export.
-  if (cjsFile && source.statements.some(statement => statement !== exports[0] &&
-      !(ts.isExpressionStatement(statement) && ts.isStringLiteral(statement.expression)))) {
-    errors.push('unsupported-vite-alias-config: CommonJS config has additional top-level effects');
+  // Side-effecting ESM declarations can mutate the exported config after
+  // static inspection, just as CommonJS initializers can. Imports and erased
+  // TypeScript type declarations are the only allowed companions of export.
+  const inert = statement =>
+    (ts.isExpressionStatement(statement) && ts.isStringLiteral(statement.expression)) ||
+    (!cjsFile && (ts.isImportDeclaration(statement) ||
+      ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)));
+  if (source.statements.some(statement => statement !== exports[0] && !inert(statement))) {
+    errors.push('unsupported-vite-alias-config: additional top-level executable declarations');
     return;
   }
+  const trustedDefineConfig = source.statements.some(statement => {
+    if (!ts.isImportDeclaration(statement) ||
+        !['vite', 'vitest/config'].includes(literalString(statement.moduleSpecifier))) return false;
+    const clause = statement.importClause;
+    return !clause?.isTypeOnly && clause?.namedBindings &&
+      ts.isNamedImports(clause.namedBindings) &&
+      clause.namedBindings.elements.some(binding => !binding.isTypeOnly &&
+        binding.name.text === 'defineConfig' && !binding.propertyName);
+  });
   let config = cjsFile ? exports[0].expression.right : exports[0].expression;
   if (ts.isCallExpression(config) && ts.isIdentifier(config.expression) &&
       config.expression.text === 'defineConfig' && config.arguments.length === 1) {
+    if (!trustedDefineConfig || cjsFile) {
+      errors.push('unsupported-vite-alias-config: untrusted defineConfig; import from vite or vitest/config');
+      return;
+    }
     config = config.arguments[0];
   }
   // A config factory, spread or local reference may inject aliases into Vite.

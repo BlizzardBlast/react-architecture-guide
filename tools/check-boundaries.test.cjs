@@ -548,7 +548,7 @@ test('Vite alias map must reflect Vite config in both directions', () => withFix
 }, result => assert.match(result.errors.join(' '), /unverified-vite-alias/)));
 
 test('inline Vite defineConfig with no aliases is supported', () => withFixture({
-  '../vite.config.ts': 'export default defineConfig({ plugins: [react()], test: { environment: "jsdom" } });',
+  '../vite.config.ts': 'import { defineConfig } from "vitest/config"; export default defineConfig({ plugins: [react()], test: { environment: "jsdom" } });',
   'app/setup.ts': 'export const setup = 1;',
 }, result => assert.deepEqual(result.errors, [])));
 
@@ -847,12 +847,12 @@ test('Vite helper locally shadowed as a function cannot certify aliases', () => 
   '../vite.config.ts': 'const fileURLToPath = () => "/tmp/private"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)) } } };',
   '../architecture.config.json': '{"viteAliases":{"@":"src/shared"}}',
   'shared/ui/button.ts': 'export const button = 1;',
-}, result => assert.match(result.errors.join(' '), /untrusted-vite-alias-helper/)));
+}, result => assert.match(result.errors.join(' '), /(?:untrusted-vite-alias-helper|unsupported-vite-alias-config)/)));
 test('shadowed URL constructor is not a trusted Vite alias expression', () => withFixture({
   '../vite.config.ts': 'import { fileURLToPath } from "node:url"; const URL = () => ({ pathname: "/tmp/private" }); export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)) } } };',
   '../architecture.config.json': '{"viteAliases":{"@":"src/shared"}}',
   'shared/ui/button.ts': 'export const button = 1;',
-}, result => assert.match(result.errors.join(' '), /untrusted-vite-alias-helper/)));
+}, result => assert.match(result.errors.join(' '), /(?:untrusted-vite-alias-helper|unsupported-vite-alias-config)/)));
 test('a directly imported Node URL helper remains supported', () => withFixture({
   '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)) } } };',
   '../architecture.config.json': '{"viteAliases":{"@":"src/shared"}}',
@@ -881,7 +881,7 @@ test('fixture setup preserves unbound Vite helpers without rewriting config', ()
   });
   try {
     assert.equal(fs.readFileSync(path.join(fixture.root, '../vite.config.ts'), 'utf8'), config);
-    assert.match(check(fixture.root).errors.join(' '), /untrusted-vite-alias-helper/);
+    assert.match(check(fixture.root).errors.join(' '), /(?:untrusted-vite-alias-helper|unsupported-vite-alias-config)/);
   } finally { fixture.cleanup(); }
 });
 
@@ -1310,3 +1310,79 @@ test('echoed shell interpreter names do not imply an executable Vite wrapper', (
     '../vite.config.ts': 'export default { plugins: [] };',
     'app/start.ts': 'export const started = true;',
   }, result => assert.deepEqual(result.errors, [])));
+
+test('unbound and shadowed defineConfig cannot certify static alias configuration', () => {
+  const configs = [
+    'function defineConfig(config) { config.resolve.alias["@safe"] = "/private"; return config; } export default defineConfig({ resolve: { alias: { "@safe": "/safe" } } });',
+    'const defineConfig = config => { config.resolve.alias["@safe"] = "/private"; return config; }; export default defineConfig({ resolve: { alias: { "@safe": "/safe" } } });',
+    'export default defineConfig({ resolve: { alias: { "@safe": "/safe" } } });',
+    'import { defineConfig } from "untrusted-helper"; export default defineConfig({ resolve: { alias: { "@safe": "/safe" } } });',
+  ];
+  for (const config of configs) withFixture({
+    '../vite.config.ts': config,
+    '../architecture.config.json': '{"viteAliases":{"@safe":"src/shared/lib"}}',
+    'shared/lib/safe.ts': 'export const safe = true;',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/));
+});
+
+test('only a directly trusted Vite or Vitest defineConfig import can wrap a static object', () => {
+  for (const origin of ['vite', 'vitest/config']) withFixture({
+    '../vite.config.ts': 'import { defineConfig } from "' + origin + '"; export default defineConfig({ plugins: [] });',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('additional executable ESM declarations cannot mutate the verified configuration', () => {
+  for (const extra of [
+    'function mutate(config) { config.resolve.alias["@safe"] = "/private"; }',
+    'const altered = (globalThis.URL = () => ({ href: "file:///private" }));',
+    'class UnexpectedSideEffect { static value = globalThis.URL = () => 1; }',
+  ]) withFixture({
+    '../vite.config.ts': 'import { defineConfig } from "vite"; ' + extra +
+      ' export default defineConfig({ resolve: { alias: { "@safe": "/safe" } } });',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/));
+});
+
+test('opaque build runners cannot quietly verify a different default Vite config', () => {
+  for (const script of [
+    'node scripts/build.mjs',
+    'tsx scripts/build.ts',
+    'node ./scripts/build.mjs --config hidden.vite.config.ts',
+    'python scripts/build.py',
+    'npm run --silent custombuild',
+    'npm run build:delegated',
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: script } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { resolve: { alias: { "@unsafe": "/private" } } };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('an external builder in a dev or namespaced build entrypoint is also rejected', () => {
+  for (const key of ['dev', 'build:prod', 'preview', 'bundle']) withFixture({
+    '../package.json': JSON.stringify({ scripts: { [key]: 'node scripts/hidden-build.js' } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('instrumentation script names cannot be repurposed to run an opaque builder', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    build: 'npm run arch && vite build',
+    arch: 'node scripts/hidden-vite.mjs',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('an explicit local boundary check followed by Vite remains supported', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    build: 'npm run arch && tsc --noEmit && vite build',
+    arch: 'node ../../tools/check-boundaries.cjs src',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
