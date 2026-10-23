@@ -1047,3 +1047,24 @@ test('custom Vite config symlinks cannot escape the project', t => {
     fs.rmSync(outside, { force: true, recursive: true });
   }
 });
+
+test('declared custom Vite config cannot override an npm script using defaults', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../vite.config.ts': 'export default { resolve: { alias: { "@private": "/src/modules/orders/ui" } } };',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const value = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('multiple Vite commands or --config flags in one script fail closed', () => {
+  for (const command of [
+    'vite build --config a.vite.config.ts && vite dev --config b.vite.config.ts',
+    'vite build --config a.vite.config.ts --config b.vite.config.ts',
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: command } }),
+    '../architecture.config.json': '{"viteConfig":"a.vite.config.ts"}',
+    '../a.vite.config.ts': 'export default { plugins: [] };',
+    '../b.vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const value = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});

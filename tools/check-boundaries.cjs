@@ -263,7 +263,15 @@ function verifyViteAliases(projectDir, policy, errors) {
   const selections = new Set();
   let usesDefault = false;
   for (const command of scripts) {
-    if (typeof command !== 'string' || !/\bvite\b/.test(command)) continue;
+    const viteCommand = /(?:^|[\s;&|])vite(?:\.cmd)?(?=\s|$)/g;
+    if (typeof command !== 'string' || !viteCommand.test(command)) continue;
+    // Match CLI tokens, not the word "vite" inside custom.vite.config.ts.
+    // A compound script or repeated flag could choose more than one config.
+    if ([...command.matchAll(/(?:^|[\s;&|])vite(?:\.cmd)?(?=\s|$)/g)].length !== 1 ||
+        [...command.matchAll(/--config\b/g)].length > 1) {
+      errors.push('unsupported-vite-custom-config: ambiguous Vite command in npm script');
+      return;
+    }
     const selection = /--config(?:\s+|=)(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/.exec(command);
     if (selection) selections.add(path.resolve(projectDir, selection[1] || selection[2] || selection[3]));
     else if (/--config\b/.test(command)) {
@@ -279,6 +287,10 @@ function verifyViteAliases(projectDir, policy, errors) {
   const selected = [...selections][0];
   if (selected && (!declared || declared !== selected)) {
     errors.push('unsupported-vite-custom-config: npm --config must match architecture.config.json viteConfig');
+    return;
+  }
+  if (declared && usesDefault && !selected) {
+    errors.push('unsupported-vite-custom-config: npm scripts use the default Vite config, not declared viteConfig');
     return;
   }
   if (declared && !isWithinRoot(declared, projectDir)) {
