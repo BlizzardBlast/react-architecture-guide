@@ -387,3 +387,38 @@ test('real HTML comments after reference labels still mask inactive links', () =
   '[ref]: README.md\n[example <!--][ref] <!-- [Inactive](missing.md) -->\n[Self](README.md)', root =>
     assert.deepEqual(checkAll(root).issues, []),
 ));
+
+test('escaped brackets inside full references do not create phantom HTML comments', () => fixture(
+  '[img]: README.md\n![some \\] <!--][img]\n[Broken](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /README\.md:3: missing local link: missing\.md/);
+  },
+));
+
+test('nested image labels protect comment text and preserve following active links', () => fixture(
+  '![outer [inner] <!--](README.md)\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /README\.md:2: missing local link/),
+));
+
+test('nested and escaped image alt labels are supported together', () => fixture(
+  '![nested [x \\] z] <!--](README.md)\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /README\.md:2: missing local link/),
+));
+
+test('escaped bracket in reference-style text link cannot hide active links', () => fixture(
+  '[ref]: README.md\n[label \\] <!--][ref]\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /README\.md:3: missing local link/),
+));
+
+test('unreferenced bracket-like text must not hide real HTML comment openers', () => fixture(
+  '[literal <!--]\n[Inactive](missing.md)\n-->', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));
+
+test('balanced shortcut/collapsed reference labels continue to validate links', () => {
+  for (const image of ['![img <!--]', '![img <!--][]']) fixture(
+    '[img <!--]: README.md\n' + image + '\n[Broken](missing.md)', root =>
+      assert.match(checkAll(root).issues.join(' '), /README\.md:3: missing local link/),
+  );
+});

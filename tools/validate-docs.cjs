@@ -43,43 +43,84 @@ function inspectMarkdown(relative, contents, root) {
   // CommonMark link destinations and optional quoted titles are inline data:
   // an HTML-looking "<!--" inside a URL/title must not start a comment.
   // Return a SAME-LENGTH detection mask; retain original text for link checks.
+  // Bounded CommonMark subset: balanced bracket labels with escape support.
+  const normalizeReference = label => label.replace(/\\([\[\]\\])/g, '$1')
+    .trim().replace(/\s+/g, ' ').toLowerCase();
+  function closingBracket(line, at) {
+    let depth = 0;
+    for (let i = at; i < line.length; i++) {
+      if (line[i] === '\\') { i++; continue; }
+      if (line[i] === '[') depth++;
+      else if (line[i] === ']' && --depth === 0) return i;
+    }
+    return -1;
+  }
+  function isEscaped(line, at) {
+    let count = 0;
+    for (let i = at - 1; i >= 0 && line[i] === '\\'; i--) count++;
+    return count % 2 === 1;
+  }
+  function closingDestination(line, open) {
+    let depth = 0, quoted = null;
+    for (let i = open; i < line.length; i++) {
+      const c = line[i];
+      if (c === '\\') { i++; continue; }
+      if (quoted) { if (c === quoted) quoted = null; continue; }
+      if (c === '"' || c === "'") { quoted = c; continue; }
+      if (c === '(') depth++;
+      else if (c === ')' && --depth === 0) return i;
+    }
+    return -1;
+  }
+  // Definitions may follow their uses. An unreferenced '[text <!--]' is not
+  // a link and must NOT mask an actual HTML comment opener.
+  const knownReferences = new Set();
+  for (const sourceLine of lines) {
+    const start = /^ {0,3}\[/.exec(sourceLine);
+    if (!start) continue;
+    const end = closingBracket(sourceLine, start[0].length - 1);
+    if (end !== -1 && sourceLine[end + 1] === ':' &&
+        /^\s*(?:<[^>]+>|\S+)/.test(sourceLine.slice(end + 2))) {
+      knownReferences.add(normalizeReference(sourceLine.slice(start[0].length, end)));
+    }
+  }
   function maskLinkMetadata(line) {
-    // CommonMark reference definitions are block-level link syntax. A title
-    // containing <!-- must not open an HTML comment. Keep the original row
-    // intact so the existing reference destination check still executes.
-    const definition = /^ {0,3}\[[^\]\n]+\]:[ \t]*(?:<(?:\\.|[^>])*?>|\S+)(?:[ \t]+(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\((?:\\.|[^)])*\)))?[ \t]*$/.test(line);
-    if (definition) return ' '.repeat(line.length);
-    // match.index uses UTF-16 offsets; splitting by code points shifts emoji.
-    const chars = line.split('');
-    // A CommonMark bracket label (inline link, full/collapsed reference,
-    // shortcut reference or image alt) is text metadata, not an HTML block.
-    // Literal <!-- inside any balanced label must not open a phantom comment.
-    // Preserve the original text for reference/destination verification.
-    for (const label of line.matchAll(/!?\[[^\]\n]*\]/g)) {
-      for (let i = label.index; i < label.index + label[0].length; i++) {
-        chars[i] = ' ';
+    const start = /^ {0,3}\[/.exec(line);
+    if (start) {
+      const end = closingBracket(line, start[0].length - 1);
+      if (end !== -1 && line[end + 1] === ':' &&
+          /^\s*(?:<[^>]+>|\S+)/.test(line.slice(end + 2))) {
+        return ' '.repeat(line.length);
       }
     }
-    const opener = /!?\[[^\]\n]*\]\(/g;
-    for (const match of line.matchAll(opener)) {
-      const first = match.index + match[0].length;
-      let depth = 1, quote = null, escaped = false, end = -1;
-      for (let j = first; j < line.length; j++) {
-        const c = line[j];
-        if (escaped) { escaped = false; continue; }
-        if (c === '\\') { escaped = true; continue; }
-        if (quote) { if (c === quote) quote = null; continue; }
-        if (c === '"' || c === "'") { quote = c; continue; }
-        if (c === '(') depth++;
-        else if (c === ')' && --depth === 0) { end = j; break; }
+    const chars = line.split(''); // Preserve UTF-16 RegExp offsets.
+    const hide = (from, until) => {
+      for (let k = from; k < until; k++) chars[k] = ' ';
+    };
+    for (let i = 0; i < line.length; i++) {
+      const image = line[i] === '!' && line[i + 1] === '[' && !isEscaped(line, i);
+      const open = image ? i + 1 : i;
+      if (line[open] !== '[' || isEscaped(line, open)) continue;
+      const end = closingBracket(line, open);
+      if (end === -1) continue;
+      const label = line.slice(open + 1, end);
+      const after = end + 1;
+      if (line[after] === '(') {
+        const close = closingDestination(line, after);
+        if (close < 0) continue;
+        hide(i, close + 1);
+        i = close;
+      } else if (line[after] === '[') {
+        const close = closingBracket(line, after);
+        if (close < 0) continue;
+        const ref = line.slice(after + 1, close) || label;
+        if (!knownReferences.has(normalizeReference(ref))) continue;
+        hide(i, close + 1);
+        i = close;
+      } else if (knownReferences.has(normalizeReference(label))) {
+        hide(i, after);
+        i = end;
       }
-      if (end < 0) continue;
-      // The alternative text of a valid Markdown image is not an HTML
-      // comment block. Mask the image label for comment detection only.
-      if (match[0].startsWith('!')) {
-        for (let j = match.index; j < first; j++) chars[j] = ' ';
-      }
-      for (let j = first; j < end; j++) chars[j] = ' ';
     }
     return chars.join('');
   }
@@ -230,7 +271,7 @@ function inspectMarkdown(relative, contents, root) {
     hangingFence.char.repeat(hangingFence.length) + ' code fence');
 
   const labels = new Map();
-  const normalizeLabel = s => s.trim().replace(/\s+/g, ' ').toLowerCase();
+  const normalizeLabel = normalizeReference;
   const unescapeMarkdown = s => s.replace(/\\([\\()[\]<> !])/g, '$1');
   const inspect = (href, lineNumber) => {
     href = unescapeMarkdown(href.trim());
@@ -245,7 +286,7 @@ function inspectMarkdown(relative, contents, root) {
     else if (!fs.existsSync(target))
       issues.push(relative + ':' + lineNumber + ': missing local link: ' + href);
   };
-  const definitions = /^ {0,3}\[([^\]]+)\]:\s*(?:<((?:\\.|[^>])*)>|(\S+))/;
+  const definitions = /^ {0,3}\[((?:\\.|[^\]])+)\]:\s*(?:<((?:\\.|[^>])*)>|(\S+))/;
   for (const row of active) {
     const match = definitions.exec(row.text);
     if (!match) continue;

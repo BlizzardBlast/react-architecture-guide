@@ -131,6 +131,30 @@ function imports(node, list, options) {
     const spec = literalString(node.moduleSpecifier);
     if (spec) list.push({ spec, runtime: runtimeImport(node, options), line: node.getStart() });
   }
+  // Strict builtin loader grammar: identifier aliases can otherwise turn a
+  // forbidden import into an ordinary-looking local function call. Binding
+  // analysis would be needed to safely admit such aliases.
+  if (ts.isIdentifier(node) && ['require', 'module'].includes(node.text)) {
+    const parent = node.parent;
+    const isPropertyName = (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+      (ts.isPropertyAssignment(parent) && parent.name === node) ||
+      (ts.isMethodDeclaration(parent) && parent.name === node);
+    const directRequire = node.text === 'require' &&
+      ts.isCallExpression(parent) && parent.expression === node;
+    const directModuleMember = node.text === 'module' && (
+      (ts.isPropertyAccessExpression(parent) && parent.expression === node &&
+        (parent.name.text === 'exports' ||
+          (parent.name.text === 'require' && ts.isCallExpression(parent.parent) &&
+            parent.parent.expression === parent))) ||
+      (ts.isElementAccessExpression(parent) && parent.expression === node &&
+        (literalString(parent.argumentExpression) === 'exports' ||
+          (literalString(parent.argumentExpression) === 'require' &&
+            ts.isCallExpression(parent.parent) && parent.parent.expression === parent)))
+    );
+    if (!isPropertyName && !directRequire && !directModuleMember) {
+      list.push({ unsupported: 'indirect-commonjs-loader', line: node.getStart() });
+    }
+  }
   // Node CommonJS supports module.require() as well as require(). Treat the
   // literal, quoted-member and dynamic member forms as executable edges (or
   // unsupported loaders), never silently omit them from the ownership graph.
@@ -392,13 +416,51 @@ function verifyViteAliases(projectDir, policy, errors) {
   const booleanOptions = new Set(['--strictPort', '--force', '--clearScreen', '--cors', '--help', '--version']);
   // npm automatically runs pre<name> and post<name> lifecycle hooks. Those
   // hooks can launch another build with a different Vite config.
-  const buildScript = name =>
-    /^(?:build|bundle|dev|serve|start|preview|watch)(?::|$)/i.test(name) ||
-    // Any script's pre/post hooks run automatically via npm run <name>;
-    // `verify` and `test` are build orchestration scripts in this repo.
-    // Validate all existing hooks instead of guessing which parent is inert.
-    /^(?:pre|post).+/.test(name) &&
-      Object.hasOwn(scripts, name.replace(/^(?:pre|post)/, ''));
+  // Follow the executable npm graph, not merely script names. npm test,
+  // npm start, npm run <name> and the pre/post hooks all execute commands.
+  const executableScripts = new Set();
+  const entrypoint = /^(?:build|bundle|dev|serve|start|preview|watch|verify|test|lint|check)(?::|$)/i;
+  function npmTarget(words) {
+    if (!['npm', 'pnpm', 'yarn'].includes(words[0])) return null;
+    if (words[1] === 'test' || words[1] === 'start') return words[1];
+    if (!['run', 'run-script'].includes(words[1])) return null;
+    const args = words.slice(2);
+    return args.find(arg => !arg.startsWith('-')) || null;
+  }
+  function followScript(name, chain = []) {
+    if (chain.includes(name)) {
+      errors.push('unsupported-vite-custom-config: cyclic npm script delegation: ' +
+        [...chain, name].join(' -> '));
+      return;
+    }
+    if (!Object.hasOwn(scripts, name) || typeof scripts[name] !== 'string') {
+      errors.push('unsupported-vite-custom-config: unknown npm script: ' + name);
+      return;
+    }
+    if (executableScripts.has(name)) return;
+    executableScripts.add(name);
+    const next = [...chain, name];
+    for (const hook of ['pre' + name, 'post' + name]) {
+      if (Object.hasOwn(scripts, hook)) followScript(hook, next);
+    }
+    const commands = splitShell(scripts[name]);
+    if (!commands) {
+      errors.push('unsupported-vite-custom-config: unbalanced npm script: ' + name);
+      return;
+    }
+    for (const command of commands) {
+      const words = shellWords(command);
+      if (!words) {
+        errors.push('unsupported-vite-custom-config: unsupported npm script quoting: ' + name);
+        continue;
+      }
+      const target = npmTarget(words);
+      if (target) followScript(target, next);
+    }
+  }
+  for (const name of Object.keys(scripts)) {
+    if (entrypoint.test(name)) followScript(name);
+  }
   const safeBoundaryCommand = command => {
     if (typeof command !== 'string' || /[&|;<>$\r\n]/.test(command) ||
         command.includes(String.fromCharCode(96))) return false;
@@ -455,24 +517,26 @@ function verifyViteAliases(projectDir, policy, errors) {
     // For build/dev entrypoints, the actual Vite invocation must be visible.
     // An opaque Node/tsx build file or an unrelated npm script can invoke Vite
     // programmatically with a different config after validation.
-    if (buildScript(scriptName)) {
+    if (executableScripts.has(scriptName)) {
       // Keep this allowlist narrow: unknown build tools can hide a Vite
       // invocation via an external script, even without saying 'vite'.
       const opaque = /\$\(|`/.test(script) || tokens.some(words => {
         if (viteArguments(words) !== null) return false;
         const executable = (words[0] || '').replace(/\\/g, '/');
-        if (['echo', 'printf', 'tsc', 'eslint', 'biome', 'oxlint', 'oxfmt'].includes(executable)) {
+        if (['echo', 'printf', 'tsc', 'eslint', 'biome', 'oxlint', 'oxfmt', 'vitest'].includes(executable) ||
+            executable === 'node' && words[1] === '--test') {
           return false;
         }
         if (executable === 'node' || executable === 'node.exe') {
           return !safeBoundaryCommand(words.join(' '));
         }
-        if (['npm', 'pnpm', 'yarn'].includes(executable) && words[1] === 'run') {
-          const target = words[2] === '--silent' ? words[3] : words[2];
-          // Only an exact checker command is inert, not a prefix followed by
-          // extra commands. Verify its pre/post hooks too, and require the
-          // delegated script to actually exist in this package.json.
-          return !safeDelegatedBoundary(target);
+        const target = npmTarget(words);
+        if (target) {
+          // The full target and its lifecycle hooks were traversed above.
+          // A known delegated checker is still restricted to its exact form.
+          if (['arch', 'check:arch', 'test:architecture'].includes(target) &&
+              !safeDelegatedBoundary(target)) return true;
+          return !executableScripts.has(target);
         }
         return true;
       });

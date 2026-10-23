@@ -1558,3 +1558,87 @@ test('inert npm verification hooks remain compatible with explicit Vite scripts'
   '../vite.config.ts': 'export default { plugins: [] };',
   'app/start.ts': 'export const start = true;',
 }, result => assert.deepEqual(result.errors, [])));
+
+test('aliased CommonJS require and module identifiers must fail closed', () => {
+  const aliases = [
+    'const load = require; module.exports = load("../../modules/orders/ui/private.cjs");',
+    'const mod = module; mod.require("../../modules/orders/ui/private.cjs");',
+    'let load; load = require; module.exports = load("../../modules/orders/ui/private.cjs");',
+    'const f = (loader) => loader("../../modules/orders/ui/private.cjs"); module.exports = f(require);',
+    'function wrap(module) { return module.require("../../modules/orders/ui/private.cjs"); }',
+    'const load = (require); load("../../modules/orders/ui/private.cjs");',
+    'const { require: load } = module; load("../../modules/orders/ui/private.cjs");',
+  ];
+  for (const source of aliases) withFixture({
+    'shared/lib/bridge.cjs': source,
+    'modules/orders/ui/private.cjs': 'module.exports = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-indirect-commonjs-loader|unsupported-indirect-module-require/));
+});
+
+test('valid direct CommonJS loaders and module.exports remain supported', () => withFixture({
+  'modules/orders/infrastructure/bridge.cjs': 'const path = require("node:path"); module.exports = module.require("./impl.cjs");',
+  'modules/orders/infrastructure/impl.cjs': 'module.exports = require("node:os").platform();',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('opaque main verify and test scripts cannot hide Vite builders', () => {
+  for (const [name,cmd] of [
+    ['verify', 'node scripts/hidden-build.mjs'],
+    ['test', 'tsx scripts/hidden-build.ts'],
+    ['verify', 'npm run hidden'],
+    ['test', 'npm run nested'],
+    ['check:react', 'node scripts/build.cjs'],
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      [name]: cmd,
+      hidden: 'node scripts/hidden-build.mjs',
+      nested: 'npm run hidden',
+      build: 'vite build',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('npm script reachability includes hooks on a deeply delegated target', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    verify: 'npm run validate && npm run build',
+    validate: 'npm run lint',
+    lint: 'eslint src',
+    prelint: 'node scripts/hidden-build.mjs',
+    build: 'vite build',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('npm script recursion detects cycles before trusting configuration', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    verify: 'npm run test',
+    test: 'npm run verify',
+    build: 'vite build',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /cyclic npm script delegation/)));
+
+test('safe npm verify/test script graph remains supported', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    verify: 'npm run lint && npm test && npm run build',
+    lint: 'eslint src',
+    test: 'vitest run',
+    build: 'npm run arch && tsc --noEmit && vite build',
+    arch: 'node ../../tools/check-boundaries.cjs src',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('safe Node test and test lifecycle tools are allowed', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    pretest: 'tsc --noEmit',
+    test: 'node --test tests/*.test.mjs',
+    build: 'vite build',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
