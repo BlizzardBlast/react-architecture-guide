@@ -300,17 +300,15 @@ function inspectMarkdown(relative, contents, root) {
     if (definitions.test(row.text)) continue;
     const line = row.text.replace(/(`+)([\s\S]*?)\1/g, match => ' '.repeat(match.length));
     for (let i = 0; i < line.length; i++) {
-      if (line[i] !== '[' || i > 0 && line[i - 1] === '\\') continue;
-      let end = i + 1;
-      for (; end < line.length; end++) {
-        if (line[end] === '\\') { end++; continue; }
-        if (line[end] === ']') break;
-      }
-      if (end >= line.length) break;
+      if (line[i] !== '[' || isEscaped(line, i)) continue;
+      // Use the SAME escaped/nested bracket grammar used by the HTML comment
+      // masker. Otherwise an active nested-label link is invisible here.
+      const end = closingBracket(line, i);
+      if (end < 0) continue;
       const label = line.slice(i + 1, end);
       const next = line[end + 1];
       if (next === '[') {
-        const referenceEnd = line.indexOf(']', end + 2);
+        const referenceEnd = closingBracket(line, end + 1);
         if (referenceEnd >= 0) {
           const ref = normalizeLabel(line.slice(end + 2, referenceEnd) || label);
           const def = labels.get(ref);

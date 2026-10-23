@@ -1642,3 +1642,71 @@ test('safe Node test and test lifecycle tools are allowed', () => withFixture({
   '../vite.config.ts': 'export default { plugins: [] };',
   'app/start.ts': 'export const start = true;',
 }, result => assert.deepEqual(result.errors, [])));
+
+test('deprecated process.mainModule loaders cannot bypass ownership checks', () => {
+  for (const loader of [
+    'process.mainModule.require("../../modules/orders/ui/private.cjs")',
+    'process["mainModule"].require("../../modules/orders/ui/private.cjs")',
+    "const main = process.mainModule; main.require('../../modules/orders/ui/private.cjs')",
+  ]) withFixture({
+    'shared/lib/bridge.cjs': 'module.exports = ' + loader + ';',
+    'modules/orders/ui/private.cjs': 'module.exports = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-node-mainmodule-loader/));
+});
+
+test('npm script argument forwarding cannot change the selected Vite config', () => {
+  for (const verify of [
+    'npm run build -- --config hidden.vite.config.ts',
+    'npm run build -- -c hidden.vite.config.ts',
+    'npm run build -- --mode staging',
+    'npm run build -- --config=hidden.vite.config.ts',
+    'npm test -- --config hidden.vite.config.ts',
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      verify,
+      test: 'npm run build',
+      build: 'vite build',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { resolve: { alias: { "@private": "/src/modules/orders/ui" } } };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('npm workspace/prefix flags cannot select an unverified package build', () => {
+  for (const verify of [
+    'npm run build --workspace other',
+    'npm run build -w other',
+    'npm run build --prefix packages/other',
+    'npm --workspace other run build',
+    'npm --prefix packages/other run build',
+    'pnpm --filter other run build',
+    'yarn workspace other run build',
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: { verify, build: 'vite build' } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('nested npm argument forwarding remains unsupported', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    verify: 'npm run test',
+    test: 'npm run build -- --config hidden.vite.config.ts',
+    build: 'vite build',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('ordinary unmodified npm build delegation remains supported', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    verify: 'npm run lint && npm test && npm run build',
+    lint: 'eslint src',
+    test: 'vitest run',
+    build: 'npm run arch && tsc --noEmit && vite build',
+    arch: 'node ../../tools/check-boundaries.cjs src',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));

@@ -155,6 +155,16 @@ function imports(node, list, options) {
       list.push({ unsupported: 'indirect-commonjs-loader', line: node.getStart() });
     }
   }
+  // process.mainModule is a deprecated but executable CommonJS loader.
+  // Its require() resolves from the entrypoint, not the current source, and
+  // cannot safely be turned into an ownership edge by this local resolver.
+  if ((ts.isPropertyAccessExpression(node) && node.name.text === 'mainModule' &&
+       ts.isIdentifier(node.expression) && node.expression.text === 'process') ||
+      (ts.isElementAccessExpression(node) &&
+       ts.isIdentifier(node.expression) && node.expression.text === 'process' &&
+       literalString(node.argumentExpression) === 'mainModule')) {
+    list.push({ unsupported: 'node-mainmodule-loader', line: node.getStart() });
+  }
   // Node CommonJS supports module.require() as well as require(). Treat the
   // literal, quoted-member and dynamic member forms as executable edges (or
   // unsupported loaders), never silently omit them from the ownership graph.
@@ -422,10 +432,16 @@ function verifyViteAliases(projectDir, policy, errors) {
   const entrypoint = /^(?:build|bundle|dev|serve|start|preview|watch|verify|test|lint|check)(?::|$)/i;
   function npmTarget(words) {
     if (!['npm', 'pnpm', 'yarn'].includes(words[0])) return null;
-    if (words[1] === 'test' || words[1] === 'start') return words[1];
-    if (!['run', 'run-script'].includes(words[1])) return null;
-    const args = words.slice(2);
-    return args.find(arg => !arg.startsWith('-')) || null;
+    // Exact supported grammar only. npm's "--" forwards extra arguments to
+    // the child process, and --workspace/--prefix can run another package's
+    // scripts. None of those selections is covered by our Vite alias proof.
+    if (['test', 'start'].includes(words[1]) && words.length === 2) return words[1];
+    if (['run', 'run-script'].includes(words[1])) {
+      if (words.length === 3 && /^[^\\-]/.test(words[2])) return words[2];
+      if (words.length === 4 && words[2] === '--silent' &&
+          /^[^\\-]/.test(words[3])) return words[3];
+    }
+    return null;
   }
   function followScript(name, chain = []) {
     if (chain.includes(name)) {
@@ -538,6 +554,8 @@ function verifyViteAliases(projectDir, policy, errors) {
               !safeDelegatedBoundary(target)) return true;
           return !executableScripts.has(target);
         }
+        // Unknown or option-bearing npm invocations are opaque, including
+        // forwarded arguments and workspace/prefix script selection.
         return true;
       });
       if (opaque) {

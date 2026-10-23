@@ -422,3 +422,32 @@ test('balanced shortcut/collapsed reference labels continue to validate links', 
       assert.match(checkAll(root).issues.join(' '), /README\.md:3: missing local link/),
   );
 });
+
+test('nested inline image label validates the active image destination', () => fixture(
+  '![outer [inner] label](missing.png)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link: missing\.png/),
+));
+
+test('nested inline link label validates an active destination', () => fixture(
+  '[outer [inner] label](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link: missing\.md/),
+));
+
+test('nested inline labels containing HTML-looking text still check their own links', () => fixture(
+  '![outer [inner] <!--](missing.png)\n[Broken](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 2);
+    assert.match(issues.join(' '), /missing local link: missing\.png/);
+    assert.match(issues.join(' '), /missing local link: missing\.md/);
+  },
+));
+
+test('escaped and nested reference labels share the same closing-bracket grammar', () => fixture(
+  '[ref]: missing.md\n[outer [inner] label][ref]', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link: missing\.md/),
+));
+
+test('nested valid links and images continue to validate without false positives', () => fixture(
+  '[outer [inner] label](README.md)\n![outer [inner] label](README.md)', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));
