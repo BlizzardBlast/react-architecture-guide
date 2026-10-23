@@ -51,3 +51,11 @@ These source-level tests do **not** replace the required registry-backed lockfil
 The boundary checker now fail-closes on arbitrary top-level directories imported from pure layers, and distinguishes unmodified JSON data from `?raw`, `?url`, `?worker`, other query modes and `new URL()` assets. Regression fixtures explicitly contain their Vite `node:url` import instead of modifying Vite configuration at setup time. Markdown link validation ignores HTML comments (including multiline comments) and indented code blocks while preserving detection of active links.
 
 Targeted source-level policy/import-mode probes and the documentation fixture suite were exercised without the npm registry. Full installation, full architecture fixture execution, React production build, browser verification, and audits **remain pending** until authentic lockfiles and dependency access are available. Do not infer merge readiness from targeted tests alone.
+
+### Vite config and Markdown block review remediation
+
+This revision adds explicit default CommonJS Vite configuration discovery, conservative static `module.exports` support, checked custom `--config` selections in npm scripts, protection from configuration symlinks outside the project, and file-URL-correct alias verification for percent-encoded dot segments and spaces. New regression fixtures cover unmirrored CommonJS aliases, custom scripts, mixed config choices, encoded aliases and negative cases.
+
+Markdown validation now distinguishes raw HTML blocks (including script/pre-style raw-text blocks) and blockquoted fenced code from active Markdown links, while continuing to validate links after these blocks. Parser tests cover these contexts without introducing dependencies solely for validation.
+
+Full `npm ci` verification, complete suites and audits remain **unverified** until registry access and authentic lockfiles are available. The PR remains draft and unmerged.

@@ -91,3 +91,56 @@ test('HTML-like syntax in a fence cannot suppress later links', () => fixture(
   '~~~md\n<!--\n~~~\n[visible](missing.md)\n', root =>
     assert.match(checkAll(root).issues.join(' '), /missing local link/),
 ));
+
+test('raw HTML blocks suppress non-rendered links until a blank', () => {
+  for (const tag of ['div', 'table', 'section']) fixture(
+    '<' + tag + '>\n[not rendered](missing.md)\n</' + tag + '>\n\n[Self](README.md)',
+    root => assert.deepEqual(checkAll(root).issues, []),
+  );
+});
+
+test('HTML raw-text blocks suppress links even across blank lines', () => {
+  for (const tag of ['script', 'pre', 'style', 'textarea']) fixture(
+    '<' + tag + '>\n\n[not rendered](missing.md)\n</' + tag + '>\n[Self](README.md)',
+    root => assert.deepEqual(checkAll(root).issues, []),
+  );
+});
+
+test('real links after a closed raw-text block are checked', () => fixture(
+  '<script>\n[ignored](missing.md)\n</script>\n[visible](missing.md)',
+  root => assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+
+test('raw HTML blocks stop at a blank line', () => fixture(
+  '<div>\n[ignored](missing.md)\n\n[visible](missing.md)',
+  root => assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+
+test('fenced code inside blockquotes does not create links', () => fixture(
+  '> ~~~md\n> [ignored](missing.md)\n> ~~~\n> [Self](README.md)',
+  root => assert.deepEqual(checkAll(root).issues, []),
+));
+
+test('nested blockquote fences do not hide following real links', () => fixture(
+  '> > ~~~md\n> > [ignored](missing.md)\n> > ~~~\n> > [visible](missing.md)',
+  root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /missing local link/);
+  },
+));
+
+test('unclosed blockquoted fenced code is not scanned for links', () => fixture(
+  '> ~~~\n> [ignored](missing.md)\n> [ignored](missing.md)',
+  root => assert.deepEqual(checkAll(root).issues, []),
+));
+
+test('ordinary blockquote paragraphs still contain active links', () => fixture(
+  '> [visible](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+
+test('HTML blocks within blockquotes do not create links', () => fixture(
+  '> <div>\n> [ignored](missing.md)\n>\n> [Self](README.md)',
+  root => assert.deepEqual(checkAll(root).issues, []),
+));

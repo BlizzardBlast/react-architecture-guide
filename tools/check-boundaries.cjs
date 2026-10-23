@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execSync } = require('node:child_process');
 const { createRequire } = require('node:module');
+const { fileURLToPath, pathToFileURL } = require('node:url');
 
 function loadTypeScript(projectDir = process.argv[2]) {
   // Resolve from the consuming application first, not the directory containing this tool.
@@ -183,7 +184,7 @@ function matchesAlias(spec, patterns) {
 }
 function loadBoundaryConfig(parent) {
   const file = path.join(parent, 'architecture.config.json');
-  if (!fs.existsSync(file)) return { allowPureExternal: [], allowCrossModule: {}, allowMixedLayouts: {}, viteAliases: {} };
+  if (!fs.existsSync(file)) return { allowPureExternal: [], allowCrossModule: {}, allowMixedLayouts: {}, viteAliases: {}, viteConfig: null };
   const data = JSON.parse(fs.readFileSync(file, 'utf8'));
   const mixed = data.allowMixedLayouts || {};
   const aliases = data.viteAliases || {};
@@ -193,6 +194,7 @@ function loadBoundaryConfig(parent) {
       typeof mixed !== 'object' || mixed === null || Array.isArray(mixed) ||
       Object.values(mixed).some(reason => typeof reason !== 'string' || !reason.trim()) ||
       typeof aliases !== 'object' || aliases === null || Array.isArray(aliases) ||
+      (data.viteConfig !== undefined && (typeof data.viteConfig !== 'string' || !data.viteConfig.trim())) ||
       Object.entries(aliases).some(([alias, target]) =>
         !alias.trim() || typeof target !== 'string' || !target.trim())) {
     throw Error('Invalid architecture.config.json: allowPureExternal must be an array, allowCrossModule an object, and allowMixedLayouts a map of nonempty migration reasons');
@@ -202,6 +204,7 @@ function loadBoundaryConfig(parent) {
     allowCrossModule: data.allowCrossModule || {},
     allowMixedLayouts: mixed,
     viteAliases: aliases,
+    viteConfig: data.viteConfig || null,
   };
 }
 
@@ -249,15 +252,55 @@ function resolveLocalSource(candidate, options) {
   return ts.resolveModuleName(basename, importer, options, ts.sys).resolvedModule?.resolvedFileName;
 }
 function verifyViteAliases(projectDir, policy, errors) {
-  const vitePaths = ['vite.config.ts', 'vite.config.mts', 'vite.config.js', 'vite.config.mjs']
-    .map(name => path.join(projectDir, name)).filter(fs.existsSync);
+  // Discover ALL default Vite filenames, and recognize explicitly selected
+  // npm-script configs. Never silently inspect a different Vite config.
+  const supportedExt = /\.(?:ts|mts|js|mjs|cts|cjs)$/;
+  const defaults = ['ts', 'mts', 'js', 'mjs', 'cts', 'cjs']
+    .map(ext => path.join(projectDir, 'vite.config.' + ext)).filter(fs.existsSync);
+  const packageFile = path.join(projectDir, 'package.json');
+  const scripts = fs.existsSync(packageFile)
+    ? Object.values(JSON.parse(fs.readFileSync(packageFile, 'utf8')).scripts || {}) : [];
+  const selections = new Set();
+  let usesDefault = false;
+  for (const command of scripts) {
+    if (typeof command !== 'string' || !/\bvite\b/.test(command)) continue;
+    const selection = /--config(?:\s+|=)(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/.exec(command);
+    if (selection) selections.add(path.resolve(projectDir, selection[1] || selection[2] || selection[3]));
+    else if (/--config\b/.test(command)) {
+      errors.push('unsupported-vite-custom-config: could not parse npm script --config');
+      return;
+    } else usesDefault = true;
+  }
+  if (selections.size > 1 || (selections.size && usesDefault)) {
+    errors.push('unsupported-vite-custom-config: npm scripts select different Vite config files');
+    return;
+  }
+  const declared = policy.viteConfig ? path.resolve(projectDir, policy.viteConfig) : null;
+  const selected = [...selections][0];
+  if (selected && (!declared || declared !== selected)) {
+    errors.push('unsupported-vite-custom-config: npm --config must match architecture.config.json viteConfig');
+    return;
+  }
+  if (declared && !isWithinRoot(declared, projectDir)) {
+    errors.push('unsupported-vite-custom-config: viteConfig must stay in project root');
+    return;
+  }
+  const vitePaths = declared ? [declared].filter(fs.existsSync) : defaults;
   if (vitePaths.length !== 1) {
-    if (vitePaths.length > 1 || Object.keys(policy.viteAliases).length) {
+    if (vitePaths.length > 1 || declared || Object.keys(policy.viteAliases).length) {
       errors.push('unsupported-vite-alias-config: expected one recognizable Vite config');
     }
     return;
   }
   const vitePath = vitePaths[0];
+  if (!isWithinRoot(fs.realpathSync(vitePath), fs.realpathSync(projectDir))) {
+    errors.push('unsupported-vite-alias-config: config symlink escapes the project');
+    return;
+  }
+  if (!supportedExt.test(vitePath)) {
+    errors.push('unsupported-vite-custom-config: unsupported Vite config extension');
+    return;
+  }
   const source = ts.createSourceFile(vitePath, fs.readFileSync(vitePath, 'utf8'),
     ts.ScriptTarget.Latest, true, ts.getScriptKindFromFileName(vitePath));
   if (source.parseDiagnostics.length) {
@@ -301,13 +344,29 @@ function verifyViteAliases(projectDir, policy, errors) {
     const name = prop.name;
     return ts.isIdentifier(name) || ts.isStringLiteral(name) ? name.text : null;
   }
-  const exports = source.statements.filter(statement =>
-    ts.isExportAssignment(statement) && !statement.isExportEquals);
+  // A static CommonJS module.exports is supported; dynamic CommonJS syntax
+  // fails closed just like arbitrary ESM config factories.
+  const cjsFile = /\.(?:cjs|cts)$/.test(vitePath);
+  const exports = source.statements.filter(statement => {
+    if (!cjsFile) return ts.isExportAssignment(statement) && !statement.isExportEquals;
+    return ts.isExpressionStatement(statement) && ts.isBinaryExpression(statement.expression) &&
+      statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(statement.expression.left) &&
+      statement.expression.left.getText(source) === 'module.exports';
+  });
   if (exports.length !== 1) {
-    errors.push('unsupported-vite-alias-config: one default config export is required');
+    errors.push('unsupported-vite-alias-config: expected one static ' +
+      (cjsFile ? 'module.exports assignment' : 'default config export'));
     return;
   }
-  let config = exports[0].expression;
+  // A second top-level assignment/call could mutate module.exports after
+  // the verified literal. Fail closed instead of trusting a stale AST value.
+  if (cjsFile && source.statements.some(statement =>
+    ts.isExpressionStatement(statement) && statement !== exports[0])) {
+    errors.push('unsupported-vite-alias-config: CommonJS config has additional top-level effects');
+    return;
+  }
+  let config = cjsFile ? exports[0].expression.right : exports[0].expression;
   if (ts.isCallExpression(config) && ts.isIdentifier(config.expression) &&
       config.expression.text === 'defineConfig' && config.arguments.length === 1) {
     config = config.arguments[0];
@@ -388,7 +447,17 @@ function verifyViteAliases(projectDir, policy, errors) {
           expr.expression.text === 'URL' && expr.arguments?.length === 2 &&
           ts.isStringLiteral(expr.arguments[0]) &&
           expr.arguments[1].getText(source) === 'import.meta.url') {
-        actual = path.resolve(projectDir, expr.arguments[0].text);
+        // Resolve with actual file-URL semantics; path.resolve does not
+        // decode/normalize %2e%2e and can compare against a decoy path.
+        try {
+          const aliasUrl = new URL(expr.arguments[0].text, pathToFileURL(vitePath));
+          if (aliasUrl.protocol !== 'file:' || aliasUrl.search || aliasUrl.hash) {
+            throw new Error('Expected a plain local file URL');
+          }
+          actual = path.resolve(fileURLToPath(aliasUrl));
+        } catch {
+          errors.push('unverifiable-vite-alias-url: invalid local file URL for ' + find);
+        }
       }
     }
     if (!actual) {

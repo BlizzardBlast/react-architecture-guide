@@ -133,3 +133,20 @@ Pure `domain/`, `model/`, and `application/` code can depend only on the allowed
 Ordinary, owned JSON data may be consumed by pure modules. A Vite suffix such as `?raw`, `?url`, `?worker` or a plugin-specific query changes the import mode, so a `.json` or `.ts` filename alone does not make the resulting value pure. Pure modules reject these query-modified local assets, as well as static `new URL(..., import.meta.url)` asset handles. Presentation code may still use supported Vite asset modes subject to source ownership checks.
 
 Architecture test fixtures must store their exact declared contents. Valid Vite URL helper fixtures explicitly import `fileURLToPath` from `node:url`; fixture setup must never supply missing imports on their behalf.
+
+### Nonstandard and CommonJS Vite configurations
+
+The checker inspects all six default Vite config extensions: `.ts`, `.mts`, `.js`, `.mjs`, `.cts` and `.cjs`. It handles statically readable `module.exports = { ... }` for CommonJS; additional top-level CommonJS side effects and dynamic exports fail validation. When any npm script selects a nonstandard path with `vite --config`, declare that exact project-relative filename in `architecture.config.json`:
+
+```json
+{
+  "viteConfig": "custom.vite.config.ts",
+  "viteAliases": {
+    "@": "src/shared"
+  }
+}
+```
+
+A declared file must remain within the project (including after following symlinks). Inconsistent Vite configuration selections across npm scripts are rejected. Configurations launched with an external CLI argument that is not represented in scripts must likewise be declared explicitly; untracked external launchers are outside the checker’s automatic discovery scope.
+
+For `fileURLToPath(new URL(path, import.meta.url))` aliases, the checker uses actual `URL` and `fileURLToPath` behavior, including percent-decoding and normalization of encoded dot segments. It rejects invalid encoded separators and mismatches against the policy-mirrored physical path. As before, arbitrary Vite plugins and runtime configuration transformations require a separate real build-level check.

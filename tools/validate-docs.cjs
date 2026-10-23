@@ -8,11 +8,15 @@ function inspectMarkdown(relative, contents, root) {
   const fullpath = path.join(root, relative);
   const lines = contents.split(/\r?\n/);
   let fence = null;
+  let quotedFence = null;
+  let htmlBlock = null;
   let inComment = false;
   let inIndentedCode = false;
   let previousBlank = true;
   const active = [];
-  // HTML comments may span lines; preserve line positions when masking them.
+  const blockTags = /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|meta|nav|noframes|ol|optgroup|option|output|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[\s/>])/i;
+  const fenceMarker = /^ {0,3}([\x60]{3,}|~{3,})(.*)$/;
+  // Mask comments without moving columns or inadvertently creating new links.
   function maskHtmlComments(line) {
     let result = '';
     let cursor = 0;
@@ -41,30 +45,75 @@ function inspectMarkdown(relative, contents, root) {
   }
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
-    if (fence) {
-      const closing = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(raw);
-      if (closing && closing[1][0] === fence.char &&
-          closing[1].length >= fence.length && /^\s*$/.test(closing[2])) fence = null;
-      continue;
+    // Strip blockquote containers only for block classification. Ordinary
+    // blockquoted links are still inspected once the container is removed.
+    const prefix = /^ {0,3}(?:>[ \t]?)+/.exec(raw)?.[0] || '';
+    const depth = (prefix.match(/>/g) || []).length;
+    const text = raw.slice(prefix.length);
+    if (fence || quotedFence) {
+      const current = fence || quotedFence;
+      if (!quotedFence || current.depth === depth) {
+        const marker = fenceMarker.exec(text);
+        if (marker && marker[1][0] === current.char &&
+            marker[1].length >= current.length && /^\s*$/.test(marker[2])) {
+          fence = null;
+          quotedFence = null;
+        }
+        continue;
+      }
+      quotedFence = null;
     }
-    const line = maskHtmlComments(raw);
+    if (htmlBlock && htmlBlock.depth !== depth) htmlBlock = null;
+    if (htmlBlock) {
+      if (htmlBlock.close) {
+        if (htmlBlock.close.test(text)) htmlBlock = null;
+        continue;
+      }
+      if (text.trim()) continue;
+      htmlBlock = null;
+    }
+    const line = maskHtmlComments(text);
     if (!line.trim()) {
       previousBlank = true;
       continue;
     }
-    // Four spaces or a tab form an indented code block only when they do
-    // not interrupt a paragraph. Use the original indentation rather than
-    // whitespace introduced while masking comments.
-    const indented = /^(?: {4}|\t)/.test(raw);
+    // CommonMark raw-text HTML blocks run through the matching end tag, even
+    // across blank lines. Block-level HTML runs until the next blank line.
+    const rawText = /^ {0,3}<(script|pre|style|textarea)(?=[\s>])/i.exec(line);
+    if (rawText) {
+      const close = new RegExp('</' + rawText[1] + '[\\s>]', 'i');
+      if (!close.test(line)) htmlBlock = { depth, close };
+      continue;
+    }
+    if (/^ {0,3}<!\[CDATA\[/i.test(line)) {
+      if (!line.includes(']]>')) htmlBlock = { depth, close: /\]\]>/ };
+      continue;
+    }
+    if (/^ {0,3}<\?/.test(line)) {
+      if (!line.includes('?>')) htmlBlock = { depth, close: /\?>/ };
+      continue;
+    }
+    if (/^ {0,3}<![A-Z]/.test(line)) {
+      if (!line.includes('>')) htmlBlock = { depth, close: />/ };
+      continue;
+    }
+    if (blockTags.test(line) ||
+        previousBlank && /^ {0,3}<\/?[A-Za-z][^>]*>\s*$/.test(line)) {
+      htmlBlock = { depth, close: null };
+      continue;
+    }
+    const indented = /^(?: {4}|\t)/.test(text);
     if (indented && (previousBlank || inIndentedCode)) {
       inIndentedCode = true;
       previousBlank = false;
       continue;
     }
     inIndentedCode = false;
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    const marker = fenceMarker.exec(line);
     if (marker) {
-      fence = { char: marker[1][0], length: marker[1].length, line: i + 1 };
+      const value = { char: marker[1][0], length: marker[1].length, line: i + 1 };
+      if (depth) quotedFence = { ...value, depth };
+      else fence = value;
       previousBlank = false;
       continue;
     }

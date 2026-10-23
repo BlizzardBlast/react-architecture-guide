@@ -76,3 +76,7 @@ npm --prefix examples/react-app audit
 **Current draft-PR limitation:** This execution environment cannot reach the npm registry, and this branch has no authentic committed lockfiles. First generate and commit lockfiles with real registry access (`npm install --package-lock-only --ignore-scripts` in each directory), then perform the clean installations, audits and browser smoke tests above. Do not merge before full verification.
 
 No new GitHub Actions workflow is required merely for this guide. Preserve all quality and security gates in consumer repositories and batch local validation before pushing to reduce Actions consumption.
+
+### Vite configuration verification
+
+Supported default Vite configuration names include `vite.config.ts`, `.mts`, `.js`, `.mjs`, `.cts` and `.cjs`. CommonJS files use a statically inspectable `module.exports = { ... }` form; unsupported computed configurations or additional CommonJS side effects fail closed. If an npm script passes `vite --config custom-file.ts`, declare `"viteConfig": "custom-file.ts"` in `architecture.config.json` alongside any mirrored `viteAliases`. Scripts selecting different configs fail closed. The checker verifies static aliases using real file-URL resolution semantics, not string-only path joining.

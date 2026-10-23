@@ -934,3 +934,116 @@ test('ordinary owned JSON configuration in domain remains allowed', () => withFi
   'modules/orders/domain/config.json': '{"tax":1}',
   'modules/orders/domain/order.ts': 'import config from "./config.json"; export const value = config;',
 }, result => assert.deepEqual(result.errors, [])));
+
+test('CommonJS Vite .cjs and .cts configurations are discovered rather than ignored', () => {
+  for (const ext of ['cjs', 'cts']) {
+    withFixture({
+      ['../vite.config.' + ext]: 'module.exports = { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+      'app/start.ts': 'export const x = 1;',
+    }, result => assert.match(result.errors.join(' '), /unverified-vite-alias/));
+  }
+});
+
+test('simple static CommonJS Vite configs without aliases are supported', () => {
+  for (const ext of ['cjs', 'cts']) withFixture({
+    ['../vite.config.' + ext]: 'module.exports = { plugins: [] };',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('dynamic or unverified CommonJS exports cannot bypass alias inspection', () => {
+  withFixture({
+    '../vite.config.cjs': 'module.exports = makeConfig();',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/));
+});
+
+test('custom Vite --config from package scripts cannot be silently ignored', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build --config custom.vite.config.ts"}}',
+  '../custom.vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('a declared custom Vite config is inspected and validated', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build --config custom.vite.config.ts","dev":"vite --config custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('custom Vite aliases require the matching mirrored policy map', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build --config custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /unverified-vite-alias/)));
+
+test('scripts with different Vite configuration choices fail closed', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build","dev":"vite --config special.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"special.vite.config.ts"}',
+  '../vite.config.ts': 'export default { plugins: [] };',
+  '../special.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('custom Vite config paths cannot escape the project or use unsupported extensions', () => {
+  withFixture({
+    '../architecture.config.json': '{"viteConfig":"../external.config.ts"}',
+    '../../external.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+  withFixture({
+    '../architecture.config.json': '{"viteConfig":"custom.invalid"}',
+    '../custom.invalid': 'export default { plugins: [] };',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('percent-encoded path segments cannot spoof a Vite alias ownership target', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared/%2e%2e/modules/orders/ui", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared/%2e%2e/modules/orders/ui"}}',
+  'shared/ui/view.ts': 'import { x } from "@/hidden"; export const view = x;',
+  'shared/%2e%2e/modules/orders/ui/hidden.ts': 'export const x = 1;',
+  'modules/orders/ui/hidden.ts': 'export const x = 2;',
+}, result => assert.match(result.errors.join(' '), /vite-alias-target-mismatch/)));
+
+test('valid URL-encoded filename segments are decoded consistently', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared/lib/spaced%20dir", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared/lib/spaced dir"}}',
+  'shared/lib/spaced dir/thing.ts': 'export const x = 1;',
+  'shared/ui/view.ts': 'import { x } from "@/thing"; export const view = x;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('invalid encoded separators in Vite file URL aliases fail closed', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared/%2f/private", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared/%2f/private"}}',
+  'shared/ui/view.ts': 'export const view = 1;',
+}, result => assert.match(result.errors.join(' '), /unverifiable-vite-alias-url/)));
+
+test('CommonJS alias maps cannot be changed by another top-level assignment', () => withFixture({
+  '../vite.config.cjs': 'module.exports = { plugins: [] }; module.exports.resolve = { alias: { "@": "/src/modules/orders/ui" } };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/)));
+
+
+test('custom Vite config symlinks cannot escape the project', t => {
+  const fixture = setup({
+    '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+    'app/start.ts': 'export const x = 1;',
+  });
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'arch-outside-config-'));
+  try {
+    const target = path.join(outside, 'custom.vite.config.ts');
+    fs.writeFileSync(target, 'export default { plugins: [] };');
+    const link = path.join(fixture.root, '../custom.vite.config.ts');
+    try { fs.symlinkSync(target, link, 'file'); }
+    catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows symlinks');
+      throw error;
+    }
+    assert.match(check(fixture.root).errors.join(' '), /config symlink escapes/);
+  } finally {
+    fixture.cleanup();
+    fs.rmSync(outside, { force: true, recursive: true });
+  }
+});
