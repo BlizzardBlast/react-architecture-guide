@@ -39,6 +39,30 @@ function inspectMarkdown(relative, contents, root) {
     if (text.trim()) listIndent = 0;
     return { content: text, inList: false };
   }
+  // CommonMark link destinations and optional quoted titles are inline data:
+  // an HTML-looking "<!--" inside a URL/title must not start a comment.
+  // Return a SAME-LENGTH detection mask; retain original text for link checks.
+  function maskLinkMetadata(line) {
+    // match.index uses UTF-16 offsets; splitting by code points shifts emoji.
+    const chars = line.split('');
+    const opener = /!?\[[^\]\n]*\]\(/g;
+    for (const match of line.matchAll(opener)) {
+      const first = match.index + match[0].length;
+      let depth = 1, quote = null, escaped = false, end = -1;
+      for (let j = first; j < line.length; j++) {
+        const c = line[j];
+        if (escaped) { escaped = false; continue; }
+        if (c === '\\') { escaped = true; continue; }
+        if (quote) { if (c === quote) quote = null; continue; }
+        if (c === '"' || c === "'") { quote = c; continue; }
+        if (c === '(') depth++;
+        else if (c === ')' && --depth === 0) { end = j; break; }
+      }
+      if (end < 0) continue;
+      for (let j = first; j < end; j++) chars[j] = ' ';
+    }
+    return chars.join('');
+  }
   // HTML comments take precedence over inline-code syntax inside them.
   // Outside comments, inline code and backslash escaping block openers.
   function maskHtmlComments(line) {
@@ -57,12 +81,13 @@ function inspectMarkdown(relative, contents, root) {
         continue;
       }
       const visible = maskInlineCode(line.slice(cursor));
-      let open = visible.indexOf('<!--');
+      const detect = maskLinkMetadata(visible);
+      let open = detect.indexOf('<!--');
       while (open !== -1) {
         let slashCount = 0;
         for (let j = open - 1; j >= 0 && visible[j] === '\\'; j--) slashCount++;
         if (slashCount % 2 === 0) break;
-        open = visible.indexOf('<!--', open + 4);
+        open = detect.indexOf('<!--', open + 4);
       }
       if (open === -1) {
         result += visible;

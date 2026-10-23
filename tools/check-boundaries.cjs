@@ -334,7 +334,9 @@ function verifyViteAliases(projectDir, policy, errors) {
     return words.slice(index + 1);
   }
   const viteCommands = new Set(['build', 'dev', 'serve', 'preview', 'optimize']);
-  const argumentOptions = new Set(['--mode', '--base', '--outDir', '--assetsDir', '--port', '--host']);
+  const argumentOptions = new Set(['--mode', '--base', '--outDir', '--assetsDir', '--port']);
+  // Vite accepts --host with an optional value. It must not consume another CLI flag.
+  const optionalArgumentOptions = new Set(['--host']);
   const booleanOptions = new Set(['--strictPort', '--force', '--clearScreen', '--cors', '--help', '--version']);
   for (const script of scripts) {
     if (typeof script !== 'string') continue;
@@ -349,6 +351,22 @@ function verifyViteAliases(projectDir, policy, errors) {
     const tokens = commands.map(shellWords);
     if (tokens.some(words => !words)) {
       errors.push('unsupported-vite-custom-config: unsupported shell quoting');
+      return;
+    }
+    // Shell interpreters can execute Vite in embedded commands without a
+    // top-level vite token. Never approve defaults for opaque nested shells.
+    // Even `bash -e -c`, `pwsh -File`, and an invoked .sh script are
+    // opaque. Inspecting only a known -c flag can silently miss Vite inside.
+    const shellExecutable = /^(?:sh|bash|dash|ash|zsh|fish|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh(?:\.exe)?)$/i;
+    const shellLaunch = tokens.some(words =>
+      shellExecutable.test(words[0] || '') ||
+      (['env', 'cross-env', 'dotenv'].includes(words[0]) &&
+        words.some((word, i) => i > 0 && shellExecutable.test(word))));
+    const programmaticVite = tokens.some(words =>
+      /^(?:node|node\.exe|bun|tsx|ts-node)$/i.test(words[0] || '') &&
+      /(?:require\s*\(|from\s+|import\s*\().*['"]vite['"]|\bvite\.build\s*\(/i.test(words.join(' ')));
+    if (shellLaunch || programmaticVite) {
+      errors.push('unsupported-vite-custom-config: opaque shell or programmatic Vite invocation');
       return;
     }
     const commandsWithVite = tokens.map(words => ({ words, args: viteArguments(words) }))
@@ -399,6 +417,19 @@ function verifyViteAliases(projectDir, policy, errors) {
           return;
         }
         i++;
+      } else if (optionalArgumentOptions.has(word)) {
+        if (args[i + 1] && !args[i + 1].startsWith('-')) {
+          if (viteCommands.has(args[i + 1])) {
+            errors.push('unsupported-vite-custom-config: ambiguous --host option and Vite subcommand');
+            return;
+          }
+          i++;
+        }
+      } else if (word.startsWith('--host=')) {
+        if (!word.slice('--host='.length)) {
+          errors.push('unsupported-vite-custom-config: empty --host value');
+          return;
+        }
       } else if (booleanOptions.has(word)) {
         continue;
       } else {

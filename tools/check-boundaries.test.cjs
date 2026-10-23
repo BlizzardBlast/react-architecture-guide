@@ -1220,3 +1220,93 @@ test('Windows-local Vite executable cannot be spoofed by earlier echo text', () 
   '../vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
   'app/start.ts': 'export const start = true;',
 }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('embedded shell Vite builds must fail closed instead of trusting the default config', () => {
+  const embedded = [
+    "sh -c 'vite build --config hidden.vite.config.ts'",
+    "bash -lc 'vite build --config hidden.vite.config.ts'",
+    'cmd /c "vite build --config hidden.vite.config.ts"',
+    'powershell -Command "vite build --config hidden.vite.config.ts"',
+    'pwsh -Command "vite build --config hidden.vite.config.ts"',
+    "cross-env MODE=prod sh -c 'vite build --config hidden.vite.config.ts'",
+  ];
+  for (const script of embedded) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: script } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+    'app/start.ts': 'export const started = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('opaque shell launchers still fail closed when a custom config is declared', () =>
+  withFixture({
+    '../package.json': '{"scripts":{"build":"sh -c \'vite build --config hidden.vite.config.ts\'"}}',
+    '../architecture.config.json': '{"viteConfig":"hidden.vite.config.ts"}',
+    '../hidden.vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const started = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('programmatic Vite from node evaluation is not assumed to use defaults', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      build: 'node -e \'require("vite").build({configFile:"hidden.vite.config.ts"})\'',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const started = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('Vite --host is optional while other required-value options remain required', () => {
+  const valid = [
+    'vite --host',
+    'vite dev --host',
+    'vite preview --host',
+    'vite dev --host 0.0.0.0',
+    'vite dev --host --port 3000',
+    'vite dev --host=127.0.0.1',
+    'vite dev --port 3000',
+  ];
+  for (const script of valid) withFixture({
+    '../package.json': JSON.stringify({ scripts: { dev: script } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const started = true;',
+  }, result => assert.deepEqual(result.errors, [], script));
+  for (const script of ['vite dev --port', 'vite dev --outDir', 'vite dev --host=']) {
+    withFixture({
+      '../package.json': JSON.stringify({ scripts: { dev: script } }),
+      '../vite.config.ts': 'export default { plugins: [] };',
+      'app/start.ts': 'export const started = true;',
+    }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+  }
+});
+
+test('an ambiguous host argument cannot swallow a Vite subcommand', () => withFixture({
+  '../package.json': '{"scripts":{"dev":"vite --host build"}}',
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const started = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('the reference app compound build script remains supported', () => withFixture({
+  '../package.json': '{"scripts":{"build":"npm run arch && tsc --noEmit && vite build"}}',
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const started = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('shell command interpreters remain unsupported with intervening flags or script files', () => {
+  for (const script of [
+    "bash -e -c 'vite build -c hidden.vite.config.ts'",
+    "pwsh -File scripts/build.ps1",
+    "sh scripts/build.sh",
+    "env MODE=prod bash -e -c 'vite build'",
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: script } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const started = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('echoed shell interpreter names do not imply an executable Vite wrapper', () =>
+  withFixture({
+    '../package.json': '{"scripts":{"build":"echo bash -c hidden && vite build"}}',
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const started = true;',
+  }, result => assert.deepEqual(result.errors, [])));

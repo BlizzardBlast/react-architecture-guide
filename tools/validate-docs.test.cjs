@@ -223,3 +223,50 @@ test('real multiline HTML comments continue to hide apparent links', () => fixtu
   '<!--\n[ignored](missing.md)\n-->\n[Self](README.md)', root =>
     assert.deepEqual(checkAll(root).issues, []),
 ));
+
+test('HTML-looking text inside a link title cannot hide a subsequent missing link', () => fixture(
+  '[Self](README.md "<!--")\n[Broken](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /README\.md:2: missing local link/);
+  },
+));
+
+test('HTML-looking text inside an inline link URL cannot open a comment', () => fixture(
+  '[Self](README.md?x=<!--)\n[Broken](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /README\.md:2: missing local link/);
+  },
+));
+
+test('link metadata comment markers preserve same-line active link validation', () => fixture(
+  '[Self](README.md "<!--") [Broken](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /README\.md:1: missing local link/);
+  },
+));
+
+test('masking link metadata does not hide a broken link own destination', () => fixture(
+  '[Broken](missing.md "<!--")', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+
+test('real comments outside links remain ignored after a link title', () => fixture(
+  '[Self](README.md "<!--") <!-- [Hidden](missing.md) -->\n[Self](README.md)', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));
+
+test('nested parentheses inside a link URL do not trigger phantom comments', () => fixture(
+  '[Self](README.md?x=(<!--) "preview")\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+
+test('Unicode before link metadata preserves HTML comment detection offsets', () => fixture(
+  '🔥 [Self](README.md "<!--")\n[Broken](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /README\.md:2: missing local link/);
+  },
+));
