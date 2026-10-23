@@ -14,6 +14,7 @@ function inspectMarkdown(relative, contents, root) {
   let inIndentedCode = false;
   let previousBlank = true;
   let listIndent = 0, listDepth = 0;
+  let pendingReferenceTitle = null;
   const active = [];
   const blockTags = /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|meta|nav|noframes|ol|optgroup|option|output|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[\s/>])/i;
   const fenceMarker = /^ {0,3}([\x60]{3,}|~{3,})(.*)$/;
@@ -64,6 +65,11 @@ function inspectMarkdown(relative, contents, root) {
         else if (c === ')' && --depth === 0) { end = j; break; }
       }
       if (end < 0) continue;
+      // The alternative text of a valid Markdown image is not an HTML
+      // comment block. Mask the image label for comment detection only.
+      if (match[0].startsWith('!')) {
+        for (let j = match.index; j < first; j++) chars[j] = ' ';
+      }
       for (let j = first; j < end; j++) chars[j] = ' ';
     }
     return chars.join('');
@@ -112,6 +118,17 @@ function inspectMarkdown(relative, contents, root) {
     const depth = (prefix.match(/>/g) || []).length;
     const list = unwrapList(raw.slice(prefix.length), depth);
     const text = list.content;
+    // A link reference title may occupy the next (possibly indented) line.
+    // Consume it as link metadata before indented-code and HTML-comment
+    // scanning; a literal <!-- inside its quotes cannot hide later links.
+    const title = pendingReferenceTitle?.depth === depth &&
+      /^(?: {0,4}|\t)(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\((?:\\.|[^)])*\))[ \t]*$/.test(text);
+    pendingReferenceTitle = null;
+    if (title) {
+      inIndentedCode = false;
+      previousBlank = false;
+      continue;
+    }
     // A fenced list item ends when its container is exited; it cannot
     // swallow an unindented Markdown link that follows the list.
     if (fence?.list && !list.inList && text.trim()) fence = null;
@@ -191,6 +208,12 @@ function inspectMarkdown(relative, contents, root) {
       continue;
     }
     active.push({ text: line, number: i + 1 });
+    // Only the immediately following line can be a reference title.
+    // Restrict the opening line to a link label and destination without
+    // a same-line title, matching the supported static reference grammar.
+    if (/^ {0,3}\[[^\]\n]+\]:[ \t]*(?:<(?:\\.|[^>])*>|\S+)[ \t]*$/.test(line)) {
+      pendingReferenceTitle = { depth };
+    }
     previousBlank = false;
   }
   const hangingFence = fence || quotedFence;

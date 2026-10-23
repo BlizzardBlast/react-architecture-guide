@@ -338,7 +338,29 @@ function verifyViteAliases(projectDir, policy, errors) {
   // Vite accepts --host with an optional value. It must not consume another CLI flag.
   const optionalArgumentOptions = new Set(['--host']);
   const booleanOptions = new Set(['--strictPort', '--force', '--clearScreen', '--cors', '--help', '--version']);
-  const buildScript = name => /^(?:build|bundle|dev|serve|start|preview|watch)(?::|$)/i.test(name);
+  // npm automatically runs pre<name> and post<name> lifecycle hooks. Those
+  // hooks can launch another build with a different Vite config.
+  const buildScript = name => /^(?:pre|post)?(?:build|bundle|dev|serve|start|preview|watch)(?::|$)/i.test(name);
+  const safeBoundaryCommand = command => {
+    if (typeof command !== 'string' || /[&|;<>$\r\n]/.test(command) ||
+        command.includes(String.fromCharCode(96))) return false;
+    const parts = splitShell(command);
+    if (!parts || parts.length !== 1) return false;
+    const words = shellWords(parts[0]);
+    if (!words || words.length < 2 || words.length > 3) return false;
+    const [exe, script, target] = words;
+    const normalized = script.replace(/\\/g, '/');
+    return /^(?:node|node\.exe)$/.test(exe) &&
+      /^(?:\.\.\/)*tools\/check-boundaries\.cjs$/.test(normalized) &&
+      (target === undefined || /^[A-Za-z0-9_./-]+$/.test(target));
+  };
+  const safeDelegatedBoundary = target =>
+    ['arch', 'check:arch', 'test:architecture'].includes(target) &&
+    Object.hasOwn(scripts, target) &&
+    safeBoundaryCommand(scripts[target]) &&
+    // npm run executes hooks for the delegated name as well.
+    !Object.hasOwn(scripts, 'pre' + target) &&
+    !Object.hasOwn(scripts, 'post' + target);
   for (const [scriptName, script] of Object.entries(scripts)) {
     if (typeof script !== 'string') continue;
     const commands = splitShell(script);
@@ -385,19 +407,14 @@ function verifyViteAliases(projectDir, policy, errors) {
           return false;
         }
         if (executable === 'node' || executable === 'node.exe') {
-          return !/^(?:\.\.\/)*tools\/check-boundaries\.cjs$/.test(
-            (words[1] || '').replace(/\\/g, '/'));
+          return !safeBoundaryCommand(words.join(' '));
         }
         if (['npm', 'pnpm', 'yarn'].includes(executable) && words[1] === 'run') {
           const target = words[2] === '--silent' ? words[3] : words[2];
-          if (!['arch', 'check:arch', 'test:architecture'].includes(target)) return true;
-          // An actual npm script may not repurpose an instrumentation name
-          // to secretly launch a Vite build.
-          if (Object.hasOwn(scripts, target)) {
-            const expected = scripts[target].trim();
-            if (!/^node\s+(?:\.\.\/)*tools\/check-boundaries\.cjs(?:\s|$)/.test(expected)) return true;
-          }
-          return false;
+          // Only an exact checker command is inert, not a prefix followed by
+          // extra commands. Verify its pre/post hooks too, and require the
+          // delegated script to actually exist in this package.json.
+          return !safeDelegatedBoundary(target);
         }
         return true;
       });

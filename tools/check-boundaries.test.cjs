@@ -1286,7 +1286,10 @@ test('an ambiguous host argument cannot swallow a Vite subcommand', () => withFi
 }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
 
 test('the reference app compound build script remains supported', () => withFixture({
-  '../package.json': '{"scripts":{"build":"npm run arch && tsc --noEmit && vite build"}}',
+  '../package.json': JSON.stringify({ scripts: {
+    build: 'npm run arch && tsc --noEmit && vite build',
+    arch: 'node ../../tools/check-boundaries.cjs src',
+  } }),
   '../vite.config.ts': 'export default { plugins: [] };',
   'app/start.ts': 'export const started = true;',
 }, result => assert.deepEqual(result.errors, [])));
@@ -1386,3 +1389,95 @@ test('an explicit local boundary check followed by Vite remains supported', () =
   '../vite.config.ts': 'export default { plugins: [] };',
   'app/start.ts': 'export const start = true;',
 }, result => assert.deepEqual(result.errors, [])));
+
+test('delegated architecture checker cannot hide a second build after an accepted prefix', () => {
+  const appended = [
+    'node ../../tools/check-boundaries.cjs src && node scripts/hidden-build.mjs',
+    'node ../../tools/check-boundaries.cjs src | node scripts/hidden-build.mjs',
+    'node ../../tools/check-boundaries.cjs src; node scripts/hidden-build.mjs',
+    'node ../../tools/check-boundaries.cjs src > result.txt',
+    'node ../../tools/check-boundaries.cjs src$(node scripts/hidden-build.mjs)',
+  ];
+  for (const arch of appended) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: 'npm run arch && vite build', arch } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/private" } } };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('delegated architecture checker requires an actual complete and safe script', () => {
+  for (const arch of [
+    undefined,
+    'node scripts/hidden-build.mjs',
+    'node ../../tools/check-boundaries.cjs src --exec scripts/hidden-build.mjs',
+    'node ../../tools/check-boundaries.cjs src || true',
+  ]) withFixture({
+    '../package.json': JSON.stringify({
+      scripts: {
+        build: 'npm run arch && vite build',
+        ...(arch === undefined ? {} : { arch }),
+      },
+    }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('delegated architecture checker cannot hide builds in its npm lifecycle hooks', () => {
+  for (const hook of ['prearch', 'postarch']) withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      build: 'npm run arch && vite build',
+      arch: 'node ../../tools/check-boundaries.cjs src',
+      [hook]: 'node scripts/hidden-build.mjs',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('pre and post npm build or dev hooks cannot execute opaque builders unchecked', () => {
+  for (const hook of ['prebuild', 'postbuild', 'predev', 'postdev', 'prebuild:prod', 'postbuild:prod']) {
+    const name = hook.includes('dev') ? 'dev' : hook.endsWith(':prod') ? 'build:prod' : 'build';
+    withFixture({
+      '../package.json': JSON.stringify({ scripts: {
+        [name]: 'vite build',
+        [hook]: 'node scripts/hidden-build.mjs',
+      } }),
+      '../vite.config.ts': 'export default { plugins: [] };',
+      'app/start.ts': 'export const start = true;',
+    }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+  }
+});
+
+test('explicit Vite lifecycle hooks remain supported and must use the same config', () => {
+  withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      prebuild: 'vite build',
+      build: 'vite build',
+      postbuild: 'echo done',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      prebuild: 'vite build -c hidden.vite.config.ts',
+      build: 'vite build',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('exact delegated boundary checks are accepted for the supported names', () => {
+  for (const name of ['arch', 'check:arch', 'test:architecture']) withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      build: 'npm run ' + name + ' && vite build',
+      [name]: 'node ../../tools/check-boundaries.cjs src',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});

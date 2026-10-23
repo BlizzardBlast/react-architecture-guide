@@ -301,3 +301,49 @@ test('real comments after definitions still conceal inactive links', () => fixtu
   '[safe]: README.md "<!--"\n<!-- [Inactive](missing.md) -->\n[Safe][safe]', root =>
     assert.deepEqual(checkAll(root).issues, []),
 ));
+
+test('multiline reference title cannot open a phantom HTML comment', () => fixture(
+  '[safe]: README.md\n    "<!--"\n[Safe][safe]\n[Broken](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /README\.md:4: missing local link: missing\.md/);
+  },
+));
+
+test('single-quoted and parenthesized multiline reference titles are also literal', () => {
+  for (const title of [" '<!--'", ' (<!--)']) fixture(
+    '[safe]: README.md\n' + title + '\n[Broken](missing.md)', root => {
+      const issues = checkAll(root).issues;
+      assert.equal(issues.length, 1);
+      assert.match(issues[0], /README\.md:3: missing local link/);
+    },
+  );
+});
+
+test('image alt text containing HTML-looking syntax cannot hide a subsequent link', () => fixture(
+  '![example <!--](README.md)\n[Broken](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /README\.md:2: missing local link: missing\.md/);
+  },
+));
+
+test('image alt text cannot conceal its own broken image destination', () => fixture(
+  '![example <!--](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link: missing\.md/),
+));
+
+test('Unicode image alt text preserves comment masking positions', () => fixture(
+  '![🔥 <!--](README.md)\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /README\.md:2: missing local link/),
+));
+
+test('real comments remain inactive after an image link', () => fixture(
+  '![image](README.md) <!-- [Inactive](missing.md) -->\n[Self](README.md)', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));
+
+test('ordinary inline and single-line reference titles still work', () => fixture(
+  '[safe]: README.md "<!--"\n[Safe][safe]\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /README\.md:3: missing local link/),
+));
