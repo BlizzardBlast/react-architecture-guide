@@ -51,6 +51,15 @@ function inspectMarkdown(relative, contents, root) {
     if (definition) return ' '.repeat(line.length);
     // match.index uses UTF-16 offsets; splitting by code points shifts emoji.
     const chars = line.split('');
+    // A CommonMark bracket label (inline link, full/collapsed reference,
+    // shortcut reference or image alt) is text metadata, not an HTML block.
+    // Literal <!-- inside any balanced label must not open a phantom comment.
+    // Preserve the original text for reference/destination verification.
+    for (const label of line.matchAll(/!?\[[^\]\n]*\]/g)) {
+      for (let i = label.index; i < label.index + label[0].length; i++) {
+        chars[i] = ' ';
+      }
+    }
     const opener = /!?\[[^\]\n]*\]\(/g;
     for (const match of line.matchAll(opener)) {
       const first = match.index + match[0].length;

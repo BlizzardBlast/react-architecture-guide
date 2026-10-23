@@ -131,17 +131,69 @@ function imports(node, list, options) {
     const spec = literalString(node.moduleSpecifier);
     if (spec) list.push({ spec, runtime: runtimeImport(node, options), line: node.getStart() });
   }
-  if (ts.isCallExpression(node) &&
-      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-        (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
-    const spec = literalString(node.arguments[0]);
-    if (spec === null) {
-      // Vite can expand variable dynamic imports, so a missing literal cannot
-      // be interpreted as an absence of internal source dependencies.
-      list.push({ unsupported: node.expression.kind === ts.SyntaxKind.ImportKeyword
-        ? 'dynamic-import' : 'dynamic-require', line: node.getStart() });
-    } else {
-      list.push({ spec, runtime: true, line: node.getStart() });
+  // Node CommonJS supports module.require() as well as require(). Treat the
+  // literal, quoted-member and dynamic member forms as executable edges (or
+  // unsupported loaders), never silently omit them from the ownership graph.
+  const isModuleMember = expr => ts.isPropertyAccessExpression(expr) &&
+    ts.isIdentifier(expr.expression) && expr.expression.text === 'module' ||
+    ts.isElementAccessExpression(expr) &&
+    ts.isIdentifier(expr.expression) && expr.expression.text === 'module';
+  const moduleMember = expr => isModuleMember(expr) &&
+    (ts.isPropertyAccessExpression(expr) ? expr.name.text : literalString(expr.argumentExpression));
+  if (ts.isCallExpression(node)) {
+    const callee = node.expression;
+    const moduleMemberName = moduleMember(callee);
+    const imported = callee.kind === ts.SyntaxKind.ImportKeyword;
+    const commonJs = ts.isIdentifier(callee) && callee.text === 'require' ||
+      moduleMemberName === 'require';
+    if (isModuleMember(callee) && moduleMemberName === null) {
+      list.push({ unsupported: 'computed-module-loader', line: node.getStart() });
+    } else if (imported || commonJs) {
+      const spec = literalString(node.arguments[0]);
+      if (spec === null) {
+        list.push({ unsupported: imported ? 'dynamic-import' : 'dynamic-require',
+          line: node.getStart() });
+      } else {
+        list.push({ spec, runtime: true, line: node.getStart() });
+        // Node's module package can create arbitrary require functions.
+        // Without binding analysis those loaders may hide ownership edges.
+        if (commonJs && ['node:module', 'module'].includes(spec)) {
+          list.push({ unsupported: 'node-create-require', line: node.getStart() });
+        }
+      }
+    }
+    if (ts.isPropertyAccessExpression(callee) &&
+        ts.isIdentifier(callee.expression) && callee.expression.text === 'require') {
+      list.push({ unsupported: 'indirect-require', line: node.getStart() });
+    }
+  }
+  // A detached loader alias such as module.require.bind(module), or calling
+  // require via .call/.apply, cannot be resolved reliably. Reject it rather
+  // than giving the dependency graph a false pass.
+  if (isModuleMember(node) && moduleMember(node) === 'require' &&
+      !(ts.isCallExpression(node.parent) && node.parent.expression === node)) {
+    list.push({ unsupported: 'indirect-module-require', line: node.getStart() });
+  }
+  if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) &&
+      ts.isIdentifier(node.initializer) && node.initializer.text === 'module' &&
+      node.name.elements.some(e =>
+        (e.propertyName?.text || e.name.getText()) === 'require')) {
+    list.push({ unsupported: 'indirect-module-require', line: node.getStart() });
+  }
+  if (ts.isPropertyAccessExpression(node) &&
+      node.name.text === 'createRequire' &&
+      ts.isCallExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === 'require' &&
+      ['module', 'node:module'].includes(literalString(node.expression.arguments[0]))) {
+    list.push({ unsupported: 'node-create-require', line: node.getStart() });
+  }
+  if (ts.isImportDeclaration(node) && ['module', 'node:module'].includes(literalString(node.moduleSpecifier))) {
+    const named = node.importClause?.namedBindings;
+    if (node.importClause?.name || named && ts.isNamespaceImport(named) ||
+        named && ts.isNamedImports(named) && named.elements.some(e =>
+          (e.propertyName?.text || e.name.text) === 'createRequire')) {
+      list.push({ unsupported: 'node-create-require', line: node.getStart() });
     }
   }
   ts.forEachChild(node, child => imports(child, list, options));
@@ -340,7 +392,13 @@ function verifyViteAliases(projectDir, policy, errors) {
   const booleanOptions = new Set(['--strictPort', '--force', '--clearScreen', '--cors', '--help', '--version']);
   // npm automatically runs pre<name> and post<name> lifecycle hooks. Those
   // hooks can launch another build with a different Vite config.
-  const buildScript = name => /^(?:pre|post)?(?:build|bundle|dev|serve|start|preview|watch)(?::|$)/i.test(name);
+  const buildScript = name =>
+    /^(?:build|bundle|dev|serve|start|preview|watch)(?::|$)/i.test(name) ||
+    // Any script's pre/post hooks run automatically via npm run <name>;
+    // `verify` and `test` are build orchestration scripts in this repo.
+    // Validate all existing hooks instead of guessing which parent is inert.
+    /^(?:pre|post).+/.test(name) &&
+      Object.hasOwn(scripts, name.replace(/^(?:pre|post)/, ''));
   const safeBoundaryCommand = command => {
     if (typeof command !== 'string' || /[&|;<>$\r\n]/.test(command) ||
         command.includes(String.fromCharCode(96))) return false;

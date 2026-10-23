@@ -347,3 +347,43 @@ test('ordinary inline and single-line reference titles still work', () => fixtur
   '[safe]: README.md "<!--"\n[Safe][safe]\n[Broken](missing.md)', root =>
     assert.match(checkAll(root).issues.join(' '), /README\.md:3: missing local link/),
 ));
+
+test('reference-style image alt text containing comment-looking syntax cannot hide broken links', () => fixture(
+  '[img]: README.md\n![example <!--][img]\n[Broken](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /README\.md:3: missing local link: missing\.md/);
+  },
+));
+
+test('reference-style text-link label cannot open a phantom comment', () => fixture(
+  '[ref]: README.md\n[example <!--][ref]\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /README\.md:3: missing local link/),
+));
+
+test('collapsed and shortcut image references treat their bracket labels as text', () => {
+  for (const link of ['![img <!--][]', '![img <!--]']) fixture(
+    '[img <!--]: README.md\n' + link + '\n[Broken](missing.md)', root =>
+      assert.match(checkAll(root).issues.join(' '), /README\.md:3: missing local link/),
+  );
+});
+
+test('shortcut reference text links cannot conceal later active destinations', () => fixture(
+  '[link <!--]: README.md\n[link <!--]\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /README\.md:3: missing local link/),
+));
+
+test('Unicode reference labels preserve offsets for comment masking', () => fixture(
+  '[img]: README.md\n![🔥 <!--][img]\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /README\.md:3: missing local link/),
+));
+
+test('reference-style image still validates its own missing target', () => fixture(
+  '[img]: missing.svg\n![example <!--][img]', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link: missing\.svg/),
+));
+
+test('real HTML comments after reference labels still mask inactive links', () => fixture(
+  '[ref]: README.md\n[example <!--][ref] <!-- [Inactive](missing.md) -->\n[Self](README.md)', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));

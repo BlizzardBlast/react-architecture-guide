@@ -1481,3 +1481,80 @@ test('exact delegated boundary checks are accepted for the supported names', () 
     'app/start.ts': 'export const start = true;',
   }, result => assert.deepEqual(result.errors, []));
 });
+
+test('CommonJS module.require cannot cross from shared code into module internals', () => {
+  for (const loader of [
+    'module.require("../../modules/orders/ui/private.cjs")',
+    'module["require"]("../../modules/orders/ui/private.cjs")',
+    "module['require']('../../modules/orders/ui/private.cjs')",
+  ]) withFixture({
+    'shared/lib/bridge.cjs': 'module.exports = ' + loader + ';',
+    'modules/orders/ui/private.cjs': 'module.exports = { private: true };',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('module.require creates runtime edges for CommonJS cycles', () => withFixture({
+  'modules/orders/infrastructure/a.cjs': 'module.exports = module.require("./b.cjs");',
+  'modules/orders/infrastructure/b.cjs': 'module.exports = module.require("./a.cjs");',
+}, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+test('computed, nonliteral and detached module require cannot bypass the graph', () => {
+  const loaders = [
+    ['module[operation]("./target.cjs")', /unsupported-computed-module-loader/],
+    ['module.require(target)', /unsupported-dynamic-require/],
+    ['module["require"](target)', /unsupported-dynamic-require/],
+    ['const loader = module.require; loader("./target.cjs")', /unsupported-indirect-module-require/],
+    ['module.require.call(module, "./target.cjs")', /unsupported-indirect-module-require/],
+    ['const { require: load } = module; load("./target.cjs")', /unsupported-indirect-module-require/],
+    ['require.call(null, "./target.cjs")', /unsupported-indirect-require/],
+  ];
+  for (const [content, error] of loaders) withFixture({
+    'modules/orders/infrastructure/loader.cjs': content,
+    'modules/orders/infrastructure/target.cjs': 'module.exports = {};',
+  }, result => assert.match(result.errors.join(' '), error));
+});
+
+test('Node createRequire factories cannot hide arbitrary CommonJS load edges', () => {
+  const statements = [
+    'import { createRequire } from "node:module"; const load = createRequire(import.meta.url);',
+    'import { createRequire as makeRequire } from "module"; const load = makeRequire(import.meta.url);',
+    'import * as loader from "node:module"; const load = loader.createRequire(import.meta.url);',
+    'const mod = require("node:module"); const load = mod.createRequire(__filename);',
+    'const load = require("module").createRequire(__filename);',
+  ];
+  for (const src of statements) withFixture({
+    'modules/orders/infrastructure/loader.mjs': src,
+  }, result => assert.match(result.errors.join(' '), /unsupported-node-create-require/));
+});
+
+test('ordinary literal CommonJS module.require dependencies remain supported', () => withFixture({
+  'modules/orders/infrastructure/io.cjs': 'const path = module.require("node:path"); module.exports = path.sep;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('npm verification and test orchestration hooks fail closed on opaque builders', () => {
+  for (const [main, hook] of [
+    ['verify', 'preverify'], ['verify', 'postverify'],
+    ['test', 'pretest'], ['test', 'posttest'],
+    ['lint', 'prelint'], ['build:release', 'prebuild:release'],
+    ['check:react', 'postcheck:react'],
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      [main]: 'vite build',
+      [hook]: 'node scripts/hidden-build.mjs',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('inert npm verification hooks remain compatible with explicit Vite scripts', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    preverify: 'tsc --noEmit',
+    verify: 'npm run build',
+    postverify: 'echo complete',
+    build: 'npm run arch && tsc --noEmit && vite build',
+    arch: 'node ../../tools/check-boundaries.cjs src',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
