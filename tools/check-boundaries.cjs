@@ -262,19 +262,52 @@ function verifyViteAliases(projectDir, policy, errors) {
     ? Object.values(JSON.parse(fs.readFileSync(packageFile, 'utf8')).scripts || {}) : [];
   const selections = new Set();
   let usesDefault = false;
-  for (const command of scripts) {
-    const viteCommand = /(?:^|[\s;&|])vite(?:\.cmd)?(?=\s|$)/g;
-    if (typeof command !== 'string' || !viteCommand.test(command)) continue;
-    // Match CLI tokens, not the word "vite" inside custom.vite.config.ts.
-    // A compound script or repeated flag could choose more than one config.
-    if ([...command.matchAll(/(?:^|[\s;&|])vite(?:\.cmd)?(?=\s|$)/g)].length !== 1 ||
-        [...command.matchAll(/--config\b/g)].length > 1) {
+  // Split compound scripts without treating separators inside quoted arguments
+  // as command boundaries. Parse the flags of the Vite process, not another
+  // process such as ESLint in the same npm script.
+  function splitShell(script) {
+    const commands = [];
+    let begin = 0, quote = null, escaped = false;
+    for (let i = 0; i < script.length; i++) {
+      const c = script[i];
+      if (escaped) { escaped = false; continue; }
+      if (c === '\\' && quote !== "'") { escaped = true; continue; }
+      if (quote) { if (c === quote) quote = null; continue; }
+      if (c === '"' || c === "'") { quote = c; continue; }
+      if (c === '&' || c === '|' || c === ';') {
+        commands.push(script.slice(begin, i).trim());
+        if (script[i + 1] === c) i++;
+        begin = i + 1;
+      }
+    }
+    if (quote || escaped) return null;
+    commands.push(script.slice(begin).trim());
+    return commands.filter(Boolean);
+  }
+  const viteCommand = /(?:^|\s)(?:vite(?:\.cmd)?|(?:node(?:\.exe)?\s+)?(?:\.\/)?node_modules\/vite\/bin\/vite\.js)(?=\s|$)/g;
+  for (const script of scripts) {
+    if (typeof script !== 'string') continue;
+    const commands = splitShell(script);
+    if (!commands) {
+      if (/\bvite\b/.test(script)) errors.push('unsupported-vite-custom-config: unbalanced shell quoting');
+      continue;
+    }
+    const invoked = commands.flatMap(command => [...command.matchAll(viteCommand)].map(match => ({
+      command, after: command.slice(match.index + match[0].length),
+    })));
+    if (!invoked.length) continue;
+    if (invoked.length !== 1) {
       errors.push('unsupported-vite-custom-config: ambiguous Vite command in npm script');
       return;
     }
-    const selection = /--config(?:\s+|=)(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/.exec(command);
+    const args = invoked[0].after;
+    if ([...args.matchAll(/--config\b/g)].length > 1) {
+      errors.push('unsupported-vite-custom-config: multiple --config flags');
+      return;
+    }
+    const selection = /(?:^|\s)--config(?:\s+|=)(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(args);
     if (selection) selections.add(path.resolve(projectDir, selection[1] || selection[2] || selection[3]));
-    else if (/--config\b/.test(command)) {
+    else if (/(?:^|\s)--config\b/.test(args)) {
       errors.push('unsupported-vite-custom-config: could not parse npm script --config');
       return;
     } else usesDefault = true;
@@ -371,10 +404,11 @@ function verifyViteAliases(projectDir, policy, errors) {
       (cjsFile ? 'module.exports assignment' : 'default config export'));
     return;
   }
-  // A second top-level assignment/call could mutate module.exports after
-  // the verified literal. Fail closed instead of trusting a stale AST value.
-  if (cjsFile && source.statements.some(statement =>
-    ts.isExpressionStatement(statement) && statement !== exports[0])) {
+  // Do not trust any additional executable CommonJS statement, including
+  // const declarations whose initializers mutate module.exports indirectly.
+  // Only inert directive string literals are safe alongside the one export.
+  if (cjsFile && source.statements.some(statement => statement !== exports[0] &&
+      !(ts.isExpressionStatement(statement) && ts.isStringLiteral(statement.expression)))) {
     errors.push('unsupported-vite-alias-config: CommonJS config has additional top-level effects');
     return;
   }

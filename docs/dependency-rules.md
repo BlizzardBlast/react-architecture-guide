@@ -150,3 +150,11 @@ The checker inspects all six default Vite config extensions: `.ts`, `.mts`, `.js
 A declared file must remain within the project (including after following symlinks). Inconsistent Vite configuration selections across npm scripts are rejected. Configurations launched with an external CLI argument that is not represented in scripts must likewise be declared explicitly; untracked external launchers are outside the checker’s automatic discovery scope.
 
 For `fileURLToPath(new URL(path, import.meta.url))` aliases, the checker uses actual `URL` and `fileURLToPath` behavior, including percent-decoding and normalization of encoded dot segments. It rejects invalid encoded separators and mismatches against the policy-mirrored physical path. As before, arbitrary Vite plugins and runtime configuration transformations require a separate real build-level check.
+
+### Static configuration and documentation-parser limitations
+
+The architecture checker only accepts one **static** CommonJS `module.exports = { ... }` object plus optional inert string directives (such as `"use strict"`). Other top-level statements are rejected, including variable declarations with initializers that could mutate the exported alias map. This is intentional fail-closed behavior, not a restriction imposed by Vite itself. Vite configuration built dynamically must instead be independently reviewed and the effective bundler behavior verified.
+
+The checker isolates each supported shell command within npm scripts when identifying Vite's own `--config` option; flags belonging to ESLint or another command are not Vite configuration selections. Scripts with multiple conflicting Vite invocations or ambiguous configuration flags fail closed. This limited shell analysis is not a complete interpreter for arbitrary shell functions, runtime wrappers, or externally supplied CLI overrides; inspect your actual build scripts and verify Vite's effective configuration before relying on an architecture-check result.
+
+The Markdown link validator masks inline code before interpreting HTML-comment markers, ignores links in fenced blocks inside ordinary list/blockquote containers, and reports unmatched fenced blocks consistently. It remains a conservative lightweight validator, not a general CommonMark rendering engine; advanced or plugin-specific Markdown syntax requires review.

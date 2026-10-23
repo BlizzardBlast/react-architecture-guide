@@ -130,9 +130,13 @@ test('nested blockquote fences do not hide following real links', () => fixture(
   },
 ));
 
-test('unclosed blockquoted fenced code is not scanned for links', () => fixture(
+test('unclosed blockquoted fenced code reports the fence but not hidden links', () => fixture(
   '> ~~~\n> [ignored](missing.md)\n> [ignored](missing.md)',
-  root => assert.deepEqual(checkAll(root).issues, []),
+  root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /unclosed ~~~/);
+  },
 ));
 
 test('ordinary blockquote paragraphs still contain active links', () => fixture(
@@ -143,4 +147,50 @@ test('ordinary blockquote paragraphs still contain active links', () => fixture(
 test('HTML blocks within blockquotes do not create links', () => fixture(
   '> <div>\n> [ignored](missing.md)\n>\n> [Self](README.md)',
   root => assert.deepEqual(checkAll(root).issues, []),
+));
+
+test('literal HTML comment opener in inline code does not hide a later link', () => fixture(
+  '`<!--`\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+test('inline backticked comment opener does not hide a same-line link', () => fixture(
+  '`<!--` [Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+test('comment delimiters inside inline code do not create phantom comments', () => fixture(
+  '`<!--` [Self](README.md) `-->`', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));
+test('unclosed blockquote fences have a diagnostic with their original line', () => fixture(
+  '> ~~~js\n> [not a link](missing.md)\n', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /README\.md:1: unclosed ~~~/);
+  },
+));
+test('fenced blocks inside Markdown lists are not scanned as links', () => fixture(
+  '- ~~~js\n  [not a link](missing.md)\n  ~~~', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));
+test('nested list fenced blocks are not scanned as links', () => fixture(
+  '- item\n  - ~~~js\n    [not a link](missing.md)\n    ~~~', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));
+test('unclosed list fences produce one fence diagnostic but no missing link', () => fixture(
+  '- ~~~js\n  [not a link](missing.md)\n', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /unclosed ~~~/);
+  },
+));
+test('fences inside a list cannot suppress a subsequent unindented link', () => fixture(
+  '- ~~~js\n  [not a link](missing.md)\n[real link](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /missing local link/);
+  },
+));
+test('ordinary links in Markdown list items are still validated', () => fixture(
+  '- [real link](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
 ));

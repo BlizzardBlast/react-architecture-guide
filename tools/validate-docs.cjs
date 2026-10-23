@@ -13,9 +13,32 @@ function inspectMarkdown(relative, contents, root) {
   let inComment = false;
   let inIndentedCode = false;
   let previousBlank = true;
+  let listIndent = 0, listDepth = 0;
   const active = [];
   const blockTags = /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|meta|nav|noframes|ol|optgroup|option|output|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[\s/>])/i;
   const fenceMarker = /^ {0,3}([\x60]{3,}|~{3,})(.*)$/;
+  // Backtick-delimited inline code is literal text. Mask it before looking
+  // for HTML comment delimiters, otherwise a literal `<!--` hides real links.
+  function maskInlineCode(line) {
+    // Fenced openers are blocks, not inline code spans.
+    if (/^ {0,3}(?:`{3,}|~{3,})/.test(line)) return line;
+    return line.replace(/(`+)([^\n]*?)\1/g, match => ' '.repeat(match.length));
+  }
+  // Strip the content indentation of simple list containers. A list item
+  // beginning with a fence owns its indented following lines.
+  function unwrapList(text, depth) {
+    if (depth !== listDepth) { listIndent = 0; listDepth = depth; }
+    const marker = /^ {0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$)/.exec(text);
+    if (marker) {
+      listIndent = marker[0].length;
+      return { content: text.slice(listIndent), inList: true };
+    }
+    if (listIndent && text.startsWith(' '.repeat(listIndent))) {
+      return { content: text.slice(listIndent), inList: true };
+    }
+    if (text.trim()) listIndent = 0;
+    return { content: text, inList: false };
+  }
   // Mask comments without moving columns or inadvertently creating new links.
   function maskHtmlComments(line) {
     let result = '';
@@ -49,7 +72,12 @@ function inspectMarkdown(relative, contents, root) {
     // blockquoted links are still inspected once the container is removed.
     const prefix = /^ {0,3}(?:>[ \t]?)+/.exec(raw)?.[0] || '';
     const depth = (prefix.match(/>/g) || []).length;
-    const text = raw.slice(prefix.length);
+    const list = unwrapList(raw.slice(prefix.length), depth);
+    const text = list.content;
+    // A fenced list item ends when its container is exited; it cannot
+    // swallow an unindented Markdown link that follows the list.
+    if (fence?.list && !list.inList && text.trim()) fence = null;
+    if (quotedFence?.list && !list.inList && text.trim()) quotedFence = null;
     if (fence || quotedFence) {
       const current = fence || quotedFence;
       if (!quotedFence || current.depth === depth) {
@@ -61,6 +89,11 @@ function inspectMarkdown(relative, contents, root) {
         }
         continue;
       }
+      // Blank lines outside a quote retain an unclosed fence until EOF.
+      // A nonblank line exits the quote and reports the missing closer.
+      if (!text.trim()) continue;
+      issues.push(relative + ':' + current.line + ': unclosed ' +
+        current.char.repeat(current.length) + ' code fence');
       quotedFence = null;
     }
     if (htmlBlock && htmlBlock.depth !== depth) htmlBlock = null;
@@ -72,7 +105,7 @@ function inspectMarkdown(relative, contents, root) {
       if (text.trim()) continue;
       htmlBlock = null;
     }
-    const line = maskHtmlComments(text);
+    const line = maskHtmlComments(maskInlineCode(text));
     if (!line.trim()) {
       previousBlank = true;
       continue;
@@ -111,7 +144,7 @@ function inspectMarkdown(relative, contents, root) {
     inIndentedCode = false;
     const marker = fenceMarker.exec(line);
     if (marker) {
-      const value = { char: marker[1][0], length: marker[1].length, line: i + 1 };
+      const value = { char: marker[1][0], length: marker[1].length, line: i + 1, list: list.inList };
       if (depth) quotedFence = { ...value, depth };
       else fence = value;
       previousBlank = false;
@@ -120,8 +153,9 @@ function inspectMarkdown(relative, contents, root) {
     active.push({ text: line, number: i + 1 });
     previousBlank = false;
   }
-  if (fence) issues.push(relative + ':' + fence.line + ': unclosed ' +
-    fence.char.repeat(fence.length) + ' code fence');
+  const hangingFence = fence || quotedFence;
+  if (hangingFence) issues.push(relative + ':' + hangingFence.line + ': unclosed ' +
+    hangingFence.char.repeat(hangingFence.length) + ' code fence');
 
   const labels = new Map();
   const normalizeLabel = s => s.trim().replace(/\s+/g, ' ').toLowerCase();

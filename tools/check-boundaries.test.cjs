@@ -1068,3 +1068,50 @@ test('multiple Vite commands or --config flags in one script fail closed', () =>
     'app/start.ts': 'export const value = 1;',
   }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
 });
+
+test('CommonJS variable declarations cannot mutate a verified Vite alias', () => {
+  for (const extra of [
+    'const changed = (module.exports.resolve.alias["@safe"] = "/src/modules/orders/ui");',
+    'const changed = Object.assign(module.exports.resolve.alias, { "@safe": "/src/modules/orders/ui" });',
+    'var changed = (() => { module.exports.resolve.alias["@safe"] = "/src/modules/orders/ui"; })();',
+  ]) withFixture({
+    '../vite.config.cjs': 'module.exports = { resolve: { alias: { "@safe": "/src/shared/lib" } } }; ' + extra,
+    '../architecture.config.json': '{"viteAliases":{"@safe":"src/shared/lib"}}',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/));
+});
+
+test('CommonJS use strict directive is inert and may precede a static export', () => withFixture({
+  '../vite.config.cjs': '"use strict"; module.exports = { plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('eslint --config in a compound npm script cannot override the Vite config path', () => withFixture({
+  '../package.json': '{"scripts":{"build":"eslint --config safe.vite.config.cjs && vite build"}}',
+  '../architecture.config.json': '{"viteConfig":"safe.vite.config.cjs"}',
+  '../safe.vite.config.cjs': 'module.exports = { plugins: [] };',
+  '../vite.config.ts': 'export default { resolve: { alias: { "@private": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('Vite --config is resolved within its own compound-shell command', () => withFixture({
+  '../package.json': '{"scripts":{"build":"eslint --config eslint.config.mjs && vite build --config safe.vite.config.cjs"}}',
+  '../architecture.config.json': '{"viteConfig":"safe.vite.config.cjs"}',
+  '../safe.vite.config.cjs': 'module.exports = { plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite JavaScript executable in npm script uses the chosen custom config', () => withFixture({
+  '../package.json': '{"scripts":{"build":"node node_modules/vite/bin/vite.js build --config custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('quoted shell separators do not split the Vite configuration command', () => withFixture({
+  '../package.json': '{"scripts":{"build":"echo \"not && a command\" && vite build --config custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));

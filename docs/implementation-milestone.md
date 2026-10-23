@@ -59,3 +59,11 @@ This revision adds explicit default CommonJS Vite configuration discovery, conse
 Markdown validation now distinguishes raw HTML blocks (including script/pre-style raw-text blocks) and blockquoted fenced code from active Markdown links, while continuing to validate links after these blocks. Parser tests cover these contexts without introducing dependencies solely for validation.
 
 Full `npm ci` verification, complete suites and audits remain **unverified** until registry access and authentic lockfiles are available. The PR remains draft and unmerged.
+
+### Follow-up review remediation: executable configuration and Markdown containers
+
+Addressed four later review findings: potential Vite alias mutation through top-level CommonJS variable initializers; cross-command `--config` flags mistakenly attributed to Vite; inline-code comment delimiters incorrectly hiding real Markdown links; and inconsistent unclosed or list-contained fenced-code handling. Added negative and positive regression fixtures. JavaScript syntax checks, 13 targeted Vite command-selection probes, and the full Markdown fixture set (36 test definitions) were performed using available tools; these are **not equivalent to a successful full npm-installed test run**.
+
+This change deliberately rejects additional executable CommonJS top-level statements rather than pretending to evaluate their side effects. The npm-script scanner scopes `--config` to the identified Vite command. The Markdown checker masks inline code before HTML-comment detection and handles simple nested list/blockquote fence contexts.
+
+Authentic package lockfiles, registry-backed `npm ci`, complete root `npm run verify`, dependency audits, a real Vite build and browser smoke tests remain mandatory before the PR can leave draft status.
