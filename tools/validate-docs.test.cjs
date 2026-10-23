@@ -194,3 +194,32 @@ test('ordinary links in Markdown list items are still validated', () => fixture(
   '- [real link](missing.md)', root =>
     assert.match(checkAll(root).issues.join(' '), /missing local link/),
 ));
+
+test('escaped HTML comment opener does not hide an active link', () => fixture(
+  '\\<!--\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+test('HTML comment closing delimiter is effective even when wrapped in backticks', () => fixture(
+  '<!-- `-->`\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+test('closing an HTML comment within backticks resumes links on the same line', () => fixture(
+  '<!-- `-->` [Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+test('indented code containing an apparent comment opener cannot hide links', () => fixture(
+  '    <!--\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+test('indented HTML comment closer still works when a comment is already open', () => fixture(
+  '<!--\n    -->\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+test('inline comment text within code remains inactive', () => fixture(
+  '`<!--`\n[Broken](missing.md)', root =>
+    assert.match(checkAll(root).issues.join(' '), /missing local link/),
+));
+test('real multiline HTML comments continue to hide apparent links', () => fixture(
+  '<!--\n[ignored](missing.md)\n-->\n[Self](README.md)', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));

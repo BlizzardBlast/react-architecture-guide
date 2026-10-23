@@ -80,3 +80,9 @@ No new GitHub Actions workflow is required merely for this guide. Preserve all q
 ### Vite configuration verification
 
 Supported default Vite configuration names include `vite.config.ts`, `.mts`, `.js`, `.mjs`, `.cts` and `.cjs`. CommonJS files use a statically inspectable `module.exports = { ... }` form; unsupported computed configurations or additional CommonJS side effects fail closed. If an npm script passes `vite --config custom-file.ts`, declare `"viteConfig": "custom-file.ts"` in `architecture.config.json` alongside any mirrored `viteAliases`. Scripts selecting different configs fail closed. The checker verifies static aliases using real file-URL resolution semantics, not string-only path joining.
+
+### Conservative Vite script checking and Markdown validation
+
+The checker recognizes both `vite build -c custom.config.ts` and `vite build --config custom.config.ts`, including explicit local Vite executable paths. Effective Vite configuration resolution depends on the executable **and** its project root, not merely a `vite` string anywhere in an npm script. Scripts changing working directories, passing positional Vite roots, or using unsupported wrappers/options now fail validation rather than silently checking the wrong Vite aliases. Keep build commands simple; review the actual Vite output and any plugins separately.
+
+Markdown validation recognizes escaped comment delimiters, existing HTML comments that close inside backticks, and indented code that must not start an HTML comment. This lightweight validator is not a complete CommonMark parser; use a conformant Markdown renderer or checker when extending supported syntax.

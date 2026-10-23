@@ -1115,3 +1115,108 @@ test('quoted shell separators do not split the Vite configuration command', () =
   '../custom.vite.config.ts': 'export default { plugins: [] };',
   'app/start.ts': 'export const x = 1;',
 }, result => assert.deepEqual(result.errors, [])));
+
+test('Vite -c must be mirrored rather than silently using default config', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build -c hidden.vite.config.ts"}}',
+  '../vite.config.ts': 'export default { plugins: [] };',
+  '../hidden.vite.config.ts': 'export default { resolve: { alias: { "@": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('declared Vite -c config is validated as the effective config', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build -c custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite --config=path and -c=path select declared config', () => {
+  for (const flag of ['--config=', '-c=']) withFixture({
+    '../package.json': JSON.stringify({scripts:{build:'vite build '+flag+'custom.vite.config.ts'}}),
+    '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+    '../custom.vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('duplicate Vite short/long options must fail closed', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build -c custom.vite.config.ts --config custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('working-directory changes must not silently inspect root Vite config', () => withFixture({
+  '../package.json': '{"scripts":{"build":"cd nested && vite build"}}',
+  '../vite.config.ts': 'export default { plugins: [] };',
+  '../nested/vite.config.ts': 'export default { resolve: { alias: { "@": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('a positional Vite project root fails closed', () => {
+  for (const command of ['vite build nested', 'vite nested', 'vite dev nested', 'vite build --root nested'])
+    withFixture({
+      '../package.json': JSON.stringify({scripts:{build:command}}),
+      '../vite.config.ts': 'export default { plugins: [] };',
+      '../nested/vite.config.ts': 'export default { resolve: { alias: { "@": "/src/modules/orders/ui" } } };',
+      'app/start.ts': 'export const start = true;',
+    }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('echoed vite tokens cannot impersonate the actual local executable', () => withFixture({
+  '../package.json': '{"scripts":{"build":"echo vite --config safe.vite.config.ts && ./node_modules/.bin/vite build"}}',
+  '../architecture.config.json': '{"viteConfig":"safe.vite.config.ts"}',
+  '../safe.vite.config.ts': 'export default { plugins: [] };',
+  '../vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('local Vite executable discovers the real default aliases', () => withFixture({
+  '../package.json': '{"scripts":{"build":"echo vite --config safe.vite.config.ts && ./node_modules/.bin/vite build"}}',
+  '../vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unverified-vite-alias/)));
+
+test('unrecognized Vite wrappers and options must not silently trust defaults', () => {
+  for (const command of [
+    'npx --yes vite build -c hidden.vite.config.ts',
+    'cross-env MODE=prod vite build -c hidden.vite.config.ts',
+    'vite build -chidden.vite.config.ts',
+  ]) withFixture({
+    '../package.json': JSON.stringify({scripts:{build:command}}),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { resolve: { alias: { "@": "/src/modules/orders/ui" } } };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('a direct Node Vite CLI uses only its own -c flag', () => withFixture({
+  '../package.json': '{"scripts":{"build":"echo --config decoy.ts && node ./node_modules/vite/bin/vite.js build -c custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Windows-local Vite.cmd and Node CLI paths respect their own short config flag', () => {
+  const scripts = [
+    String.raw`.\node_modules\.bin\vite.cmd build -c custom.vite.config.ts`,
+    String.raw`node .\node_modules\vite\bin\vite.js build -c custom.vite.config.ts`,
+    'vite.cmd build -c custom.vite.config.ts',
+  ];
+  for (const command of scripts) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: command } }),
+    '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+    '../custom.vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('Windows-local Vite executable cannot be spoofed by earlier echo text', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    build: String.raw`echo vite --config safe.vite.config.ts && .\node_modules\.bin\vite.cmd build`,
+  } }),
+  '../architecture.config.json': '{"viteConfig":"safe.vite.config.ts"}',
+  '../safe.vite.config.ts': 'export default { plugins: [] };',
+  '../vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));

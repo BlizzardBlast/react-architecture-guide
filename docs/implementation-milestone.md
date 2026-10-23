@@ -67,3 +67,9 @@ Addressed four later review findings: potential Vite alias mutation through top-
 This change deliberately rejects additional executable CommonJS top-level statements rather than pretending to evaluate their side effects. The npm-script scanner scopes `--config` to the identified Vite command. The Markdown checker masks inline code before HTML-comment detection and handles simple nested list/blockquote fence contexts.
 
 Authentic package lockfiles, registry-backed `npm ci`, complete root `npm run verify`, dependency audits, a real Vite build and browser smoke tests remain mandatory before the PR can leave draft status.
+
+### Review remediation: effective Vite configuration and Markdown comment state
+
+The latest review found four more edge cases: misleading `vite` tokens/wrong project working directory, ignored `-c` config options, escaped or misprioritized HTML comment delimiters, and indented code opening phantom comments. The checker now parses recognized Vite command tokens and options rather than matching incidental words, rejects cwd changes and positional roots, and requires `-c` configurations to be mirrored just like `--config`. The Markdown scanner respects escapes, active-comment closure precedence and indented code blocks.
+
+Adversarial tests cover both expected failures and valid common forms, including direct Vite binary invocations, short/long config flags, quoted shell separators, and the previous false-negative Markdown examples. The test count and targeted results do not replace a complete installed test run; genuine lockfiles, `npm ci`, full verification, audits, real Vite build and browser smoke testing are still pending.

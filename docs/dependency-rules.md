@@ -158,3 +158,11 @@ The architecture checker only accepts one **static** CommonJS `module.exports = 
 The checker isolates each supported shell command within npm scripts when identifying Vite's own `--config` option; flags belonging to ESLint or another command are not Vite configuration selections. Scripts with multiple conflicting Vite invocations or ambiguous configuration flags fail closed. This limited shell analysis is not a complete interpreter for arbitrary shell functions, runtime wrappers, or externally supplied CLI overrides; inspect your actual build scripts and verify Vite's effective configuration before relying on an architecture-check result.
 
 The Markdown link validator masks inline code before interpreting HTML-comment markers, ignores links in fenced blocks inside ordinary list/blockquote containers, and reports unmatched fenced blocks consistently. It remains a conservative lightweight validator, not a general CommonMark rendering engine; advanced or plugin-specific Markdown syntax requires review.
+
+### Vite executable, root and option verification
+
+The architecture checker scopes Vite options to the actual executable in each supported npm-script command. It recognizes default `vite`, installed local Vite binaries, and documented `-c`/`--config` configuration flags (with separate values or `=` syntax). It rejects duplicate configuration options and conflicting choices. A `vite` word printed by `echo` or used as another command's argument does not select the configuration to inspect.
+
+The effective working directory matters: commands such as `cd nested && vite build`, or positional project roots like `vite build nested`, are rejected until the project-root semantics can be verified. Unrecognized execution wrappers, arbitrary shell transformations and unsupported CLI arguments are **not assumed safe**. Prefer clear scripts and mirror custom config filenames in `architecture.config.json`; independently verify final Vite alias resolution in the real build.
+
+For Markdown link validation, an escaped `\<!--` must not start an HTML comment; once a real `<!--` has opened a comment, its `-->` terminator is recognized even inside backticks. Indented code and fenced code cannot mutate the HTML-comment state. The parser remains a conservative subset and does not implement the complete CommonMark grammar.

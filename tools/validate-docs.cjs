@@ -39,7 +39,8 @@ function inspectMarkdown(relative, contents, root) {
     if (text.trim()) listIndent = 0;
     return { content: text, inList: false };
   }
-  // Mask comments without moving columns or inadvertently creating new links.
+  // HTML comments take precedence over inline-code syntax inside them.
+  // Outside comments, inline code and backslash escaping block openers.
   function maskHtmlComments(line) {
     let result = '';
     let cursor = 0;
@@ -53,16 +54,23 @@ function inspectMarkdown(relative, contents, root) {
         result += ' '.repeat(close + 3 - cursor);
         cursor = close + 3;
         inComment = false;
-      } else {
-        const open = line.indexOf('<!--', cursor);
-        if (open === -1) {
-          result += line.slice(cursor);
-          break;
-        }
-        result += line.slice(cursor, open) + '    ';
-        cursor = open + 4;
-        inComment = true;
+        continue;
       }
+      const visible = maskInlineCode(line.slice(cursor));
+      let open = visible.indexOf('<!--');
+      while (open !== -1) {
+        let slashCount = 0;
+        for (let j = open - 1; j >= 0 && visible[j] === '\\'; j--) slashCount++;
+        if (slashCount % 2 === 0) break;
+        open = visible.indexOf('<!--', open + 4);
+      }
+      if (open === -1) {
+        result += visible;
+        break;
+      }
+      result += visible.slice(0, open) + '    ';
+      cursor += open + 4;
+      inComment = true;
     }
     return result;
   }
@@ -105,7 +113,16 @@ function inspectMarkdown(relative, contents, root) {
       if (text.trim()) continue;
       htmlBlock = null;
     }
-    const line = maskHtmlComments(maskInlineCode(text));
+    // Indented code is literal, and cannot start an HTML comment. If
+    // already inside a comment, even indented closing delimiters can end it.
+    const indented = /^(?: {4}|\t)/.test(text);
+    if (!inComment && indented && (previousBlank || inIndentedCode)) {
+      inIndentedCode = true;
+      previousBlank = false;
+      continue;
+    }
+    inIndentedCode = false;
+    const line = maskHtmlComments(text);
     if (!line.trim()) {
       previousBlank = true;
       continue;
@@ -135,13 +152,6 @@ function inspectMarkdown(relative, contents, root) {
       htmlBlock = { depth, close: null };
       continue;
     }
-    const indented = /^(?: {4}|\t)/.test(text);
-    if (indented && (previousBlank || inIndentedCode)) {
-      inIndentedCode = true;
-      previousBlank = false;
-      continue;
-    }
-    inIndentedCode = false;
     const marker = fenceMarker.exec(line);
     if (marker) {
       const value = { char: marker[1][0], length: marker[1].length, line: i + 1, list: list.inList };

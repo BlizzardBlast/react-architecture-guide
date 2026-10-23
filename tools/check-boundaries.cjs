@@ -284,33 +284,132 @@ function verifyViteAliases(projectDir, policy, errors) {
     commands.push(script.slice(begin).trim());
     return commands.filter(Boolean);
   }
-  const viteCommand = /(?:^|\s)(?:vite(?:\.cmd)?|(?:node(?:\.exe)?\s+)?(?:\.\/)?node_modules\/vite\/bin\/vite\.js)(?=\s|$)/g;
+  function shellWords(command) {
+    // A deliberately small lexer, not a shell interpreter. Retain quoted words
+    // as one token; unsupported shell syntax should never select a safe config.
+    const words = [];
+    let value = '', quote = null, escaping = false, started = false;
+    const push = () => {
+      if (started) words.push(value);
+      value = '';
+      started = false;
+    };
+    for (let i = 0; i < command.length; i++) {
+      const c = command[i], next = command[i + 1] || '';
+      if (escaping) { value += c; escaping = false; started = true; continue; }
+      // Backslash is a Windows path separator unless escaping whitespace
+      // or shell syntax; don't silently turn .\node_modules into .node_modules.
+      if (c === '\\' && quote !== "'" && /[\s"';&|\\]/.test(next)) {
+        escaping = true; started = true; continue;
+      }
+      if (quote) {
+        if (c === quote) quote = null;
+        else value += c;
+        continue;
+      }
+      if (c === "'" || c === '"') { quote = c; started = true; continue; }
+      if (/\s/.test(c)) { push(); continue; }
+      value += c;
+      started = true;
+    }
+    if (escaping || quote) return null;
+    push();
+    return words;
+  }
+  function viteArguments(words) {
+    let index = 0;
+    // Recognize actual launchers, not an incidental "vite" in echo text.
+    if (['npx', 'bunx', 'pnpm', 'yarn'].includes(words[index])) {
+      index++;
+      if (words[index] === 'exec') index++;
+    } else if (words[index] === 'npm' && words[1] === 'exec') {
+      index = 2;
+      if (words[index] === '--') index++;
+    }
+    if (/^node(?:\.exe)?$/.test(words[index] || '')) index++;
+    const executable = (words[index] || '').replace(/\\/g, '/');
+    if (!/^(?:vite(?:\.cmd)?|(?:\.\/)?node_modules\/(?:\.bin\/vite(?:\.cmd)?|vite\/bin\/vite\.js))$/.test(executable)) {
+      return null;
+    }
+    return words.slice(index + 1);
+  }
+  const viteCommands = new Set(['build', 'dev', 'serve', 'preview', 'optimize']);
+  const argumentOptions = new Set(['--mode', '--base', '--outDir', '--assetsDir', '--port', '--host']);
+  const booleanOptions = new Set(['--strictPort', '--force', '--clearScreen', '--cors', '--help', '--version']);
   for (const script of scripts) {
     if (typeof script !== 'string') continue;
     const commands = splitShell(script);
     if (!commands) {
-      if (/\bvite\b/.test(script)) errors.push('unsupported-vite-custom-config: unbalanced shell quoting');
+      if (/\bvite\b/.test(script)) {
+        errors.push('unsupported-vite-custom-config: unbalanced shell quoting');
+        return;
+      }
       continue;
     }
-    const invoked = commands.flatMap(command => [...command.matchAll(viteCommand)].map(match => ({
-      command, after: command.slice(match.index + match[0].length),
-    })));
-    if (!invoked.length) continue;
-    if (invoked.length !== 1) {
-      errors.push('unsupported-vite-custom-config: ambiguous Vite command in npm script');
+    const tokens = commands.map(shellWords);
+    if (tokens.some(words => !words)) {
+      errors.push('unsupported-vite-custom-config: unsupported shell quoting');
       return;
     }
-    const args = invoked[0].after;
-    if ([...args.matchAll(/--config\b/g)].length > 1) {
-      errors.push('unsupported-vite-custom-config: multiple --config flags');
+    const commandsWithVite = tokens.map(words => ({ words, args: viteArguments(words) }))
+      .filter(entry => entry.args !== null);
+    if (!commandsWithVite.length) {
+      // Unknown launchers (npx --yes, cross-env, custom wrappers) must not
+      // accidentally fall through to default Vite configuration discovery.
+      // Ignore literal echo/printf messages: they never execute Vite.
+      const suspicious = tokens.some(words =>
+        !['echo', 'printf'].includes(words[0]) && words.some(word =>
+          /^(?:vite(?:\.cmd)?|(?:\.\/)?node_modules\/(?:\.bin\/vite(?:\.cmd)?|vite\/bin\/vite\.js))$/.test(word)));
+      if (suspicious) {
+        errors.push('unsupported-vite-custom-config: unsupported Vite launcher');
+        return;
+      }
+      continue;
+    }
+    if (commandsWithVite.length !== 1 ||
+        tokens.some(words => ['cd', 'pushd', 'popd', 'chdir'].includes(words[0]))) {
+      errors.push('unsupported-vite-custom-config: ambiguous Vite execution or working directory');
       return;
     }
-    const selection = /(?:^|\s)--config(?:\s+|=)(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(args);
-    if (selection) selections.add(path.resolve(projectDir, selection[1] || selection[2] || selection[3]));
-    else if (/(?:^|\s)--config\b/.test(args)) {
-      errors.push('unsupported-vite-custom-config: could not parse npm script --config');
-      return;
-    } else usesDefault = true;
+    const args = commandsWithVite[0].args;
+    let config = null, subcommandSeen = false;
+    for (let i = 0; i < args.length; i++) {
+      const word = args[i];
+      if (!subcommandSeen && viteCommands.has(word)) {
+        subcommandSeen = true;
+        continue;
+      }
+      if (word === '-c' || word === '--config') {
+        const value = args[++i];
+        if (config !== null || !value || value.startsWith('-')) {
+          errors.push('unsupported-vite-custom-config: missing or duplicate Vite config argument');
+          return;
+        }
+        config = value;
+      } else if (word.startsWith('--config=') || word.startsWith('-c=')) {
+        const value = word.slice(word.indexOf('=') + 1);
+        if (config !== null || !value) {
+          errors.push('unsupported-vite-custom-config: missing or duplicate Vite config argument');
+          return;
+        }
+        config = value;
+      } else if (argumentOptions.has(word)) {
+        if (!args[i + 1] || args[i + 1].startsWith('-')) {
+          errors.push('unsupported-vite-custom-config: unsupported Vite option value: ' + word);
+          return;
+        }
+        i++;
+      } else if (booleanOptions.has(word)) {
+        continue;
+      } else {
+        // Includes positional Vite roots, unknown flags, -cfoo and plugin
+        // options: these may change the effective Vite configuration.
+        errors.push('unsupported-vite-custom-config: unsupported Vite argument or root: ' + word);
+        return;
+      }
+    }
+    if (config === null) usesDefault = true;
+    else selections.add(path.resolve(projectDir, config));
   }
   if (selections.size > 1 || (selections.size && usesDefault)) {
     errors.push('unsupported-vite-custom-config: npm scripts select different Vite config files');
