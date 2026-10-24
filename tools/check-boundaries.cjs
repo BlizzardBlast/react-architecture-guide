@@ -1031,19 +1031,34 @@ function verifyVitePublicDirectory(projectDir, errors, state) {
 // The dev server serves other project HTML files, even with a single-page
 // production build. Reject them until they are explicitly audited.
 function verifyViteSecondaryHtml(projectDir, errors) {
-  const excluded = new Set([
+  // Exclusions are paths rooted at the Vite project, NOT arbitrary directory
+  // basenames: docs/public/index.html is a Vite dev entry, unlike public/.
+  const rootExcluded = new Set([
     '.git', 'node_modules', 'dist', 'build', 'coverage',
     '.next', '.turbo', '.vite', 'public',
   ]);
   function scan(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (excluded.has(entry.name)) continue;
+      if (dir === projectDir && rootExcluded.has(entry.name)) continue;
       const file = path.join(dir, entry.name);
       const relative = normPath(path.relative(projectDir, file));
       if (entry.isSymbolicLink()) {
-        // Symlinked directories might contain Vite-addressable HTML.
-        if (fs.statSync(file).isDirectory() || /\.html?$/i.test(entry.name)) {
-          errors.push('unverified-vite-html-page: symlinked HTML/directory ' + relative);
+        // A symlink can point at a directory of HTML entries, or directly at
+        // an HTML document under an innocuous alias. Never recurse through it.
+        if (/\.html?$/i.test(entry.name)) {
+          errors.push('unverified-vite-html-page: symlinked HTML entry ' + relative);
+          continue;
+        }
+        try {
+          const target = fs.statSync(file);
+          if (target.isDirectory() || /\.html?$/i.test(fs.realpathSync(file))) {
+            errors.push('unverified-vite-html-page: symlinked HTML or directory ' + relative);
+          }
+        } catch (error) {
+          // A dangling/inaccessible symlink must not crash the architecture
+          // checker. Unknown destinations cannot safely be certified inert.
+          errors.push('unverified-vite-html-page: unresolved symlink ' + relative +
+            ' (' + (error.code || 'unknown error') + ')');
         }
       } else if (entry.isDirectory()) {
         scan(file);

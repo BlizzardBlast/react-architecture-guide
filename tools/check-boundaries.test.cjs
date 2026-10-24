@@ -2099,3 +2099,71 @@ test('Vite metadata and responsive link references enforce physical module owner
     'modules/orders/ui/private.svg': '<svg/>',
   }, result => assert.match(result.errors.join(' '), /deep-module-import/, html));
 });
+
+test('nested directories sharing generated or public names still expose Vite HTML', () => {
+  for (const file of [
+    'docs/public/hidden.html',
+    'pages/dist/hidden.html',
+    'site/build/hidden.html',
+    'packages/node_modules/hidden.html',
+    'nested/coverage/index.html',
+  ]) withFixture({
+    ['../' + file]: '<script type="module" src="/src/modules/orders/ui/private.ts"></script>',
+    '../index.html': '<script type="module" src="/src/app/start.ts"></script>',
+    'app/start.ts': 'export const ready = true;',
+    'modules/orders/ui/private.ts': 'export const hidden = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-html-page/, file));
+});
+
+test('secondary-page scanning reports a dangling unrelated symlink without throwing', t => {
+  const fixture = setup({ 'app/start.ts': 'export const ready = true;' });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, '..', 'not-present'),
+        path.join(fixture.root, '..', 'dangling-link'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows symlinks');
+      throw error;
+    }
+    const result = check(fixture.root);
+    assert.match(result.errors.join(' '), /unverified-vite-html-page: unresolved symlink dangling-link/);
+  } finally { fixture.cleanup(); }
+});
+
+test('secondary-page scanning ignores a valid non-HTML file symlink', t => {
+  const fixture = setup({
+    '../README.md': 'harmless documentation',
+    'app/start.ts': 'export const ready = true;',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, '..', 'README.md'),
+        path.join(fixture.root, '..', 'README-link'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows symlinks');
+      throw error;
+    }
+    assert.deepEqual(check(fixture.root).errors, []);
+  } finally { fixture.cleanup(); }
+});
+
+test('secondary-page scanning rejects symlinked directories and linked HTML documents', t => {
+  const fixture = setup({
+    'app/start.ts': 'export const ready = true;',
+  });
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'react-arch-html-'));
+  try {
+    fs.writeFileSync(path.join(outside, 'hidden.html'), '<script type="module" src="/private.js"></script>');
+    try {
+      fs.symlinkSync(outside, path.join(fixture.root, '..', 'html-alias'), 'dir');
+      fs.symlinkSync(path.join(outside, 'hidden.html'),
+        path.join(fixture.root, '..', 'page-alias.html'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows symlinks');
+      throw error;
+    }
+    const result = check(fixture.root);
+    assert.match(result.errors.join(' '), /unverified-vite-html-page: symlinked HTML or directory html-alias/);
+    assert.match(result.errors.join(' '), /unverified-vite-html-page: symlinked HTML entry page-alias\.html/);
+  } finally { fixture.cleanup(); fs.rmSync(outside, { force: true, recursive: true }); }
+});

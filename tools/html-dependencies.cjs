@@ -44,6 +44,13 @@ function scanHtml(html) {
       errors.push('unsupported-vite-html-url: executable or active-content URL');
       return;
     }
+    // Executable stylesheets are dependency-bearing: an unchecked external
+    // CSS entry can import further CSS outside the verified ownership graph.
+    // Remote/data decorative media are separate from active stylesheets.
+    if (kind === 'stylesheet' && /^(?:https?:|data:|\/\/)/i.test(spec)) {
+      errors.push('unsupported-vite-html-stylesheet: external or data stylesheet is not verified');
+      return;
+    }
     if (kind === 'script' && /^(?:https?:|data:|\/\/)/i.test(spec)) {
       errors.push('unsupported-vite-html-url: external script entry is not owned');
       return;
@@ -119,11 +126,12 @@ function scanHtml(html) {
         // a private candidate in this independent responsive image list.
         if (attrs.has('imagesrcset')) addSrcset(attrs.get('imagesrcset'));
         const rel = new Set((attrs.get('rel') || '').toLowerCase().split(/\s+/));
-        if (rel.has('stylesheet')) addReference(attrs.get('href'), 'asset');
+        if (rel.has('stylesheet')) addReference(attrs.get('href'), 'stylesheet');
         else if (rel.has('modulepreload')) addReference(attrs.get('href'), 'script');
         else if (rel.has('preload')) {
           const as = (attrs.get('as') || '').toLowerCase();
           if (as === 'script') addReference(attrs.get('href'), 'script');
+          else if (as === 'style') addReference(attrs.get('href'), 'stylesheet');
           else if (['image', 'style', 'font', 'audio', 'video', 'fetch'].includes(as)) {
             addReference(attrs.get('href'), 'asset');
           } else errors.push('unsupported-vite-html-link: unverified preload type');

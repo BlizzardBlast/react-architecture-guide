@@ -152,3 +152,11 @@ Vite also serves secondary project HTML pages during development, even when the 
 HTML5 parsing now follows Vite's **`<link imagesrcset>`** candidates and the documented set of **`<meta content>`** image/media attributes (Open Graph, Twitter image, supported Microsoft tile metadata), resolving each local reference through the same physical source and module-ownership checks as ordinary image assets. Descriptive metadata remains text. Existing architecture assertions were updated for the intentional change from `unsupported-vite-html-entry` to the more specific `outside-source-html-import` diagnostic.
 
 Regression tests cover the four changes and safe controls. Focused staged-source probes passed, but the full TypeScript/parse5-backed suite, real Vite build, React/orders tests, clean installs, audits and browser checks remain unavailable without npm registry access. **PR stays DRAFT/UNMERGED.**
+
+### Review #5636815429: nested HTML pages, stylesheet policy and symlinks
+
+Vite's secondary HTML check now applies generated/vendor/public exclusions **only at the project root**, rather than skipping every nested directory named `public`, `dist`, `build` or `node_modules`. Nested HTML documents remain unverified entrypoints even when a parent directory's basename collides with a root exclusion. The root `public/` tree continues to be audited separately.
+
+The HTML dependency extractor distinguishes **active CSS stylesheet entrypoints** from decorative assets. External HTTP(S), protocol-relative and `data:` stylesheet links, including `rel="preload" as="style"`, are rejected until an explicit reviewed dependency policy and transitive stylesheet audit exist. Local CSS links still participate in the source ownership graph; remote image/media data remains allowed by the bounded asset grammar.
+
+The secondary-page scanner now returns an actionable error for unresolvable symlinks instead of throwing `ENOENT`, rejects symlinked HTML documents/directories, and permits ordinary resolved links to non-HTML files. New tests cover each case and safe controls. Isolated source-level probes passed, but full TypeScript/parse5-backed tests, Vite builds, dependency audits and browser/accessibility gates remain outstanding; **the PR stays DRAFT/UNMERGED**.

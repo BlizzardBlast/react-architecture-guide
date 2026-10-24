@@ -77,3 +77,10 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Reject unaudited secondary HTML pages accessible in Vite dev, including sibling and nested `.html`/`.htm`; separately audit `public/` assets.
 - [ ] Keep existing pre-refactor architecture fixtures aligned with precise error names, without weakening genuinely invalid-input tests.
 - [ ] Verify actual worker/main builds and dev-server HTML behavior as part of the outstanding complete quality and security gates.
+
+### Nested HTML exclusions, CSS entrypoint ownership and symlink failures
+
+- [ ] Apply Vite HTML discovery exclusions to **specific root-relative output/vendor directories**, not every nested directory with a matching basename.
+- [ ] Treat remote/data `stylesheet` and `preload as=style` links as active CSS dependencies that require explicit review and transitive checking; preserve intentional inert remote media.
+- [ ] Handle unreadable/dangling symlinks as validation diagnostics without throwing, and reject symlinked HTML documents or directories that could hide additional entrypoints.
+- [ ] Exercise both negative bypass cases and harmless controls in the installed architecture tests, plus actual Vite dev-server HTML and stylesheet behavior before merge.

@@ -107,3 +107,32 @@ test('descriptive meta values stay inert while unsupported image candidates fail
   assert.match(scanHtml('<link rel="preload" as="image" href="/src/a.png" ' +
     'imagesrcset="/src/a.png 1x 2x">').errors.join(' '), /unsupported-vite-html-srcset/);
 });
+
+test('external and data URL stylesheet entrypoints must not bypass CSS ownership', () => {
+  for (const html of [
+    '<link rel="stylesheet" href="https://cdn.example.org/unchecked.css">',
+    '<link rel="stylesheet" href="http://cdn.example.org/unchecked.css">',
+    '<link rel="stylesheet" href="//cdn.example.org/unchecked.css">',
+    '<link rel="stylesheet" href="data:text/css,@import%20url(https://cdn.example.org/evil.css)">',
+    '<link rel="preload" as="style" href="https://cdn.example.org/unchecked.css">',
+    '<link rel="preload" as="style" href="data:text/css,body%7Bcolor:red%7D">',
+  ]) {
+    const result = scanHtml(html);
+    assert.match(result.errors.join(' '), /unsupported-vite-html-stylesheet/, html);
+    assert.deepEqual(result.references, [], html);
+  }
+});
+
+test('local CSS entrypoints are included and remote image media stays inert', () => {
+  const html = '<link rel="stylesheet" href="/src/shared/ui/site.css">' +
+    '<link rel="preload" as="style" href="/src/shared/ui/critical.css">' +
+    '<img src="https://cdn.example.org/image.png">' +
+    '<img src="data:image/png;base64,iVBORw0KGgo">';
+  assert.deepEqual(scanHtml(html), {
+    errors: [],
+    references: [
+      { spec: '/src/shared/ui/site.css', kind: 'stylesheet' },
+      { spec: '/src/shared/ui/critical.css', kind: 'stylesheet' },
+    ],
+  });
+});
