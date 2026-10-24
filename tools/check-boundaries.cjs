@@ -136,9 +136,23 @@ function imports(node, list, options) {
   // analysis would be needed to safely admit such aliases.
   if (ts.isIdentifier(node) && ['require', 'module'].includes(node.text)) {
     const parent = node.parent;
-    const isPropertyName = (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
-      (ts.isPropertyAssignment(parent) && parent.name === node) ||
-      (ts.isMethodDeclaration(parent) && parent.name === node);
+    // Declaration keys have no runtime value and are not CommonJS loader
+    // references. In particular, interface fields and class members may be
+    // named "module" or "require" without importing anything.
+    const isPropertyName = (
+      ts.isPropertyAccessExpression(parent) ||
+      ts.isPropertyAssignment(parent) ||
+      ts.isMethodDeclaration(parent) ||
+      ts.isMethodSignature(parent) ||
+      ts.isPropertySignature(parent) ||
+      ts.isPropertyDeclaration(parent) ||
+      // Parameter declarations are not references to the Node loader.
+      // Their value uses must still be reviewed independently.
+      ts.isParameter(parent) ||
+      ts.isGetAccessorDeclaration(parent) ||
+      ts.isSetAccessorDeclaration(parent) ||
+      ts.isEnumMember(parent)
+    ) && parent.name === node;
     const directRequire = node.text === 'require' &&
       ts.isCallExpression(parent) && parent.expression === node;
     const directModuleMember = node.text === 'module' && (
@@ -539,8 +553,21 @@ function verifyViteAliases(projectDir, policy, errors) {
       const opaque = /\$\(|`/.test(script) || tokens.some(words => {
         if (viteArguments(words) !== null) return false;
         const executable = (words[0] || '').replace(/\\/g, '/');
-        if (['echo', 'printf', 'tsc', 'eslint', 'biome', 'oxlint', 'oxfmt', 'vitest'].includes(executable) ||
-            executable === 'node' && words[1] === '--test') {
+        // Test launchers are executable too: --import, --require and
+        // alternate Vitest config flags could start another Vite instance.
+        // Permit only the documented CLI subset. Test *contents* still need
+        // independent runtime checks; static script discovery does not audit
+        // arbitrary code executed by tests.
+        const nodeTestFiles = words.slice(2);
+        const safeNodeTest = (executable === 'node' || executable === 'node.exe') &&
+          words[1] === '--test' && nodeTestFiles.length > 0 &&
+          nodeTestFiles.every(file =>
+            /^(?:\.\.?\/)?[\w./*?-]+\.(?:test|spec)\.(?:[cm]?[jt]sx?)$/.test(file) &&
+            !file.split('/').includes('..'));
+        const safeVitest = executable === 'vitest' &&
+          words.length === 2 && words[1] === 'run';
+        if (['echo', 'printf', 'tsc', 'eslint', 'biome', 'oxlint', 'oxfmt'].includes(executable) ||
+            safeVitest || safeNodeTest) {
           return false;
         }
         if (executable === 'node' || executable === 'node.exe') {

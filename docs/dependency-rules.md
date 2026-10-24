@@ -208,3 +208,11 @@ Static Vite validation uses an intentionally narrow npm delegation grammar. A sc
 Node `process.mainModule` (including `process["mainModule"]`) is a deprecated yet executable CommonJS module-loading escape hatch. It is explicitly unsupported by the static import graph, which otherwise cannot resolve imports relative to a different entrypoint. As with other unknown execution loaders, use explicit supported imports or an independent execution-aware audit.
 
 The Markdown scanner reuses its escape-aware nested bracket matcher in destination extraction, not only in HTML-comment masking. Both `![outer [inner] label](asset.png)` and `[outer [inner] label](page.md)` receive local-target checks. This is not a complete CommonMark implementation; prefer an established tokenizer/parser for comprehensive grammar support.
+
+### Verified test runners and TypeScript declaration names
+
+An approved npm script is not necessarily inert just because it invokes a test runner. Only `vitest run` without additional CLI arguments and `node --test` followed by explicit test-spec file targets are accepted by the static npm script checker. Node preload flags (`--import`, `--require`, loaders), executable reporters, Vitest `--config` and other runner switches fail closed because they can alter which modules or Vite configuration execute. This is CLI-grammar validation, **not** proof that arbitrary test code or `NODE_OPTIONS` cannot start a separate build. Real integration/bundler checks are still required.
+
+The CommonJS guard checks runtime *uses* of `module` and `require`, not declaration-site keys in TypeScript interfaces, class properties/methods, parameter declarations or enum members. Direct supported literal CommonJS imports still create dependency edges, while aliasing the loader object/function remains outside the supported grammar.
+
+Markdown code spans can span multiple lines inside a paragraph; the linter tracks matching delimiter runs rather than interpreting literal `<!--` within them as HTML. Reference-definition indexing ignores definitions inside code fences, indented code blocks and raw HTML comments. This is a bounded static subset; CommonMark-wide validation should use one established block+inline token model.

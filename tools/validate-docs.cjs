@@ -18,12 +18,44 @@ function inspectMarkdown(relative, contents, root) {
   const active = [];
   const blockTags = /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|meta|nav|noframes|ol|optgroup|option|output|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[\s/>])/i;
   const fenceMarker = /^ {0,3}([\x60]{3,}|~{3,})(.*)$/;
-  // Backtick-delimited inline code is literal text. Mask it before looking
-  // for HTML comment delimiters, otherwise a literal `<!--` hides real links.
-  function maskInlineCode(line) {
-    // Fenced openers are blocks, not inline code spans.
-    if (/^ {0,3}(?:`{3,}|~{3,})/.test(line)) return line;
-    return line.replace(/(`+)([^\n]*?)\1/g, match => ' '.repeat(match.length));
+  // Code spans can cross lines *within one paragraph*. Track matching
+  // backtick-run lengths so <!-- inside a multiline span stays literal.
+  // A run with no closer is ordinary text, not a code-span opener.
+  let codeSpanTicks = 0;
+  function hasCodeSpanCloser(text, from, size, lineIndex) {
+    for (let row = lineIndex; row < lines.length; row++) {
+      const candidate = row === lineIndex ? text.slice(from) : lines[row];
+      if (row !== lineIndex && (!candidate.trim() ||
+          /^ {0,3}(?:`{3,}|~{3,})/.test(candidate))) return false;
+      for (const match of candidate.matchAll(/`+/g)) {
+        if (match[0].length === size) return true;
+      }
+    }
+    return false;
+  }
+  function maskInlineCode(text, lineIndex) {
+    const chars = text.split('');
+    for (let i = 0; i < text.length;) {
+      if (text[i] !== '`') {
+        if (codeSpanTicks) chars[i] = ' ';
+        i++;
+        continue;
+      }
+      const start = i;
+      while (text[i] === '`') i++;
+      const width = i - start;
+      if (codeSpanTicks === width) {
+        for (let j = start; j < i; j++) chars[j] = ' ';
+        codeSpanTicks = 0;
+      } else if (codeSpanTicks) {
+        for (let j = start; j < i; j++) chars[j] = ' ';
+      } else if (!isEscaped(text, start) &&
+          hasCodeSpanCloser(text, i, width, lineIndex)) {
+        for (let j = start; j < i; j++) chars[j] = ' ';
+        codeSpanTicks = width;
+      }
+    }
+    return chars.join('');
   }
   // Strip the content indentation of simple list containers. A list item
   // beginning with a fence owns its indented following lines.
@@ -75,13 +107,49 @@ function inspectMarkdown(relative, contents, root) {
   // Definitions may follow their uses. An unreferenced '[text <!--]' is not
   // a link and must NOT mask an actual HTML comment opener.
   const knownReferences = new Set();
+  // A reference definition inside fenced/indented code or a raw HTML comment
+  // is not a definition. Pre-index only plausible *active block* lines; the
+  // inline pass below retains its own destination checks.
+  let referenceFence = null, referenceComment = false;
+  let referenceIndent = false, referencePreviousBlank = true;
   for (const sourceLine of lines) {
-    const start = /^ {0,3}\[/.exec(sourceLine);
+    const line = sourceLine.replace(/^ {0,3}(?:>[ \t]?)+/, '');
+    const marker = fenceMarker.exec(line);
+    if (referenceFence) {
+      if (marker && marker[1][0] === referenceFence.char &&
+          marker[1].length >= referenceFence.length && /^\s*$/.test(marker[2])) {
+        referenceFence = null;
+      }
+      continue;
+    }
+    if (referenceComment) {
+      if (line.includes('-->')) referenceComment = false;
+      continue;
+    }
+    if (marker) {
+      referenceFence = { char: marker[1][0], length: marker[1].length };
+      referencePreviousBlank = false;
+      continue;
+    }
+    if (/^(?: {4}|\t)/.test(line) &&
+        (referencePreviousBlank || referenceIndent)) {
+      referenceIndent = true;
+      referencePreviousBlank = false;
+      continue;
+    }
+    referenceIndent = false;
+    if (!line.trim()) { referencePreviousBlank = true; continue; }
+    referencePreviousBlank = false;
+    if (/^ {0,3}<!--/.test(line)) {
+      referenceComment = !line.includes('-->');
+      continue;
+    }
+    const start = /^ {0,3}\[/.exec(line);
     if (!start) continue;
-    const end = closingBracket(sourceLine, start[0].length - 1);
-    if (end !== -1 && sourceLine[end + 1] === ':' &&
-        /^\s*(?:<[^>]+>|\S+)/.test(sourceLine.slice(end + 2))) {
-      knownReferences.add(normalizeReference(sourceLine.slice(start[0].length, end)));
+    const end = closingBracket(line, start[0].length - 1);
+    if (end !== -1 && line[end + 1] === ':' &&
+        /^\s*(?:<[^>]+>|\S+)/.test(line.slice(end + 2))) {
+      knownReferences.add(normalizeReference(line.slice(start[0].length, end)));
     }
   }
   function maskLinkMetadata(line) {
@@ -141,7 +209,8 @@ function inspectMarkdown(relative, contents, root) {
         inComment = false;
         continue;
       }
-      const visible = maskInlineCode(line.slice(cursor));
+      const priorTicks = codeSpanTicks;
+      const visible = maskInlineCode(line.slice(cursor), currentLineIndex);
       const detect = maskLinkMetadata(visible);
       let open = detect.indexOf('<!--');
       while (open !== -1) {
@@ -154,13 +223,19 @@ function inspectMarkdown(relative, contents, root) {
         result += visible;
         break;
       }
+      // Backticks *inside* a real HTML comment have no Markdown meaning.
+      // Undo the speculative code-span state for the part after its opener.
+      codeSpanTicks = priorTicks;
+      maskInlineCode(line.slice(cursor, cursor + open), currentLineIndex);
       result += visible.slice(0, open) + '    ';
       cursor += open + 4;
       inComment = true;
     }
     return result;
   }
+  let currentLineIndex = 0;
   for (let i = 0; i < lines.length; i++) {
+    currentLineIndex = i;
     const raw = lines[i];
     // Strip blockquote containers only for block classification. Ordinary
     // blockquoted links are still inspected once the container is removed.

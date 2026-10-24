@@ -451,3 +451,44 @@ test('nested valid links and images continue to validate without false positives
   '[outer [inner] label](README.md)\n![outer [inner] label](README.md)', root =>
     assert.deepEqual(checkAll(root).issues, []),
 ));
+
+test('multiline backtick code spans cannot introduce phantom HTML comments', () => {
+  for (const ticks of [String.fromCharCode(96), String.fromCharCode(96).repeat(2)]) fixture(
+    'Before ' + ticks + 'code\ninside <!--\nend' + ticks + '\n[Broken](missing.md)', root => {
+      const issues = checkAll(root).issues;
+      assert.equal(issues.length, 1);
+      assert.match(issues[0], /README\.md:4: missing local link: missing\.md/);
+    },
+  );
+});
+
+test('active links after a multiline code span are validated and code links are not', () => fixture(
+  String.fromCharCode(96) + 'a [Ignored](missing1.md)\n<!-- literal\nb' +
+  String.fromCharCode(96) + '\n[Broken](missing2.md)', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:4: missing local link: missing2.md']),
+));
+
+test('an unmatched backtick cannot suppress a genuine HTML comment', () => fixture(
+  'Unclosed ' + String.fromCharCode(96) +
+  'backtick\n<!--\n[Inactive](missing.md)\n-->\n[Self](README.md)', root =>
+    assert.deepEqual(checkAll(root).issues, []),
+));
+
+test('reference definitions inside fenced code are not active references', () => {
+  const fence = String.fromCharCode(96).repeat(3);
+  fixture(
+    fence + 'md\n[foo <!--]: README.md\n' + fence +
+      '\n[foo <!--]\n[Inactive](missing.md)\n-->\n[Broken](missing2.md)', root =>
+      assert.deepEqual(checkAll(root).issues, ['README.md:7: missing local link: missing2.md']),
+  );
+});
+
+test('reference definitions inside an HTML comment cannot create active references', () => fixture(
+  '<!--\n[foo <!--]: README.md\n-->\n[foo <!--]\n[Inactive](missing.md)\n-->\n[Broken](missing2.md)', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:7: missing local link: missing2.md']),
+));
+
+test('real reference definitions outside code and comments still validate targets', () => fixture(
+  '[foo <!--]: README.md\n[foo <!--]\n[Broken](missing.md)', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:3: missing local link: missing.md']),
+));

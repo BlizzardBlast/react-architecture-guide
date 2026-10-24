@@ -1710,3 +1710,59 @@ test('ordinary unmodified npm build delegation remains supported', () => withFix
   '../vite.config.ts': 'export default { plugins: [] };',
   'app/start.ts': 'export const start = true;',
 }, result => assert.deepEqual(result.errors, [])));
+
+test('ordinary TypeScript property names named module and require do not imply a loader', () => withFixture({
+  'shared/lib/plugin.ts': [
+    'export interface PluginInfo { module: string; require: boolean; }',
+    'export class PluginState { module = "example"; require = false; }',
+    'export type PluginShape = { module: string; require?: boolean };',
+    'export function visit(module: string, require: boolean): number { return 1; }',
+    'export const plugin = { module: "example", require: true };',
+  ].join('\n'),
+}, result => assert.deepEqual(result.errors, [])));
+
+test('TypeScript method signatures and enum names are not CommonJS loaders', () => withFixture({
+  'shared/lib/plugins.ts': [
+    'export interface PluginManager { require(name: string): string; module(): string; }',
+    'export class Plugin { require(): string { return "ok"; } module(): string { return "ok"; } }',
+    'export enum Action { require = "require", module = "module" }',
+  ].join('\n'),
+}, result => assert.deepEqual(result.errors, [])));
+
+test('unsafe loader aliases remain rejected', () => {
+  for (const code of [
+    'const load = require; module.exports = load("./internal.cjs");',
+    'const load = module; load.require("./internal.cjs");',
+    'const run = () => require; module.exports = run;',
+  ]) withFixture({
+    'modules/orders/infrastructure/a.cjs': code,
+    'modules/orders/infrastructure/internal.cjs': 'module.exports = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-indirect-commonjs-loader/));
+});
+
+test('test-runner command injections and executable configuration flags fail closed', () => {
+  for (const script of [
+    'node --test --import ./scripts/hidden-build.mjs tests/unit.test.cjs',
+    'node --test --require ./scripts/hidden-build.cjs tests/unit.test.cjs',
+    'node --test --loader ./scripts/loader.mjs tests/unit.test.cjs',
+    'node --test --test-reporter ./scripts/reporter.mjs tests/unit.test.cjs',
+    'vitest run --config hidden.vite.config.ts',
+    'vitest --config hidden.vite.config.ts run',
+    'vitest run --setupFiles ./scripts/hidden-build.mjs',
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: { test: script, build: 'vite build' } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('documented narrow Node and Vitest test runner commands remain supported', () => {
+  for (const script of ['node --test tests/unit.test.cjs', 'node --test tests/*.test.mjs', 'vitest run']) {
+    withFixture({
+      '../package.json': JSON.stringify({ scripts: { test: script, build: 'vite build' } }),
+      '../vite.config.ts': 'export default { plugins: [] };',
+      'app/start.ts': 'export const start = true;',
+    }, result => assert.deepEqual(result.errors, []));
+  }
+});

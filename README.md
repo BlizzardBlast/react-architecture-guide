@@ -92,3 +92,11 @@ The Markdown linter uses a documented restricted CommonMark subset. Its balanced
 ### Verification scope: npm delegation and Markdown links
 
 For npm-script config verification, only unmodified `npm run <script>`, `npm run --silent <script>`, `npm test` and `npm start` are statically trusted. Forwarded `--` arguments, `--workspace`, `-w`, `--prefix`, filters, package switching and other modifiers fail closed because they can change which Vite config actually executes. Direct Vite invocations still undergo config verification. Node's deprecated `process.mainModule` loader is disallowed in checked sources, including its bracket notation. Markdown nested inline labels now use the same balanced bracket logic for both comment detection and link-target extraction; this validator remains a restricted CommonMark subset.
+
+### Static verification boundaries
+
+The npm/Vite checker allows only narrowly defined test launcher commands: `vitest run` or `node --test` followed by explicit `.test.`/`.spec.` file paths (or test globs). It rejects `--import`, `--require`, `--loader`, custom reporters, alternative Vitest config and other unknown runner options because those options can execute code outside the verified Vite configuration. Arbitrary test bodies, environment loaders and plugins are **not** statically proven inert; the real installed test/build and browser gates remain mandatory.
+
+TypeScript interfaces, class fields, methods, enums and parameter *declarations* named `module` or `require` are ordinary schema names and do not imply Node loaders. Runtime references and aliases to Node's CommonJS loader remain intentionally constrained.
+
+The lightweight Markdown validator protects multiline backtick code spans within paragraphs and excludes fenced/indented code and raw HTML comments from reference-definition pre-indexing. It remains a limited CommonMark checker, not a full parser; use a maintained tokenizer when feasible.
