@@ -106,3 +106,36 @@ test('CSS escaped dependency identifiers fail closed and quoted text remains ine
   assert.deepEqual(scan(".x { content: \"@im\\70ort u\\72l(\"; }").errors, []);
   assert.deepEqual(scan('@import "./safe.css"; .x{background:url("./safe.svg")}').errors, []);
 });
+
+
+test('only complete CSS function identifiers create dependency edges', () => {
+  const custom = [
+    'my-url("../private.svg")',
+    'image-url("../private.svg")',
+    '漢url("../private.svg")',
+    'my-image-set("../private.svg" 1x)',
+    'my-webkit-image-set("../private.svg" 1x)',
+  ];
+  for (const expression of custom) {
+    const result = scan('.sample { --illustration: ' + expression + '; }');
+    assert.deepEqual(result, { references: [], errors: [] }, expression);
+  }
+  const valid = scan('.sample { background: url("./safe.svg");' +
+    'background-image: image-set("./a.svg" 1x, "./b.svg" 2x);' +
+    'mask-image: -webkit-image-set("./c.svg" 1x); }');
+  assert.deepEqual(valid.errors, []);
+  assert.deepEqual(valid.references.map(x => x.spec),
+    ['./safe.svg', './a.svg', './b.svg', './c.svg']);
+});
+
+test('Sass load-css and at-rule names require complete identifiers', () => {
+  assert.deepEqual(scan('@include app-load-css("../private.css");' +
+    '@import-fancy "../private.css";', { filename: 'theme.scss' }),
+    { references: [], errors: [] });
+  assert.match(scan('@include meta.load-css("../private.css");',
+    { filename: 'theme.scss' }).errors.join(' '),
+    /computed Sass load-css/);
+  assert.deepEqual(scan('@import "./safe.css"; @use "./tokens.scss";',
+    { filename: 'theme.scss' }).references.map(x => x.spec),
+    ['./safe.css', './tokens.scss']);
+});

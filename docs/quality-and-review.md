@@ -128,3 +128,9 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Nearest-package self-name `exports` and `#imports` conditionals cannot disguise a CSS runtime target as an owned TypeScript declaration.
 - [ ] Automatically discovered PostCSS configuration (from project or ancestor files/package metadata) is rejected unless the transformed CSS graph is independently verified.
 - [ ] The authentic registry-backed lockfiles, pinned suites, two actual Vite builds, dependency audits and browser/accessibility checks are mandatory before merge.
+
+### Type-only and token-boundary regression assurance
+
+- [ ] Runtime package import maps are checked independently of TypeScript-only alias resolution, including `#name?raw`, chained `#imports`, third-party CSS export redirects and same-package self-exports.
+- [ ] Fully erased type imports do not generate CSS runtime diagnostics; inline type-only named bindings preserved as runtime empty imports still receive dependency checks.
+- [ ] Source CSS scans distinguish complete `url()`, `image-set()` and `load-css()` function identifiers from longer custom function names, including hyphenated and non-ASCII prefixes.

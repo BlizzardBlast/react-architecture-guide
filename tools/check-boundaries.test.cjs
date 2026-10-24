@@ -2780,3 +2780,117 @@ test('Vite auto-discovered PostCSS configurations cannot bypass the CSS scanner'
     'app/start.ts': 'export const ready = true;',
   }, result => assert.deepEqual(result.errors, []));
 });
+
+
+test('runtime CSS import mapping wins over a conflicting TypeScript paths alias', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module',
+      imports: { '#theme': './src/modules/orders/ui/private.css' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '#theme': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const safe = true;',
+    'modules/orders/ui/private.css': '.private { color: crimson }',
+    'app/start.ts': 'import { safe } from "#theme"; export const ready = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> #theme/)));
+
+test('chained package imports follow an installed package CSS export', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module',
+      imports: { '#theme': '#appearance', '#appearance': 'ui-kit' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '#theme': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({ name: 'ui-kit',
+      exports: { '.': { types: './theme.d.ts', default: './theme.css' } } }),
+    '../node_modules/ui-kit/theme.d.ts': 'export declare const safe: boolean;',
+    '../node_modules/ui-kit/theme.css': '.private { color: crimson }',
+    'shared/lib/safe.ts': 'export const safe = true;',
+    'app/start.ts': 'import { safe } from "#theme"; export const ready = safe;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/)));
+
+test('self-name package CSS mapping cannot be masked by a TS paths alias', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module',
+      exports: { './theme': {
+        types: './src/shared/lib/safe.ts', default: './src/modules/orders/ui/private.css',
+      } } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'fixture-pkg/theme': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const safe = true;',
+    'modules/orders/ui/private.css': '.private { color: crimson }',
+    'app/start.ts': 'import { safe } from "fixture-pkg/theme"; export const ready = safe;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/)));
+
+test('safe JS package import mapping and matching TS alias do not trigger false positives', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module',
+      imports: { '#safe': './src/shared/lib/safe.js' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '#safe': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const safe = true;',
+    'app/start.ts': 'import { safe } from "#safe"; export const ready = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('erased import type never checks an executable CSS package target', () => {
+  for (const spec of ['#theme', 'fixture-pkg/theme']) {
+    const condition = { types: './src/shared/lib/theme.d.ts',
+      default: './src/modules/orders/ui/private.css' };
+    const metadata = spec[0] === '#'
+      ? { imports: { '#theme': condition } }
+      : { exports: { './theme': condition } };
+    withFixture({
+      '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module', ...metadata }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler', verbatimModuleSyntax: true,
+      } }),
+      'shared/lib/theme.d.ts': 'export interface Theme { primary: string }',
+      'modules/orders/ui/private.css': '.private { color: crimson }',
+      'app/start.ts': 'import type { Theme } from "' + spec + '"; export type AppTheme = Theme;',
+    }, result => assert.deepEqual(result.errors, [], spec));
+  }
+});
+
+test('verbatimModuleSyntax inline type specifiers retain runtime import side effects', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module',
+      imports: { '#theme': { types: './src/shared/lib/theme.d.ts',
+        default: './src/modules/orders/ui/private.css' } } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', verbatimModuleSyntax: true,
+    } }),
+    'shared/lib/theme.d.ts': 'export interface Theme { primary: string }',
+    'modules/orders/ui/private.css': '.private { color: crimson }',
+    'app/start.ts': 'import { type Theme } from "#theme"; export type AppTheme = Theme;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/)));
+
+
+test('query-qualified #imports retain the actual package key for CSS verification', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module',
+      imports: { '#theme': './src/modules/orders/ui/private.css' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'modules/orders/ui/private.css': '.private { color: crimson }',
+    'app/start.ts': 'import rawTheme from "#theme?raw"; export const theme = rawTheme;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/)));
+
+test('erased type-only external package import does not become a CSS runtime dependency', () =>
+  withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({ name: 'ui-kit', version: '1.0.0',
+      exports: { './theme': { types: './theme.d.ts', default: './theme.css' } } }),
+    '../node_modules/ui-kit/theme.d.ts': 'export interface Theme { primary: string }',
+    '../node_modules/ui-kit/theme.css': '.private { color: crimson }',
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', verbatimModuleSyntax: true,
+    } }),
+    'app/start.ts': 'import type { Theme } from "ui-kit/theme"; export type View = Theme;',
+  }, result => assert.deepEqual(result.errors, [])));

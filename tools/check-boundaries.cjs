@@ -39,7 +39,9 @@ function fileSpecifier(spec) {
   // Vite query directives are compilation modes, not filesystem path components.
   // Preserve Node/TypeScript '#imports' specifiers: the leading # is a name,
   // not a URL fragment.
-  return spec.startsWith('#') ? spec : spec.split(/[?#]/, 1)[0];
+  // A leading # names a Node package import; a later ? remains a Vite
+  // query directive and must not change which runtime import map is checked.
+  return spec.startsWith('#') ? spec.split('?', 1)[0] : spec.split(/[?#]/, 1)[0];
 }
 function assetPath(spec) {
   const filename = fileSpecifier(spec);
@@ -352,11 +354,20 @@ function matchesAlias(spec, patterns) {
 // Vite may resolve bare package exports to CSS without a stylesheet suffix,
 // while TypeScript resolves a declaration or nothing at all. Inspect the
 // *matching* export subpath, including conditional alternatives.
-function packageStyleExport(spec, importer, ownedSource = false) {
-  if (spec.startsWith('node:')) return false;
+function packageStyleExport(spec, importer, ownedSource = false, visited = new Set()) {
+  if (spec.startsWith('node:') || visited.has(spec)) return false;
+  visited.add(spec);
   const isStyle = target => /\.(?:css|scss|sass|less|styl|stylus)$/i.test(fileSpecifier(target));
   function containsStyles(value) {
-    if (typeof value === 'string') return isStyle(value);
+    if (typeof value === 'string') {
+      if (isStyle(value)) return true;
+      // Package imports may redirect through #aliases or another package.
+      // Follow bare specifiers, not relative files whose names happen to
+      // resemble package names. TypeScript-only aliases never prove runtime ownership.
+      if (value.startsWith('.') || value.startsWith('/') ||
+          value.startsWith('node:')) return false;
+      return packageStyleExport(value, importer, false, visited);
+    }
     if (Array.isArray(value)) return value.some(containsStyles);
     return Boolean(value && typeof value === 'object' &&
       Object.values(value).some(containsStyles));
@@ -1598,13 +1609,22 @@ function check(srcDir) {
       // cannot resolve them. Bare package stylesheets are outside our
       // first-party CSS graph, so reject instead of silently skipping them.
       // This includes .module.css and query-qualified Sass/Less imports.
-      const bareStylesheet = !relativeSpec && !projectAlias &&
+      const bareStylesheet = dep.runtime && !relativeSpec && !projectAlias &&
         /\.(?:css|scss|sass|less|styl|stylus)$/i.test(filesystemSpec);
       if (bareStylesheet) {
         errors.push(`unverified-package-stylesheet: ${source.relative} -> ${dep.spec}`);
         if (pureCode && !isTest) {
           errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
         }
+        continue;
+      }
+      // Validate Node package imports and self-name exports independently of
+      // TypeScript paths; source aliases do not change emitted runtime imports.
+      const mappedStyle = dep.runtime && !relativeSpec && !rootAbsolute &&
+        packageStyleExport(filesystemSpec, file, true);
+      if (mappedStyle) {
+        errors.push(`unverified-package-stylesheet: ${source.relative} -> ${dep.spec}`);
+        if (pureCode && !isTest) errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
         continue;
       }
       const localAsset = Boolean((staticAsset || dep.fromUrl || filesystemSpec !== dep.spec) &&
@@ -1657,7 +1677,7 @@ function check(srcDir) {
         }
         // Owned baseUrl imports are local regardless of their bare spelling.
         const ownedSource = resolved && known.has(path.resolve(resolved));
-        const styleExport = barePackage &&
+        const styleExport = dep.runtime && barePackage &&
           packageStyleExport(filesystemSpec, file, Boolean(ownedSource));
         if (styleExport) {
           errors.push(`unverified-package-stylesheet: ${source.relative} -> ${dep.spec}`);

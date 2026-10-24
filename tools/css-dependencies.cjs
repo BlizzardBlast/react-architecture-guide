@@ -102,7 +102,7 @@ function scanCssDependencies(css, { filename = 'style.css' } = {}) {
     return { value, end: close + 1 };
   };
   const importedUrls = new Set();
-  for (const m of mask.matchAll(/@(import|use|forward)\b/gi)) {
+  for (const m of mask.matchAll(/@(import|use|forward)(?![A-Za-z0-9_\u0080-\uFFFF-])/gi)) {
     let cursor = m.index + m[0].length;
     while (/\s/.test(clean[cursor] || '') && cursor < clean.length) cursor++;
     const directive = m[1].toLowerCase();
@@ -147,7 +147,7 @@ function scanCssDependencies(css, { filename = 'style.css' } = {}) {
     if (optional) reference.optional = true;
     references.push(reference);
   }
-  for (const m of mask.matchAll(/\burl\s*\(/gi)) {
+  for (const m of mask.matchAll(/(?<![A-Za-z0-9_\u0080-\uFFFF-])url\s*\(/gi)) {
     if (importedUrls.has(m.index)) continue;
     const found = readUrl(clean.indexOf('(', m.index));
     if (!found || !found.value.trim()) {
@@ -158,7 +158,7 @@ function scanCssDependencies(css, { filename = 'style.css' } = {}) {
   }
   // CSS image-set() can use quoted image paths instead of url(). Follow
   // those literal references too, while leaving nested url() to the loop above.
-  for (const m of mask.matchAll(/\b(?:-webkit-)?image-set\s*\(/gi)) {
+  for (const m of mask.matchAll(/(?<![A-Za-z0-9_\u0080-\uFFFF-])(?:-webkit-)?image-set\s*\(/gi)) {
     const open = clean.indexOf('(', m.index);
     let depth = 1, quote = null, escaped = false, start = open + 1;
     const choices = [];
@@ -204,7 +204,7 @@ function scanCssDependencies(css, { filename = 'style.css' } = {}) {
       }
     }
   }
-  for (const m of mask.matchAll(/\bload-css\s*\(/gi)) {
+  for (const m of mask.matchAll(/(?<![A-Za-z0-9_\u0080-\uFFFF-])load-css\s*\(/gi)) {
     errors.push('unsupported-css-dependency: computed Sass load-css at offset ' + m.index);
   }
   return { references, errors };
