@@ -8,12 +8,13 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "npm run arch && tsc --noEmit && vite build",
+    "build": "npm run arch && tsc --noEmit && vite build --outDir ../../.vite-build/react-app --emptyOutDir",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "arch": "node ../../tools/check-boundaries.cjs src",
     "verify": "npm run lint && npm test && npm run build",
-    "lint": "eslint src vite.config.ts vitest.setup.ts"
+    "lint": "eslint src vite.config.ts vitest.setup.ts",
+    "preview": "vite preview --outDir ../../.vite-build/react-app"
   },
   "dependencies": {
     "@tanstack/react-query": "5.90.0",

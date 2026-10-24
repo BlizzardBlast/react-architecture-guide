@@ -303,6 +303,16 @@ function isWithinRoot(filename, root) {
 function sameOwnership(a, b) {
   return a.layer === b.layer && a.module === b.module && a.part === b.part;
 }
+// External library imports must resolve under a node_modules directory that
+// Node/TypeScript can discover from the importing file's ancestor chain.
+// An arbitrary sibling vendor/node_modules folder is not a package root for
+// a different source tree, even if a custom baseUrl makes it resolvable.
+function isInstalledDependencyPath(filename, importer) {
+  for (let dir = path.dirname(importer); ; dir = path.dirname(dir)) {
+    if (isWithinRoot(filename, path.join(dir, 'node_modules'))) return true;
+    if (path.dirname(dir) === dir) return false;
+  }
+}
 const publicEntrypoints = new Set([
   'index.ts', 'index.tsx', 'index.mts', 'index.cts',
   'index.js', 'index.jsx', 'index.mjs', 'index.cjs',
@@ -477,7 +487,9 @@ function verifyViteAliases(projectDir, policy, errors, viteState) {
   const argumentOptions = new Set(['--mode', '--base', '--outDir', '--assetsDir', '--port']);
   // Vite accepts --host with an optional value. It must not consume another CLI flag.
   const optionalArgumentOptions = new Set(['--host']);
-  const booleanOptions = new Set(['--strictPort', '--force', '--clearScreen', '--cors', '--help', '--version']);
+  // --emptyOutDir is Vite's documented build flag for safely cleaning
+  // the deliberately out-of-project output directory before each build.
+  const booleanOptions = new Set(['--strictPort', '--force', '--clearScreen', '--cors', '--help', '--version', '--emptyOutDir']);
   // npm automatically runs pre<name> and post<name> lifecycle hooks. Those
   // hooks can launch another build with a different Vite config.
   // Follow the executable npm graph, not merely script names. npm test,
@@ -1401,6 +1413,9 @@ function check(srcDir) {
       // Assets are still architectural dependencies. Resolve the physical path,
       // then apply the same ownership/layer checks used for source imports.
       let resolved;
+      // Pathnames are not package provenance: a first-party directory
+      // named node_modules cannot automatically exempt an import.
+      let isExternalLibraryImport = false;
       if (localAsset) {
         const candidates = [];
         if (relativeSpec) candidates.push(path.resolve(path.dirname(file), filesystemSpec));
@@ -1431,12 +1446,18 @@ function check(srcDir) {
           errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
         }
       } else {
-        resolved = viteAlias || rootPath
-          ? resolveLocalSource(viteAlias || rootPath, options)
-          : ts.resolveModuleName(filesystemSpec, file, options, ts.sys).resolvedModule?.resolvedFileName;
-        const externalDependency = Boolean(resolved && normPath(resolved).includes('/node_modules/'));
-        if (pureCode && !isTest &&
-            (barePackage || externalDependency) && !policy.allowPureExternal.includes(dep.spec)) {
+        if (viteAlias || rootPath) {
+          resolved = resolveLocalSource(viteAlias || rootPath, options);
+        } else {
+          const resolvedModule = ts.resolveModuleName(
+            filesystemSpec, file, options, ts.sys).resolvedModule;
+          resolved = resolvedModule?.resolvedFileName;
+          isExternalLibraryImport = Boolean(resolvedModule?.isExternalLibraryImport);
+        }
+        // Pure-layer package policy depends on the import's actual name and
+        // source, never whether a first-party folder has a vendor-like name.
+        if (pureCode && !isTest && barePackage &&
+            !policy.allowPureExternal.includes(dep.spec)) {
           errors.push(`pure-layer-external-package: ${source.relative} -> ${dep.spec}`);
         }
         if (!resolved) {
@@ -1446,12 +1467,11 @@ function check(srcDir) {
       }
       const target = path.resolve(resolved);
       if (!known.has(target) && !localAsset) {
-        // Ordinary package imports are not owned source files. Keep them separate
-        // from relative/aliased workspace references, which must be validated.
-        const externalPackage = normPath(target).includes('/node_modules/');
-        // Bare baseUrl imports may resolve to local files with arbitrary names.
-        // Classify their actual physical location, never their specifier prefix.
-        if (!externalPackage) {
+        // Exempt only bare specifiers TypeScript resolved as external library
+        // imports. Relative paths, aliases and local baseUrl targets remain
+        // owned dependencies even when their paths contain node_modules.
+        if (!(barePackage && isExternalLibraryImport &&
+             isInstalledDependencyPath(target, file))) {
           errors.push(`outside-source-import: ${source.relative} -> ${dep.spec}`);
         }
         continue;

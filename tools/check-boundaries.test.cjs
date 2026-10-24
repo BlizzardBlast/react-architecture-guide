@@ -1287,7 +1287,7 @@ test('an ambiguous host argument cannot swallow a Vite subcommand', () => withFi
 
 test('the reference app compound build script remains supported', () => withFixture({
   '../package.json': JSON.stringify({ scripts: {
-    build: 'npm run arch && tsc --noEmit && vite build',
+    build: 'npm run arch && tsc --noEmit && vite build --outDir ../../.vite-build/react-app --emptyOutDir',
     arch: 'node ../../tools/check-boundaries.cjs src',
   } }),
   '../vite.config.ts': 'export default { plugins: [] };',
@@ -2294,3 +2294,83 @@ test('disabled Vite publicDir still permits inert raster/font assets', () =>
     '../public/nested/font.woff2': 'font placeholder',
     'app/start.ts': 'export const start = true;',
   }, result => assert.deepEqual(result.errors, [])));
+
+
+test('outside-source paths under arbitrary vendor node_modules are not external packages', () => {
+  for (const contents of [
+    'import { privateValue } from "../../vendor/node_modules/private"; export const leaked = privateValue;',
+    'export { privateValue } from "../../vendor/node_modules/private";',
+    'export const load = () => import("../../vendor/node_modules/private");',
+  ]) withFixture({
+    '../vendor/node_modules/private.ts': 'export const privateValue = 42;',
+    'app/start.ts': contents,
+  }, result => assert.match(result.errors.join(' '), /outside-source-import/, contents));
+});
+
+test('tsconfig aliases cannot disguise vendor node_modules as installed packages', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: '.', paths: { '@vendor/*': ['vendor/node_modules/*'] },
+    } }),
+    '../vendor/node_modules/secret.ts': 'export const secret = true;',
+    'app/start.ts': 'import { secret } from "@vendor/secret"; export const leaked = secret;',
+  }, result => assert.match(result.errors.join(' '), /outside-source-import/)));
+
+test('bare-looking baseUrl imports into unrelated vendor folders fail closed', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.' } }),
+    '../vendor/node_modules/private.ts': 'export const privateValue = 9;',
+    'app/start.ts': 'import { privateValue } from "vendor/node_modules/private"; export const leaked = privateValue;',
+  }, result => assert.match(result.errors.join(' '), /outside-source-import/)));
+
+test('first-party node_modules-named folders remain ordinary owned source', () =>
+  withFixture({
+    'shared/lib/node_modules/math.ts': 'export const add = (a: number, b: number) => a + b;',
+    'shared/lib/calculate.ts': 'import { add } from "./node_modules/math"; export const total = add(2, 3);',
+    'app/start.ts': 'import { total } from "../shared/lib/calculate"; export const value = total;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('true bare dependencies in an ancestor node_modules remain external packages', () =>
+  withFixture({
+    '../node_modules/safe-demo-package/package.json':
+      JSON.stringify({ name: 'safe-demo-package', version: '1.0.0', types: 'index.d.ts' }),
+    '../node_modules/safe-demo-package/index.d.ts': 'export declare const value: number;',
+    'app/start.ts': 'import { value } from "safe-demo-package"; export const consumer = value;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('native reference build output is outside the Vite-served project root', () => {
+  const appRoot = path.resolve(__dirname, '../examples/react-app');
+  const manifest = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
+  const match = /vite build --outDir ([^\s]+) --emptyOutDir$/.exec(manifest.scripts.build);
+  assert.ok(match, 'native build must use a clean external output');
+  const out = path.resolve(appRoot, match[1]);
+  assert.notEqual(out, appRoot);
+  assert.equal(out.startsWith(appRoot + path.sep), false,
+    'generated output must not appear under the dev-served project root');
+  assert.equal(manifest.scripts.preview, 'vite preview --outDir ' + match[1]);
+});
+
+test('architecture verification remains stable after external generated output', () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'react-arch-repeat-build-'));
+  const appRoot = path.join(sandbox, 'examples', 'react-app');
+  const src = path.join(appRoot, 'src');
+  const output = path.join(sandbox, '.vite-build', 'react-app');
+  try {
+    fs.mkdirSync(path.join(src, 'app'), { recursive: true });
+    fs.writeFileSync(path.join(src, 'app', 'start.ts'), 'export const started = true;');
+    const before = check(src);
+    assert.deepEqual(before.errors, []);
+    fs.mkdirSync(output, { recursive: true });
+    fs.writeFileSync(path.join(output, 'index.html'),
+      '<script type="module" src="/src/modules/orders/ui/private.ts"></script>');
+    const after = check(src);
+    assert.deepEqual(after.errors, []);
+    assert.deepEqual(after, before);
+    fs.mkdirSync(path.join(appRoot, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(appRoot, 'dist', 'index.html'), '<h1>Unchecked dev entry</h1>');
+    assert.match(check(src).errors.join(' '),
+      /unverified-vite-html-page: secondary HTML entry dist\/index\.html/);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});

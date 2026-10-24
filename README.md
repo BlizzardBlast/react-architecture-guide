@@ -178,3 +178,11 @@ The Vite secondary-page check rejects extra HTML under root output-looking direc
 When `publicDir: false`, the active-format public-asset checks still apply to files in `public/`, because ordinary Vite root serving is separate from the special public middleware. Root public HTML is checked as a secondary page; JS, CSS, SVG, symlinks and unknown resources fail closed, while allowlisted inert media still pass.
 
 This batch follows the bounded **frey-skills `iterative-self-review` remediation workflow** (confirmed finding ledger → scope-preserving fixes → negative and safe-control tests → focused changed-behavior recheck). **Focused static probes are not a successful complete build:** authentic npm lockfiles, complete installed tests, vulnerability audits, real Vite dev/build responses and browser/accessibility verification remain mandatory. PR stays DRAFT/UNMERGED.
+
+### Review remediation: package provenance and repeatable reference builds
+
+A resolved path containing `node_modules` is not automatically a third-party dependency. The source checker now exempts only genuine bare package imports resolved as external libraries under a `node_modules` directory reachable from the importer's ancestor path. Relative imports, project aliases and local baseUrl imports into arbitrary `vendor/node_modules` paths remain governed by source ownership, even if TypeScript tags them as external. First-party source folders whose names include `node_modules` continue to be scanned.
+
+The React reference app emits production output into the ignored repository-root `.vite-build/react-app/` directory, **outside** its Vite project root (`examples/react-app/`). The native build uses Vite's `--outDir` and `--emptyOutDir` flags, and `npm run preview` points at the same output. Rebuilding therefore does not create an incidental dev-servable `dist/index.html` that the checker must reject. Arbitrary `dist/index.html` inside the app root remains an unverified secondary page; this is not an exemption for dev-served generated HTML.
+
+The remediation follows `frey-skills/iterative-self-review`. Focused source/TypeScript resolver checks are not substitutes for full installed test suites, real consecutive Vite builds, security audits and browser/accessibility validation. Keep the PR draft/unmerged until these required gates have recorded passing evidence.

@@ -98,3 +98,10 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Reject/audit root `dist`, `build`, `coverage`, `.next` and `.vite` HTML pages that remain reachable during Vite development; confirm with actual HTTP requests.
 - [ ] With `publicDir:false`, validate active/unknown root public assets (JS/CSS/SVG and symlinks) as well as secondary HTML; preserve allowlisted inert media.
 - [ ] Treat root third-party `node_modules/` and Git metadata as explicitly scoped exceptions, not proof that Vite never serves them. Perform a real dev/build graph audit before merging.
+
+### Import provenance and stable build artifacts
+
+- [ ] Distinguish legitimate bare imports into resolver-discovered installed package directories from relative/project-alias/baseUrl imports targeting arbitrary `node_modules`-named folders; test both TypeScript external-library metadata and ownership.
+- [ ] Verify first-party source folders that happen to be named `node_modules` remain owned and subject to all purity/module rules.
+- [ ] Run two actual native React builds consecutively without cleaning the checkout, verifying generated output stays outside Vite's dev-served root and neither check produces false architecture errors.
+- [ ] Confirm `npm run preview` loads the out-of-root production output and `/dist/hidden.html` inside the app root is still rejected by the architecture checker.
