@@ -2374,3 +2374,88 @@ test('architecture verification remains stable after external generated output',
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
+
+
+test('installed workspace symlinks are trusted for both TypeScript symlink modes', t => {
+  const ts = require('typescript');
+  for (const preserveSymlinks of [false, true]) {
+    const fixture = setup({
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler', preserveSymlinks,
+      } }),
+      '../packages/workspace-package/package.json':
+        JSON.stringify({ name: 'workspace-package', version: '1.0.0', types: 'index.d.ts' }),
+      '../packages/workspace-package/index.d.ts': 'export declare const value: number;',
+      'app/start.ts': 'import { value } from "workspace-package"; export const consumer = value;',
+    });
+    try {
+      const project = path.dirname(fixture.root);
+      const logical = path.join(project, 'node_modules', 'workspace-package');
+      fs.mkdirSync(path.dirname(logical), { recursive: true });
+      try {
+        fs.symlinkSync(path.join(project, 'packages', 'workspace-package'), logical, 'dir');
+      } catch (error) {
+        if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows directory links');
+        throw error;
+      }
+      const source = path.join(fixture.root, 'app', 'start.ts');
+      const options = { module: ts.ModuleKind.ESNext,
+        moduleResolution: ts.ModuleResolutionKind.Bundler, preserveSymlinks };
+      const resolution = ts.resolveModuleName('workspace-package', source, options, ts.sys).resolvedModule;
+      assert.ok(resolution?.isExternalLibraryImport, 'TypeScript should recognize installed package');
+      assert.equal(
+        Boolean(resolution.originalPath),
+        !preserveSymlinks,
+        'originalPath must carry the logical node_modules path for default resolution',
+      );
+      assert.deepEqual(check(fixture.root).errors, [], 'preserveSymlinks=' + preserveSymlinks);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test('scoped installed workspace packages retain logical package provenance', t => {
+  const fixture = setup({
+    '../packages/scoped-package/package.json':
+      JSON.stringify({ name: '@example/scoped-package', version: '1.0.0', types: 'index.d.ts' }),
+    '../packages/scoped-package/index.d.ts': 'export declare const value: number;',
+    'app/start.ts':
+      'import { value } from "@example/scoped-package"; export const consumer = value;',
+  });
+  try {
+    const project = path.dirname(fixture.root);
+    const logical = path.join(project, 'node_modules', '@example', 'scoped-package');
+    fs.mkdirSync(path.dirname(logical), { recursive: true });
+    try {
+      fs.symlinkSync(path.join(project, 'packages', 'scoped-package'), logical, 'dir');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows directory links');
+      throw error;
+    }
+    assert.deepEqual(check(fixture.root).errors, []);
+  } finally { fixture.cleanup(); }
+});
+
+test('a project alias into a legitimate linked package is still an explicit local edge', t => {
+  const fixture = setup({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+      baseUrl: '.', paths: { '@internal/*': ['node_modules/workspace-package/*'] },
+    } }),
+    '../packages/workspace-package/package.json':
+      JSON.stringify({ name: 'workspace-package', version: '1.0.0', types: 'index.d.ts' }),
+    '../packages/workspace-package/index.d.ts': 'export declare const value: number;',
+    'app/start.ts': 'import { value } from "@internal/index"; export const consumer = value;',
+  });
+  try {
+    const project = path.dirname(fixture.root);
+    const logical = path.join(project, 'node_modules', 'workspace-package');
+    fs.mkdirSync(path.dirname(logical), { recursive: true });
+    try {
+      fs.symlinkSync(path.join(project, 'packages', 'workspace-package'), logical, 'dir');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows directory links');
+      throw error;
+    }
+    assert.match(check(fixture.root).errors.join(' '), /outside-source-import/);
+  } finally { fixture.cleanup(); }
+});

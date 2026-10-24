@@ -307,10 +307,27 @@ function sameOwnership(a, b) {
 // Node/TypeScript can discover from the importing file's ancestor chain.
 // An arbitrary sibling vendor/node_modules folder is not a package root for
 // a different source tree, even if a custom baseUrl makes it resolvable.
-function isInstalledDependencyPath(filename, importer) {
+function isInstalledDependencyPath(filename, importer, originalPath) {
+  // TypeScript resolves linked packages to their real paths by default.
+  // Its originalPath records the path inside the importer's node_modules
+  // before following that link; with preserveSymlinks, filename is already
+  // the logical installed path. Do not accept arbitrary vendor/node_modules.
+  const installedPath = originalPath || filename;
+  let installed = false;
   for (let dir = path.dirname(importer); ; dir = path.dirname(dir)) {
-    if (isWithinRoot(filename, path.join(dir, 'node_modules'))) return true;
-    if (path.dirname(dir) === dir) return false;
+    if (isWithinRoot(installedPath, path.join(dir, 'node_modules'))) {
+      installed = true;
+      break;
+    }
+    if (path.dirname(dir) === dir) break;
+  }
+  if (!installed) return false;
+  try {
+    // Prove the installed logical path actually names the resolved module.
+    // A stale, unrelated or dangling path cannot certify external ownership.
+    return fs.realpathSync(installedPath) === fs.realpathSync(filename);
+  } catch {
+    return false;
   }
 }
 const publicEntrypoints = new Set([
@@ -1416,6 +1433,7 @@ function check(srcDir) {
       // Pathnames are not package provenance: a first-party directory
       // named node_modules cannot automatically exempt an import.
       let isExternalLibraryImport = false;
+      let originalExternalPath;
       if (localAsset) {
         const candidates = [];
         if (relativeSpec) candidates.push(path.resolve(path.dirname(file), filesystemSpec));
@@ -1453,6 +1471,7 @@ function check(srcDir) {
             filesystemSpec, file, options, ts.sys).resolvedModule;
           resolved = resolvedModule?.resolvedFileName;
           isExternalLibraryImport = Boolean(resolvedModule?.isExternalLibraryImport);
+          originalExternalPath = isExternalLibraryImport ? resolvedModule?.originalPath : undefined;
         }
         // Pure-layer package policy depends on the import's actual name and
         // source, never whether a first-party folder has a vendor-like name.
@@ -1471,7 +1490,7 @@ function check(srcDir) {
         // imports. Relative paths, aliases and local baseUrl targets remain
         // owned dependencies even when their paths contain node_modules.
         if (!(barePackage && isExternalLibraryImport &&
-             isInstalledDependencyPath(target, file))) {
+             isInstalledDependencyPath(target, file, originalExternalPath))) {
           errors.push(`outside-source-import: ${source.relative} -> ${dep.spec}`);
         }
         continue;
