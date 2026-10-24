@@ -1766,3 +1766,48 @@ test('documented narrow Node and Vitest test runner commands remain supported', 
     }, result => assert.deepEqual(result.errors, []));
   }
 });
+
+test('destructured domain properties called module and require remain ordinary data', () => withFixture({
+  'shared/lib/destructure.ts': [
+    'const config = { module: "catalog", require: true };',
+    'const { module: moduleName, require: needed } = config;',
+    'export const description = moduleName + String(needed);',
+  ].join('\n'),
+}, result => assert.deepEqual(result.errors, [])));
+
+test('typed local module and require parameters remain accessible inside their functions', () => withFixture({
+  'shared/lib/local-names.ts': [
+    'export function label(module: string): string { return module.toUpperCase(); }',
+    'export function enabled(require: boolean): boolean { return !require; }',
+    'export function combine(module: string, require: boolean) {',
+    '  return module + String(require);',
+    '}',
+    'export function description() { const module = "catalog"; return module.toUpperCase(); }',
+  ].join('\n'),
+}, result => assert.deepEqual(result.errors, [])));
+
+test('unsafe runtime loader aliases are still rejected with typed names supported', () => {
+  for (const statement of [
+    'const loader = require; module.exports = loader("./private.cjs");',
+    'const loader = module; loader.require("./private.cjs");',
+    'const passed = (loader) => loader("./private.cjs"); passed(require);',
+  ]) withFixture({
+    'modules/orders/infrastructure/unsafe.cjs': statement,
+    'modules/orders/infrastructure/private.cjs': 'module.exports = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-indirect-commonjs-loader/));
+});
+
+test('a local untyped loader binding cannot borrow safety from an outer primitive binding', () => withFixture({
+  'shared/lib/shadowed.ts': [
+    'const module = "harmless";',
+    'export function inspect(module: unknown) { return module; }',
+  ].join('\n'),
+}, result => assert.match(result.errors.join(' '), /unsupported-indirect-commonjs-loader/)));
+
+test('typed local primitive bindings permit domain vocabulary without allowing bare loader references', () => withFixture({
+  'shared/lib/typed-local.ts': [
+    'const module: string = "catalog";',
+    'const require: boolean = false;',
+    'export const details = module.toUpperCase() + String(require);',
+  ].join('\n'),
+}, result => assert.deepEqual(result.errors, [])));

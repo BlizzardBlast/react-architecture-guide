@@ -100,3 +100,9 @@ The npm/Vite checker allows only narrowly defined test launcher commands: `vites
 TypeScript interfaces, class fields, methods, enums and parameter *declarations* named `module` or `require` are ordinary schema names and do not imply Node loaders. Runtime references and aliases to Node's CommonJS loader remain intentionally constrained.
 
 The lightweight Markdown validator protects multiline backtick code spans within paragraphs and excludes fenced/indented code and raw HTML comments from reference-definition pre-indexing. It remains a limited CommonMark checker, not a full parser; use a maintained tokenizer when feasible.
+
+### Markdown and loader validation boundaries
+
+Reference definitions within CommonMark raw HTML blocks (including `div`, `pre` and `script`) are not active Markdown references. The documentation checker excludes them from its reference index. It also ensures a backtick inside a genuine HTML-comment block cannot close a code span started in a prior paragraph, while still recognizing actual multiline code spans within a paragraph. An earlier fixture expecting the opposite HTML-block precedence was corrected against CommonMark rendering.
+
+For checked TypeScript and JavaScript, declaration/property names such as `module` or `require` do not automatically refer to Node's CommonJS loaders. The checker allows normal destructuring keys and local primitive bindings/parameters with those names, but continues rejecting unresolved, untyped or dynamically aliased loader values. This remains a restricted static grammar; runtime and integration checks are required for executable behavior.

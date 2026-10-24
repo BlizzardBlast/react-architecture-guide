@@ -100,6 +100,38 @@ function isImportMetaUrl(node) {
     node.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
     node.expression.name.text === 'meta';
 }
+// A local binding with a declared primitive type cannot be the built-in
+// CommonJS module/require object. Resolve the nearest lexical function
+// parameter first, rather than rejecting every use based solely on spelling.
+// Other inferred/dynamic loader aliases remain disallowed.
+function isPrimitiveType(type) {
+  return Boolean(type && [ts.SyntaxKind.StringKeyword, ts.SyntaxKind.NumberKeyword,
+    ts.SyntaxKind.BooleanKeyword, ts.SyntaxKind.BigIntKeyword].includes(type.kind));
+}
+function hasSafeLocalBinding(identifier) {
+  for (let parent = identifier.parent; parent; parent = parent.parent) {
+    if (ts.isFunctionLike(parent)) {
+      const matchingParameter = parent.parameters.find(parameter =>
+        ts.isIdentifier(parameter.name) && parameter.name.text === identifier.text);
+      if (matchingParameter) return isPrimitiveType(matchingParameter.type);
+    }
+    if (ts.isBlock(parent) || ts.isSourceFile(parent)) {
+      const bindings = parent.statements?.filter(ts.isVariableStatement) || [];
+      for (const statement of bindings) {
+        for (const declaration of statement.declarationList.declarations) {
+          if (!ts.isIdentifier(declaration.name) || declaration.name.text !== identifier.text ||
+              declaration.getStart() > identifier.getStart()) continue;
+          const init = declaration.initializer;
+          return Boolean(isPrimitiveType(declaration.type) || init && (
+              ts.isStringLiteral(init) || ts.isNumericLiteral(init) ||
+              init.kind === ts.SyntaxKind.TrueKeyword || init.kind === ts.SyntaxKind.FalseKeyword
+            ));
+        }
+      }
+    }
+  }
+  return false;
+}
 function imports(node, list, options) {
   // Vite transforms statically analyzable new URL(...) references into bundled
   // assets or worker entrypoints; they need the same ownership validation.
@@ -152,7 +184,9 @@ function imports(node, list, options) {
       ts.isGetAccessorDeclaration(parent) ||
       ts.isSetAccessorDeclaration(parent) ||
       ts.isEnumMember(parent)
-    ) && parent.name === node;
+    ) && parent.name === node ||
+      ts.isBindingElement(parent) &&
+      (parent.propertyName === node || parent.name === node);
     const directRequire = node.text === 'require' &&
       ts.isCallExpression(parent) && parent.expression === node;
     const directModuleMember = node.text === 'module' && (
@@ -165,7 +199,8 @@ function imports(node, list, options) {
           (literalString(parent.argumentExpression) === 'require' &&
             ts.isCallExpression(parent.parent) && parent.parent.expression === parent)))
     );
-    if (!isPropertyName && !directRequire && !directModuleMember) {
+    if (!isPropertyName && !directRequire && !directModuleMember &&
+        !hasSafeLocalBinding(node)) {
       list.push({ unsupported: 'indirect-commonjs-loader', line: node.getStart() });
     }
   }

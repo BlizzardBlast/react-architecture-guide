@@ -25,8 +25,13 @@ function inspectMarkdown(relative, contents, root) {
   function hasCodeSpanCloser(text, from, size, lineIndex) {
     for (let row = lineIndex; row < lines.length; row++) {
       const candidate = row === lineIndex ? text.slice(from) : lines[row];
+      // CommonMark block constructs interrupt a paragraph before inline
+      // backtick matching. A backtick inside a block HTML comment is *not*
+      // a closer for the preceding paragraph's code span.
       if (row !== lineIndex && (!candidate.trim() ||
-          /^ {0,3}(?:`{3,}|~{3,})/.test(candidate))) return false;
+          /^ {0,3}(?:`{3,}|~{3,}|<!--)/.test(candidate) ||
+          blockTags.test(candidate) ||
+          /^ {0,3}<(?:script|pre|style|textarea)(?=[\s>])/i.test(candidate))) return false;
       for (const match of candidate.matchAll(/`+/g)) {
         if (match[0].length === size) return true;
       }
@@ -111,6 +116,7 @@ function inspectMarkdown(relative, contents, root) {
   // is not a definition. Pre-index only plausible *active block* lines; the
   // inline pass below retains its own destination checks.
   let referenceFence = null, referenceComment = false;
+  let referenceHtml = null;
   let referenceIndent = false, referencePreviousBlank = true;
   for (const sourceLine of lines) {
     const line = sourceLine.replace(/^ {0,3}(?:>[ \t]?)+/, '');
@@ -125,6 +131,14 @@ function inspectMarkdown(relative, contents, root) {
     if (referenceComment) {
       if (line.includes('-->')) referenceComment = false;
       continue;
+    }
+    if (referenceHtml) {
+      if (referenceHtml.close) {
+        if (referenceHtml.close.test(line)) referenceHtml = null;
+        continue;
+      }
+      if (line.trim()) continue;
+      referenceHtml = null;
     }
     if (marker) {
       referenceFence = { char: marker[1][0], length: marker[1].length };
@@ -142,6 +156,19 @@ function inspectMarkdown(relative, contents, root) {
     referencePreviousBlank = false;
     if (/^ {0,3}<!--/.test(line)) {
       referenceComment = !line.includes('-->');
+      continue;
+    }
+    // The same block-level HTML grammar as the active-lines pass:
+    // raw-text elements close at an end tag, other HTML blocks at blank.
+    const rawText = /^ {0,3}<(script|pre|style|textarea)(?=[\s>])/i.exec(line);
+    if (rawText) {
+      const close = new RegExp('</' + rawText[1] + '[\\s>]', 'i');
+      if (!close.test(line)) referenceHtml = { close };
+      continue;
+    }
+    if (blockTags.test(line) ||
+        /^ {0,3}<\/?[A-Za-z][^>]*>\s*$/.test(line)) {
+      referenceHtml = { close: null };
       continue;
     }
     const start = /^ {0,3}\[/.exec(line);

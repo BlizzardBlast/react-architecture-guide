@@ -462,10 +462,12 @@ test('multiline backtick code spans cannot introduce phantom HTML comments', () 
   );
 });
 
-test('active links after a multiline code span are validated and code links are not', () => fixture(
+test('HTML comment blocks interrupt code spans and hide subsequent links', () => fixture(
   String.fromCharCode(96) + 'a [Ignored](missing1.md)\n<!-- literal\nb' +
   String.fromCharCode(96) + '\n[Broken](missing2.md)', root =>
-    assert.deepEqual(checkAll(root).issues, ['README.md:4: missing local link: missing2.md']),
+    // CommonMark renders Ignored as a link and treats the following lines
+    // as an unclosed raw HTML comment; Broken is inactive.
+    assert.deepEqual(checkAll(root).issues, ['README.md:1: missing local link: missing1.md']),
 ));
 
 test('an unmatched backtick cannot suppress a genuine HTML comment', () => fixture(
@@ -491,4 +493,35 @@ test('reference definitions inside an HTML comment cannot create active referenc
 test('real reference definitions outside code and comments still validate targets', () => fixture(
   '[foo <!--]: README.md\n[foo <!--]\n[Broken](missing.md)', root =>
     assert.deepEqual(checkAll(root).issues, ['README.md:3: missing local link: missing.md']),
+));
+
+test('backticks inside an HTML block comment do not close a preceding code span', () => fixture(
+  String.fromCharCode(96) + 'not closed\n<!-- ' + String.fromCharCode(96) +
+  '\n[Hidden](missing.md)\n-->\n[Broken](missing2.md)', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:5: missing local link: missing2.md']),
+));
+
+test('valid multiline code spans still hide a literal comment opener', () => fixture(
+  'Before ' + String.fromCharCode(96) + 'code\ninside <!--\nend' +
+  String.fromCharCode(96) + '\n[Broken](missing.md)', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:4: missing local link: missing.md']),
+));
+
+test('raw HTML blocks cannot contribute reference definitions', () => {
+  const blocks = [
+    '<div>\n[foo <!--]: README.md\n</div>',
+    '<pre>\n[foo <!--]: README.md\n</pre>',
+    '<script>\n[foo <!--]: README.md\n</script>',
+  ];
+  for (const block of blocks) fixture(
+    block + '\n\n[foo <!--]\n[Inactive](missing.md)\n-->\n[Broken](missing2.md)', root => {
+      const issues = checkAll(root).issues;
+      assert.deepEqual(issues, ['README.md:8: missing local link: missing2.md']);
+    },
+  );
+});
+
+test('real references after HTML blocks remain active', () => fixture(
+  '<div>\ncontent\n</div>\n\n[foo <!--]: README.md\n[foo <!--]\n[Broken](missing.md)', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:7: missing local link: missing.md']),
 ));
