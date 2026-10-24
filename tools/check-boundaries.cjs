@@ -1030,13 +1030,17 @@ function verifyVitePublicDirectory(projectDir, errors, state) {
 
 // The dev server serves other project HTML files, even with a single-page
 // production build. Reject them until they are explicitly audited.
-function verifyViteSecondaryHtml(projectDir, errors) {
+function verifyViteSecondaryHtml(projectDir, errors, state) {
   // Exclusions are paths rooted at the Vite project, NOT arbitrary directory
   // basenames: docs/public/index.html is a Vite dev entry, unlike public/.
   const rootExcluded = new Set([
     '.git', 'node_modules', 'dist', 'build', 'coverage',
-    '.next', '.turbo', '.vite', 'public',
+    '.next', '.turbo', '.vite',
   ]);
+  // Vite can still serve /public/*.html as ordinary project-root HTML
+  // when publicDir is disabled. Only skip public/ here if the separate
+  // public asset scanner actually audited it.
+  if (!state.publicDirDisabled) rootExcluded.add('public');
   function scan(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (dir === projectDir && rootExcluded.has(entry.name)) continue;
@@ -1197,17 +1201,52 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
     }
   }
   function scanFile(logicalFile) {
-    const physicalFile = fs.realpathSync(logicalFile);
+    let physicalFile;
+    try {
+      physicalFile = fs.realpathSync(logicalFile);
+    } catch (error) {
+      // Dangling or inaccessible stylesheet links are violations, not
+      // exceptional terminations of the entire architecture review.
+      errors.push('unresolved-stylesheet-symlink: ' +
+        normPath(path.relative(root, logicalFile)) + ' (' + (error.code || 'unknown error') + ')');
+      return;
+    }
     if (!isWithinRoot(physicalFile, physicalRoot)) {
       errors.push('outside-source-symlink: ' + path.relative(root, logicalFile));
       return;
     }
     const source = category(physicalFile, physicalRoot);
-    const scanned = scanCssDependencies(fs.readFileSync(logicalFile, 'utf8'), { filename: logicalFile });
+    let css;
+    try {
+      css = fs.readFileSync(logicalFile, 'utf8');
+    } catch (error) {
+      errors.push('unreadable-stylesheet: ' + source.relative +
+        ' (' + (error.code || 'unknown error') + ')');
+      return;
+    }
+    const scanned = scanCssDependencies(css, { filename: logicalFile });
     for (const issue of scanned.errors) errors.push(issue + ': ' + source.relative);
     for (const ref of scanned.references) {
       const spec = fileSpecifier(ref.spec);
-      if (!spec || /^(?:data:|https?:|\/\/|sass:)/i.test(spec)) continue;
+      if (!spec) continue;
+      // An @import/@use/@forward introduces a dependency-bearing stylesheet;
+      // unlike decorative url() or image-set media, an unverified remote/data
+      // stylesheet may import further unchecked sources.
+      if (/^(?:data:|https?:|\/\/)/i.test(spec)) {
+        if (['import', 'use', 'forward'].includes(ref.kind)) {
+          errors.push('unverified-css-external-stylesheet: ' + source.relative + ' -> ' + ref.spec);
+        }
+        continue;
+      }
+      // Sass's built-in modules are internal compiler dependencies, not
+      // external CSS URLs. Their use/forward form remains supported.
+      if (/^sass:/i.test(spec)) {
+        if (!['use', 'forward'].includes(ref.kind)) {
+          errors.push('unsupported-css-dependency: unsupported Sass built-in import ' +
+            source.relative + ' -> ' + ref.spec);
+        }
+        continue;
+      }
       if (/[#@]\{|\$\{/.test(ref.spec)) {
         errors.push('unsupported-css-dependency: interpolated reference ' + source.relative + ' -> ' + ref.spec);
         continue;
@@ -1274,7 +1313,7 @@ function check(srcDir) {
   const viteState = { publicDirDisabled: false };
   verifyViteAliases(path.dirname(root), policy, errors, viteState);
   verifyVitePublicDirectory(path.dirname(root), errors, viteState);
-  verifyViteSecondaryHtml(path.dirname(root), errors);
+  verifyViteSecondaryHtml(path.dirname(root), errors, viteState);
   verifyViteHtmlEntrypoints(path.dirname(root), root, policy, errors, viteState);
   const files = walk(root).map(f => path.resolve(f));
   if (files.length === 0) errors.push('no-source-files: No supported source files found');
@@ -1284,7 +1323,14 @@ function check(srcDir) {
   scanOwnedStylesheets(root, physicalRoot, policy, options, errors);
   for (const file of files) {
     const logical = category(file, root);
-    const physicalFile = fs.realpathSync(file);
+    let physicalFile;
+    try {
+      physicalFile = fs.realpathSync(file);
+    } catch (error) {
+      errors.push('unresolved-source-symlink: ' + logical.relative +
+        ' (' + (error.code || 'unknown error') + ')');
+      continue;
+    }
     if (!isWithinRoot(physicalFile, physicalRoot)) {
       errors.push(`outside-source-symlink: ${logical.relative} -> ${physicalFile}`);
       continue;
@@ -1299,7 +1345,14 @@ function check(srcDir) {
       if (['domain', 'application', 'infrastructure'].includes(actual.part)) layout.complex.add(actual.part);
       moduleLayouts.set(actual.module, layout);
     }
-    const text = fs.readFileSync(file, 'utf8');
+    let text;
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch (error) {
+      errors.push('unreadable-source-file: ' + logical.relative +
+        ' (' + (error.code || 'unknown error') + ')');
+      continue;
+    }
     const kind = ts.getScriptKindFromFileName(file);
     const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
     for (const diagnostic of sf.parseDiagnostics) {

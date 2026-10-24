@@ -84,3 +84,10 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Treat remote/data `stylesheet` and `preload as=style` links as active CSS dependencies that require explicit review and transitive checking; preserve intentional inert remote media.
 - [ ] Handle unreadable/dangling symlinks as validation diagnostics without throwing, and reject symlinked HTML documents or directories that could hide additional entrypoints.
 - [ ] Exercise both negative bypass cases and harmless controls in the installed architecture tests, plus actual Vite dev-server HTML and stylesheet behavior before merge.
+
+### Vite disabled publicDir, remote stylesheet directives and source symlinks
+
+- [ ] Do not conflate `publicDir:false` with removal of project-root HTML serving; reject unaudited root `public/**/*.html` in this configuration.
+- [ ] Reject unverified external or `data:` stylesheet directives introduced by *local* CSS/SCSS `@import`, `@use` and `@forward` while allowing audited Sass built-ins and decorative remote media.
+- [ ] Convert broken source and stylesheet realpath/read failures into actionable diagnostics; check dangling/valid internal/external symlink fixtures.
+- [ ] Run complete architecture tests and real Vite dev/build/browser checks before declaring the release gates passed.

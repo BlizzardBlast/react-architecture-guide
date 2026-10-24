@@ -160,3 +160,11 @@ Vite's secondary HTML check now applies generated/vendor/public exclusions **onl
 The HTML dependency extractor distinguishes **active CSS stylesheet entrypoints** from decorative assets. External HTTP(S), protocol-relative and `data:` stylesheet links, including `rel="preload" as="style"`, are rejected until an explicit reviewed dependency policy and transitive stylesheet audit exist. Local CSS links still participate in the source ownership graph; remote image/media data remains allowed by the bounded asset grammar.
 
 The secondary-page scanner now returns an actionable error for unresolvable symlinks instead of throwing `ENOENT`, rejects symlinked HTML documents/directories, and permits ordinary resolved links to non-HTML files. New tests cover each case and safe controls. Isolated source-level probes passed, but full TypeScript/parse5-backed tests, Vite builds, dependency audits and browser/accessibility gates remain outstanding; **the PR stays DRAFT/UNMERGED**.
+
+### Follow-up remediation: disabled public assets, transitive CSS and source links
+
+The Vite development server can still address project-root `public/*.html` through its ordinary HTML handler even with `publicDir: false`. The secondary-page checker therefore scans the root `public/` folder when the special public-asset handler is disabled and rejects unchecked HTML; unused inert files remain permitted. With `publicDir` enabled, the separate strict public-asset audit continues to own that directory.
+
+The CSS graph distinguishes active transitive dependencies (`@import`, `@use`, `@forward`) from decorative remote `url()`/image-set media. Unverified external HTTP(S), protocol-relative and `data:` stylesheet dependencies are rejected, including imports from local CSS, SCSS or other supported stylesheets. Built-in Sass modules used through `@use`/`@forward` remain supported.
+
+Broken or unreadable TypeScript and stylesheet symlinks now produce path-specific validation errors rather than uncaught filesystem exceptions. Valid same-owner source and stylesheet symlinks remain supported. Regression fixtures cover each reviewed case; **full dependency-backed tests, real Vite builds, audits, and browser/accessibility checks remain release requirements**. Keep this PR draft until all required gates are verified.

@@ -2024,9 +2024,18 @@ test('Vite publicDir cannot select an unchecked sibling directory', () => {
   }, result => assert.match(result.errors.join(' '), /unsupported-vite-public-dir/));
 });
 
-test('disabling Vite publicDir prevents shipping files from its unused default directory', () => withFixture({
+test('publicDir:false still rejects dev-servable HTML under the project-root public folder', () =>
+  withFixture({
+    '../vite.config.ts': 'export default { plugins: [], publicDir: false };',
+    '../public/hidden.html': '<script type="module" src="/src/modules/orders/ui/private.ts"></script>',
+    '../index.html': '<script type="module" src="/src/app/start.ts"></script>',
+    'app/start.ts': 'export const start = true;',
+    'modules/orders/ui/private.ts': 'export const hidden = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-html-page: secondary HTML entry public\/hidden\.html/)));
+
+test('publicDir:false permits unused inert public assets but not HTML', () => withFixture({
   '../vite.config.ts': 'export default { plugins: [], publicDir: false };',
-  '../public/unused.html': '<script>alert(1)</script>',
+  '../public/unused.png': 'placeholder for an unused image',
   'app/start.ts': 'export const start = true;',
 }, result => assert.deepEqual(result.errors, [])));
 
@@ -2166,4 +2175,63 @@ test('secondary-page scanning rejects symlinked directories and linked HTML docu
     assert.match(result.errors.join(' '), /unverified-vite-html-page: symlinked HTML or directory html-alias/);
     assert.match(result.errors.join(' '), /unverified-vite-html-page: symlinked HTML entry page-alias\.html/);
   } finally { fixture.cleanup(); fs.rmSync(outside, { force: true, recursive: true }); }
+});
+
+
+test('CSS remote and data stylesheet imports fail closed, unlike decorative remote media', () => {
+  for (const [file, contents] of [
+    ['site.css', '@import "https://cdn.example.org/unchecked.css";'],
+    ['site.css', '@import "http://cdn.example.org/unchecked.css";'],
+    ['site.css', '@import url("//cdn.example.org/unchecked.css");'],
+    ['site.css', '@import "data:text/css,@import%20url(https://cdn.example.org/unchecked.css)";'],
+    ['site.scss', '@use "https://cdn.example.org/unchecked.scss";'],
+    ['site.scss', '@forward "https://cdn.example.org/unchecked.scss";'],
+  ]) withFixture({
+    ['shared/ui/' + file]: contents,
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-css-external-stylesheet: shared\/ui\/site\.(?:css|scss)/, contents));
+});
+
+test('remote image url() and Sass built-in modules remain supported CSS resources', () =>
+  withFixture({
+    'shared/ui/theme.css': '.logo { background: url("https://example.org/logo.png"); }',
+    'modules/orders/ui/math.scss': '@use "sass:math"; .value { width: math.div(10px, 2); }',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('dangling TypeScript and CSS file symlinks report diagnostics, not thrown exceptions', t => {
+  const fixture = setup({ 'app/start.ts': 'export const ready = true;' });
+  try {
+    try {
+      fs.mkdirSync(path.join(fixture.root, 'shared', 'ui'), { recursive: true });
+      fs.symlinkSync(path.join(fixture.root, 'shared', 'ui', 'gone.ts'),
+        path.join(fixture.root, 'shared', 'ui', 'dangling.ts'), 'file');
+      fs.symlinkSync(path.join(fixture.root, 'shared', 'ui', 'gone.css'),
+        path.join(fixture.root, 'shared', 'ui', 'dangling.css'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows file symlinks');
+      throw error;
+    }
+    const result = check(fixture.root);
+    assert.match(result.errors.join(' '), /unresolved-source-symlink: shared\/ui\/dangling\.ts/);
+    assert.match(result.errors.join(' '), /unresolved-stylesheet-symlink: shared\/ui\/dangling\.css/);
+  } finally { fixture.cleanup(); }
+});
+
+test('valid same-owner stylesheet symlink preserves ownership validation', t => {
+  const fixture = setup({
+    'shared/ui/base.css': '.notice { display: block; }',
+    'app/start.ts': 'export const ready = true;',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, 'shared', 'ui', 'base.css'),
+        path.join(fixture.root, 'shared', 'ui', 'alias.css'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows file symlinks');
+      throw error;
+    }
+    assert.deepEqual(check(fixture.root).errors, []);
+  } finally { fixture.cleanup(); }
 });
