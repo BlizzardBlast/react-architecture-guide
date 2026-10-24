@@ -2087,10 +2087,19 @@ test('Vite additional dev HTML pages fail closed outside the checked index', () 
   }, result => assert.match(result.errors.join(' '), /unverified-vite-html-page/, file));
 });
 
-test('default Vite HTML and ignored build/vendor output do not trigger secondary page errors', () =>
+test('root generated-output HTML is rejected because Vite can still serve it in development', () => {
+  for (const page of ['dist/built.html', 'build/hidden.html', 'coverage/report.html',
+    '.next/hidden.html', '.vite/hidden.html']) withFixture({
+    '../index.html': '<script type="module" src="/src/app/start.ts"></script>',
+    ['../' + page]: '<script type="module" src="/src/modules/orders/ui/private.ts"></script>',
+    'app/start.ts': 'export const ready = true;',
+    'modules/orders/ui/private.ts': 'export const privateValue = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-html-page/, page));
+});
+
+test('root node_modules vendor HTML is excluded from first-party page discovery', () =>
   withFixture({
     '../index.html': '<script type="module" src="/src/app/start.ts"></script>',
-    '../dist/built.html': '<script type="module" src="/outside.ts"></script>',
     '../node_modules/pkg/demo.html': '<script type="module" src="/outside.ts"></script>',
     'app/start.ts': 'export const ready = true;',
   }, result => assert.deepEqual(result.errors, [])));
@@ -2235,3 +2244,53 @@ test('valid same-owner stylesheet symlink preserves ownership validation', t => 
     assert.deepEqual(check(fixture.root).errors, []);
   } finally { fixture.cleanup(); }
 });
+
+test('nested generated-looking folders never hide source dependencies', () => {
+  for (const folder of ['dist', 'coverage', 'build', 'node_modules']) withFixture({
+    ['shared/lib/' + folder + '/private.ts']:
+      'import { secret } from "../../../modules/orders/ui/private"; export const leak = secret;',
+    'modules/orders/ui/private.ts': 'export const secret = true;',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/, folder));
+});
+
+test('nested CSS dependencies are validated transitively regardless of folder names', () => {
+  for (const folder of ['dist', 'coverage', 'build', 'node_modules']) withFixture({
+    'shared/ui/main.css': '@import "./' + folder + '/bridge.css";',
+    ['shared/ui/' + folder + '/bridge.css']:
+      '@import "../../../modules/orders/ui/private.css";',
+    'modules/orders/ui/private.css': '.private { display: block }',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/, folder));
+});
+
+test('src root generated-looking directories remain in source and CSS discovery', () =>
+  withFixture({
+    'dist/private.ts': 'export const privateSource = 1;',
+    'coverage/report.css': '.display { color: blue }',
+    'app/start.ts': 'export const start = true;',
+  }, result => {
+    assert.equal(result.count, 2);
+    assert.deepEqual(result.errors, []);
+  }));
+
+test('disabled Vite publicDir still checks potentially active JS/CSS/SVG under public', () => {
+  for (const [file, contents] of [
+    ['unverified.js', 'import "/src/modules/orders/ui/private.ts";'],
+    ['unverified.css', '@import "/src/modules/orders/ui/private.css";'],
+    ['unverified.svg', '<svg><script>alert(1)</script></svg>'],
+    ['nested/hidden.js', 'export const leak = true;'],
+  ]) withFixture({
+    '../vite.config.ts': 'export default { plugins: [], publicDir: false };',
+    ['../public/' + file]: contents,
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-public-dir/, file));
+});
+
+test('disabled Vite publicDir still permits inert raster/font assets', () =>
+  withFixture({
+    '../vite.config.ts': 'export default { plugins: [], publicDir: false };',
+    '../public/logo.png': 'raster placeholder',
+    '../public/nested/font.woff2': 'font placeholder',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, [])));

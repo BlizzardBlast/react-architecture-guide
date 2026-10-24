@@ -55,7 +55,11 @@ function walk(root) {
   if (!fs.existsSync(root)) throw new Error(`Source directory not found: ${root}`);
   const result = [];
   for (const item of fs.readdirSync(root, { withFileTypes: true })) {
-    if (['node_modules', 'dist', 'coverage', '.git'].includes(item.name)) continue;
+    // All files under src/ are first-party candidates, even in directories
+    // named dist/, coverage/ or node_modules/. Skipping by basename can
+    // conceal transitive imports and directly served source files.
+    // .git is repository metadata, not executable application source.
+    if (item.name === '.git' && item.isDirectory()) continue;
     const full = path.join(root, item.name);
     if (item.isDirectory()) result.push(...walk(full));
     else if (sourceExt.test(item.name)) result.push(full);
@@ -1001,7 +1005,9 @@ function verifyViteAliases(projectDir, policy, errors, viteState) {
 const publicSafeAsset = /\.(?:png|jpe?g|gif|webp|avif|ico|bmp|woff2?|ttf|otf|mp4|webm)$/i;
 
 function verifyVitePublicDirectory(projectDir, errors, state) {
-  if (state.publicDirDisabled) return;
+  // publicDir:false disables the special public middleware but not Vite's
+  // ordinary root-static or root-HTML middleware. Audit active asset types
+  // even in the disabled public directory.
   const publicRoot = path.join(projectDir, 'public');
   if (!fs.existsSync(publicRoot)) return;
   const projectPhysicalRoot = fs.realpathSync(projectDir);
@@ -1018,9 +1024,11 @@ function verifyVitePublicDirectory(projectDir, errors, state) {
         errors.push('unverified-vite-public-dir: symlink ' + relative);
       } else if (entry.isDirectory()) {
         scan(full);
-      } else if (!entry.isFile() || !publicSafeAsset.test(relative)) {
-        // HTML, SVG, JS, CSS and unknown formats can ship executable or
-        // dependency-bearing data. Refuse an unverified public graph.
+      } else if (!entry.isFile() ||
+          (!publicSafeAsset.test(relative) &&
+           !(state.publicDirDisabled && /\.html?$/i.test(relative)))) {
+        // Disabled publicDir HTML is checked by verifyViteSecondaryHtml.
+        // Other JS, CSS, SVG and unknown active resources still fail closed.
         errors.push('unverified-vite-public-dir: unsupported public asset ' + relative);
       }
     }
@@ -1033,10 +1041,11 @@ function verifyVitePublicDirectory(projectDir, errors, state) {
 function verifyViteSecondaryHtml(projectDir, errors, state) {
   // Exclusions are paths rooted at the Vite project, NOT arbitrary directory
   // basenames: docs/public/index.html is a Vite dev entry, unlike public/.
-  const rootExcluded = new Set([
-    '.git', 'node_modules', 'dist', 'build', 'coverage',
-    '.next', '.turbo', '.vite',
-  ]);
+  // Only repository/vendor metadata is excluded; names like dist/, build/,
+  // coverage/, .next/ and .vite/ can still contain dev-addressable HTML.
+  // A generated HTML page is unverified until an explicit build/dev graph
+  // policy is implemented, regardless of its directory name.
+  const rootExcluded = new Set(['.git', 'node_modules']);
   // Vite can still serve /public/*.html as ordinary project-root HTML
   // when publicDir is disabled. Only skip public/ here if the separate
   // public asset scanner actually audited it.
@@ -1194,7 +1203,9 @@ function checkOwnedDependency(source, dest, policy, errors, { asset = false, isT
 function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
   function scanDir(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (['node_modules', 'dist', 'coverage', '.git'].includes(entry.name)) continue;
+      // Do not silently omit imported stylesheets under nested generated-
+      // looking folders. Inspect every first-party stylesheet under src/.
+      if (entry.name === '.git' && entry.isDirectory()) continue;
       const file = path.join(dir, entry.name);
       if (entry.isDirectory()) scanDir(file);
       else if (styleExt.test(entry.name)) scanFile(file);

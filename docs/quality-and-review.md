@@ -91,3 +91,10 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Reject unverified external or `data:` stylesheet directives introduced by *local* CSS/SCSS `@import`, `@use` and `@forward` while allowing audited Sass built-ins and decorative remote media.
 - [ ] Convert broken source and stylesheet realpath/read failures into actionable diagnostics; check dangling/valid internal/external symlink fixtures.
 - [ ] Run complete architecture tests and real Vite dev/build/browser checks before declaring the release gates passed.
+
+### First-party discovery and actual Vite development reachability
+
+- [ ] Scan every owned JS/TS and CSS/Sass/Less file under `src/`, including nested `dist`, `coverage`, `build` or `node_modules` folders; verify a transitive private-module import cannot hide behind a skipped basename.
+- [ ] Reject/audit root `dist`, `build`, `coverage`, `.next` and `.vite` HTML pages that remain reachable during Vite development; confirm with actual HTTP requests.
+- [ ] With `publicDir:false`, validate active/unknown root public assets (JS/CSS/SVG and symlinks) as well as secondary HTML; preserve allowlisted inert media.
+- [ ] Treat root third-party `node_modules/` and Git metadata as explicitly scoped exceptions, not proof that Vite never serves them. Perform a real dev/build graph audit before merging.

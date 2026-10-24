@@ -163,3 +163,13 @@ Focused in-memory/source probes on the staged implementation passed **17/17** ch
 All three review findings have been addressed in one batch: `publicDir:false` no longer hides dev-servable root `public/` HTML; local CSS/SCSS active remote/data stylesheet directives fail closed while inert external media and Sass built-ins remain supported; and broken TypeScript/CSS symlinks yield structured diagnostics. The obsolete regression claiming `publicDir:false` makes `public/unused.html` safe has been replaced with correct negative and inert controls. New fixtures test both invalid and valid file links.
 
 Modified JavaScript passed syntax parsing and 16/16 focused isolated checks of the changed paths passed. Isolated checks do not establish the entire npm-backed architecture suite, real Vite dev-server behavior, npm audits, React/orders tests, build or browser accessibility checks. Those requirements and the authentic npm lockfiles remain outstanding; the PR must stay DRAFT/UNMERGED.
+
+### Review #5636952721 remediation — bounded frey-skills pass
+
+**Ledger:** R1 [P1, owned source/CSS discovery], R2 [P1, Vite-served root output HTML], and R3 [P2, disabled-public active assets]. `BlizzardBlast/frey-skills` `iterative-self-review` was used as the remediation process: inspect the current review and PR head, preserve unrelated work, batch related fixes, add negative and safe-control fixtures, test relevant counterexamples, and avoid unnecessary CI-triggering pushes.
+
+- R1: remove basename-based exclusions inside the owned `src/` tree for both TypeScript and stylesheets; include nested `dist/coverage/build/node_modules` source and transitive CSS dependency cases.
+- R2: audit/reject extra HTML even when stored under root generated-output-looking folders; keep only documented third-party/Git metadata exceptions. Include root `dist/build/coverage/.next/.vite` HTML cases and a real-vendor root control.
+- R3: continue the public-asset allowlist audit with `publicDir:false` (while handling its HTML through secondary-page discovery); add JS/CSS/SVG and inert raster/font fixtures.
+
+**Observed local evidence:** Staged checker/test JavaScript syntax parsed successfully; 20/20 isolated checks of discovery, ownership and HTML/public behavior passed. These isolate the changed decision paths but are **not** the installed TypeScript/parse5 test suite. Authentic root/orders/React lockfiles, `npm ci`, full tests, audits, actual Vite dev/build requests and browser/accessibility checks remain NOT RUN. The PR remains DRAFT/UNMERGED; full release-gate results must be recorded before promotion.
