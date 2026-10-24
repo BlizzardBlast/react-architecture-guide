@@ -525,3 +525,15 @@ test('real references after HTML blocks remain active', () => fixture(
   '<div>\ncontent\n</div>\n\n[foo <!--]: README.md\n[foo <!--]\n[Broken](missing.md)', root =>
     assert.deepEqual(checkAll(root).issues, ['README.md:7: missing local link: missing.md']),
 ));
+
+test('HTML-looking fence info strings do not conceal links following the fence', () => {
+  for (const fence of ['~~~', String.fromCharCode(96).repeat(3)]) fixture(
+    fence + 'md <!--\nliteral\n' + fence + '\n[Broken](missing.md)',
+    root => assert.deepEqual(checkAll(root).issues, ['README.md:4: missing local link: missing.md']),
+  );
+});
+
+test('real HTML comments with fence-like content still hide inactive links', () => fixture(
+  '<!--\n~~~md\n[Hidden](missing.md)\n~~~\n-->\n[Broken](missing2.md)',
+  root => assert.deepEqual(checkAll(root).issues, ['README.md:6: missing local link: missing2.md']),
+));

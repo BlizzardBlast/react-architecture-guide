@@ -861,6 +861,14 @@ function verifyViteAliases(projectDir, policy, errors) {
       }
     }
   }
+  // A Vite plugin config() hook can override resolve.alias after the AST
+  // check. The static map is not proof of effective aliases with plugins.
+  // Fail closed for alias-bearing configs with executable plugin expressions.
+  const plugins = top.get('plugins');
+  if (aliases.size && plugins &&
+      !(ts.isArrayLiteralExpression(plugins) && plugins.elements.length === 0)) {
+    errors.push('unverifiable-vite-plugin-alias: aliases with executable plugins require actual Vite resolved-config verification');
+  }
   // Vite aliases are ordered rules. The checker map must preserve this order
   // so overlapping prefixes cannot resolve to a different physical target.
   const configuredOrder = Object.keys(policy.viteAliases);

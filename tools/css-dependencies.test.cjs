@@ -98,3 +98,11 @@ test('image-set resolves CSS hex escape sequences before checking asset paths', 
 test('unterminated quoted image-set choices are not silently accepted', () => {
   assert.ok(scan('.x{background:image-set("no-end 1x)}').errors.length);
 });
+
+test('CSS escaped dependency identifiers fail closed and quoted text remains inert', () => {
+  for (const css of ["@im\\70ort \"../../modules/orders/ui/private.css\";",".widget { background: u\\72l(\"../../modules/orders/ui/private.svg\"); }",".widget { background: \\75rl(\"../../modules/orders/ui/private.svg\"); }","@i\\6d port \"../../modules/orders/ui/private.css\";"]) {
+    assert.match(scan(css).errors.join(' '), /unsupported-css-escaped-identifier/, css);
+  }
+  assert.deepEqual(scan(".x { content: \"@im\\70ort u\\72l(\"; }").errors, []);
+  assert.deepEqual(scan('@import "./safe.css"; .x{background:url("./safe.svg")}').errors, []);
+});

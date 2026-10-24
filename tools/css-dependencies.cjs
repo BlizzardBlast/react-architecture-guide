@@ -51,6 +51,17 @@ function scanCssDependencies(css, { filename = 'style.css' } = {}) {
     } else if (ch === '"' || ch === "'") { q = ch; mask += ' '; }
     else mask += ch;
   }
+  // Escaped identifiers can encode CSS dependencies such as @im\70ort
+  // and u\72l(...). Fail closed; this scanner is not a CSS tokenizer.
+  // Strings and comments were already masked above.
+  const identifierPiece = String.raw`(?:[A-Za-z_-]|\\(?:[0-9a-fA-F]{1,6}[ \t\r\n\f]?|[^\r\n\f0-9a-fA-F]))`;
+  const escapedAtRules = new RegExp('@(' + identifierPiece + '+)', 'g');
+  const escapedFunctions = new RegExp('(' + identifierPiece + '+)\\s*\\(', 'g');
+  for (const token of [...mask.matchAll(escapedAtRules), ...mask.matchAll(escapedFunctions)]) {
+    if (token[1].includes('\\')) {
+      errors.push('unsupported-css-escaped-identifier: at offset ' + token.index);
+    }
+  }
   const readQuoted = (start, input = clean) => {
     const q = input[start];
     if (q !== '"' && q !== "'") return null;

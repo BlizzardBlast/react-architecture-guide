@@ -1811,3 +1811,36 @@ test('typed local primitive bindings permit domain vocabulary without allowing b
     'export const details = module.toUpperCase() + String(require);',
   ].join('\n'),
 }, result => assert.deepEqual(result.errors, [])));
+
+test('Vite plugins cannot silently change statically inspected aliases', () => {
+  for (const plugin of [
+    "{ name: 'override', config() { return { resolve: { alias: { '@safe': '/elsewhere' } } }; } }",
+    'react()',
+    'unknownPlugin',
+  ]) withFixture({
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@safe": fileURLToPath(new URL("./src/shared/lib/safe.ts", import.meta.url)) } }, plugins: [' + plugin + '] };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { '@safe': 'src/shared/lib/safe.ts' } }),
+    'shared/lib/safe.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unverifiable-vite-plugin-alias/));
+});
+
+test('empty plugin array does not block an otherwise valid alias map', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@safe": fileURLToPath(new URL("./src/shared/lib/safe.ts", import.meta.url)) } }, plugins: [] };',
+  '../architecture.config.json': JSON.stringify({ viteAliases: { '@safe': 'src/shared/lib/safe.ts' } }),
+  'shared/lib/safe.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('escaped CSS identifiers cannot bypass complete ownership enforcement', () => {
+  for (const css of ["@im\\70ort \"../../modules/orders/ui/private.css\";",".widget { background: u\\72l(\"../../modules/orders/ui/private.svg\"); }"]) withFixture({
+    'shared/ui/panel.css': css,
+    'modules/orders/ui/private.css': '.private { color: red }',
+    'modules/orders/ui/private.svg': '<svg/>',
+    'shared/ui/view.ts': 'import "./panel.css"; export const view = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-css-escaped-identifier/));
+});
+
+test('root verify includes orders architecture check', () => {
+  const rootManifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  assert.equal(rootManifest.scripts['check:orders'], 'node tools/check-boundaries.cjs examples/orders/src');
+  assert.match(rootManifest.scripts.verify, /npm run check:orders/);
+});

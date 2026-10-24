@@ -321,6 +321,17 @@ function inspectMarkdown(relative, contents, root) {
       continue;
     }
     inIndentedCode = false;
+    // A block fence takes precedence over inline HTML-comment syntax in its
+    // info string. Existing HTML comments still mask fence-like lines.
+    const marker = !inComment && fenceMarker.exec(text);
+    if (marker) {
+      const value = { char: marker[1][0], length: marker[1].length, line: i + 1, list: list.inList };
+      if (depth) quotedFence = { ...value, depth };
+      else fence = value;
+      codeSpanTicks = 0;
+      previousBlank = false;
+      continue;
+    }
     const line = maskHtmlComments(text);
     if (!line.trim()) {
       previousBlank = true;
@@ -351,14 +362,7 @@ function inspectMarkdown(relative, contents, root) {
       htmlBlock = { depth, close: null };
       continue;
     }
-    const marker = fenceMarker.exec(line);
-    if (marker) {
-      const value = { char: marker[1][0], length: marker[1].length, line: i + 1, list: list.inList };
-      if (depth) quotedFence = { ...value, depth };
-      else fence = value;
-      previousBlank = false;
-      continue;
-    }
+
     active.push({ text: line, number: i + 1 });
     // Only the immediately following line can be a reference title.
     // Restrict the opening line to a link label and destination without

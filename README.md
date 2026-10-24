@@ -106,3 +106,13 @@ The lightweight Markdown validator protects multiline backtick code spans within
 Reference definitions within CommonMark raw HTML blocks (including `div`, `pre` and `script`) are not active Markdown references. The documentation checker excludes them from its reference index. It also ensures a backtick inside a genuine HTML-comment block cannot close a code span started in a prior paragraph, while still recognizing actual multiline code spans within a paragraph. An earlier fixture expecting the opposite HTML-block precedence was corrected against CommonMark rendering.
 
 For checked TypeScript and JavaScript, declaration/property names such as `module` or `require` do not automatically refer to Node's CommonJS loaders. The checker allows normal destructuring keys and local primitive bindings/parameters with those names, but continues rejecting unresolved, untyped or dynamically aliased loader values. This remains a restricted static grammar; runtime and integration checks are required for executable behavior.
+
+### Review #5636101157: escaped CSS, Vite plugins and executable verification
+
+CSS identifier escaping can disguise a dependency-producing directive or function (`@import` or `url()`). This bounded CSS scanner now **rejects** escaped at-rule/function identifiers rather than silently omitting dependencies. Escapes inside quoted strings remain supported. Projects needing escaped identifiers should use a conforming CSS tokenizer.
+
+Executable Vite `plugins` can override the aliases seen in a static AST pass through their `config()` hooks. A configuration with statically declared aliases and a nonempty or opaque plugin expression now fails closed with `unverifiable-vite-plugin-alias`. A literal `plugins: []` is supported. Plugin-defined aliases without static declarations remain outside this static proof; actual Vite resolved-config checks and build verification are still required.
+
+The root `npm run verify` now includes `npm run check:orders` to enforce architectural boundaries in `examples/orders/src`. The Markdown scanner now recognizes fences before processing HTML-looking info-string text, while preserving real HTML-comment precedence.
+
+**Release status remains DRAFT.** Authentic lockfiles, clean installs, complete dependency-backed test/build suites, npm audits, effective bundler alias verification and browser/accessibility smoke tests still require execution in an environment with npm registry access.

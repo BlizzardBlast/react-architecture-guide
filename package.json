@@ -6,8 +6,9 @@
   "scripts": {
     "test:architecture": "node --test tools/check-boundaries.test.cjs tools/css-dependencies.test.cjs",
     "check:react": "node tools/check-boundaries.cjs examples/react-app/src",
-    "verify": "npm run test:docs && npm run test:architecture && npm --prefix examples/orders test && npm --prefix examples/react-app run verify",
-    "test:docs": "node --test tools/validate-docs.test.cjs && node tools/validate-docs.cjs"
+    "verify": "npm run test:docs && npm run test:architecture && npm run check:orders && npm --prefix examples/orders test && npm --prefix examples/react-app run verify",
+    "test:docs": "node --test tools/validate-docs.test.cjs && node tools/validate-docs.cjs",
+    "check:orders": "node tools/check-boundaries.cjs examples/orders/src"
   },
   "devDependencies": {
     "typescript": "5.9.3"
