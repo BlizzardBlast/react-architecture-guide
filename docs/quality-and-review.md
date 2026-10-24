@@ -1,38 +1,136 @@
-# Architecture and quality review
+# Architecture and quality review checklist
 
-## Ownership and dependencies
+Use this checklist when reviewing a change to the guide or adopting its rules in a production React project. A passing directory layout is not proof of architectural correctness.
 
-- [ ] Every new capability has a clear owning module.
-- [ ] `shared` remains domain-neutral and imports no business modules or app/routes.
-- [ ] Sibling-module interaction is composed or covered by a documented, acyclic public contract.
-- [ ] Consumers do not deep-import private module paths.
-- [ ] Internal files don't import their own barrel.
-- [ ] No runtime cycles; type-only conceptual cycles are examined.
-- [ ] Only justified interfaces/layers have been added.
-- [ ] In complex modules, domain/application imports point inward, infrastructure implements ports, and UI does not import infrastructure directly.
+## Ownership and dependency direction
 
-## React correctness, data and security
+- [ ] Business capabilities have clear owning modules; shared utilities remain domain-neutral.
+- [ ] `shared/` does not import modules, routes or application setup, including type-only and asset imports.
+- [ ] Sibling-module communication happens in app/routes or through a reviewed, acyclic public-API exception.
+- [ ] External consumers use module public `index.*` files. Internal code does not import its own barrel.
+- [ ] Pure domain/model/application and pure shared utilities do not depend on technical integrations, generated DTOs or presentation assets.
+- [ ] JSON, CSS/images, and JS/TS source imports stay within their physical ownership and source-root boundaries, including symlinks and path aliases.
+- [ ] Transitive CSS/Less/Sass imports, CSS url() and quoted image-set() alternatives follow shared, sibling-module and *intra-module layer* restrictions.
+- [ ] Less/SCSS line comments cannot trigger phantom dependencies; valid Less literal import options are recognized and unsupported options fail closed.
+- [ ] A module does not mix simple (`api/model`) and complex (`domain/application/infrastructure`) layers without a reviewed, justified migration exception; direct cross-mode imports remain forbidden.
+- [ ] Cross-module type-only cycles and runtime cycles are rejected; internal type-only cycles are reviewed.
+- [ ] Vite globs and computed dynamic imports fail closed; static new URL/Worker references obey source ownership, but only worker and true executable imports create runtime-cycle edges.
+- [ ] Vite-only aliases have matching targets in `architecture.config.json` `viteAliases`; no trailing-slash alias names, and unresolved spreads, shorthand and computed resolve configuration fail closed.
+- [ ] Query-modified Vite asset imports resolve their physical filenames while preserving ownership and runtime graph checks.
+- [ ] Migration exceptions require own property keys, not inherited Object prototype fields.
+- [ ] Complex domain/application/infrastructure/UI layers point inward as documented, without unnecessary DI/repositories.
 
-- [ ] Domain invariants are pure and tested including invalid/boundary inputs.
-- [ ] Rendering is pure, Hooks Rules are followed, and Effects synchronize with external systems.
-- [ ] Loading, empty, failure, retry and mutation paths are handled.
-- [ ] Query identity includes data-changing inputs and proper security scope.
-- [ ] Server-returned data is runtime-validated; generated types are not mistaken for validation.
-- [ ] Critical authorization and validation are enforced by the server.
-- [ ] Accessible semantic markup, keyboard behavior and responsive layouts are covered appropriately.
-- [ ] SSR/client and secret boundaries are respected for framework applications.
+## React, state and security
 
-## Verification locally and remotely
+- [ ] Domain rules have tests for valid, invalid and boundary inputs.
+- [ ] Components render purely; Hooks follow their rules; Effects synchronize with external systems.
+- [ ] Query keys include source/security scope; catalog and checkout expose accessible loading, empty, error and retry states.
+- [ ] Saving cannot be accidentally submitted twice while pending; a rejected save releases guards and enables retry.
+- [ ] Product/service changes during a pending save do not unlock another save.
+- [ ] Inputs have stable accessible labels, validation associations and meaningful status announcements; a save failure remains visible after switching products.
+- [ ] React lint checks enforce Hooks, TypeScript and JSX accessibility rules in the local verification command.
+- [ ] Untrusted server data is validated; authorization/idempotency is enforced by a trusted backend.
+- [ ] SSR services and query clients are scoped correctly; server-only data is not bundled into clients.
 
-~~~bash
-python3 scripts/validate_docs.py
-cd examples/orders
-npm install
-npm test
-~~~
+## Required validation
 
-The documentation checker validates only local markdown targets and code-fence balance. It is **not** a TypeScript import-graph analyzer. For production apps add an actual analyzer (e.g., dependency-cruiser), plus targeted tests, formatting, typechecks and security checks to the **existing** quality gate.
+```sh
+npm ci
+npm --prefix examples/orders ci
+npm --prefix examples/react-app ci
+npm run verify
+npm audit
+npm --prefix examples/orders audit
+npm --prefix examples/react-app audit
+```
 
-Batch research, code changes and review findings; validate locally; push once per coherent change. Do not repeatedly trigger GitHub Actions unnecessarily, but preserve all required checks.
+Also smoke-test browser navigation and checkout flows. These commands require genuine registry-backed lockfiles; install dependencies and commit lockfiles before asserting a reproducible run. The source checker is not a substitute for TypeScript, React runtime tests, a vulnerability audit or a comprehensive monorepo dependency graph.
 
-Do not claim SOLID compliance or tests passed from folder appearance alone.
+Review changes and findings together, validate locally, and push once per coherent batch. **Never remove required tests or security checks just to save GitHub Actions minutes.** If a check is blocked, state why, keep the PR in draft, and do not claim success.
+
+### Vite build and plugin integration scope
+
+- [ ] Vite plugins cannot silently create or override aliases, including when the static alias map is empty; document and independently verify any narrowly trusted plugin versions.
+- [ ] The real bundler uses only checked root and entrypoint sources. Unsupported custom roots, Rollup/lib/SSR inputs, multi-environment builders and unscanned HTML module/style entries fail static verification.
+- [ ] Run an actual Vite resolved-config/build check for supported plugin transforms: static syntax constraints are not a runtime proof.
+- [ ] Markdown reference definitions inside multiline inline code are excluded and do not hide active links.
+
+### Runtime source-injection and inline HTML assurance
+
+- [ ] Reject Vite `jsxInject`, CSS preprocessor `additionalData` and other unsupported nonempty computed `esbuild`/`css` settings unless transformed-code dependency edges are independently verified.
+- [ ] Check for executable HTML event attributes, JavaScript URL schemes and encoded URI values, `srcdoc`, inline import maps and redirect schemes. None may create unchecked runtime dependencies.
+- [ ] Inline `<style>` and `style=` CSS must not bypass ownership checks. Use reviewed source stylesheets and preserve genuinely safe inert HTML attributes and JSON data.
+- [ ] Verify the final Vite output and browser behavior independently, even where static syntax is accepted; do not claim that a handwritten HTML token scanner implements the browser parser.
+
+### HTML5 and Vite public output assurance
+
+- [ ] Parse `index.html` using a standards-based HTML5 tokenizer: comment handling in `title`/`textarea`, inert JSON scripts and quoted greater-than characters must agree with a browser.
+- [ ] Audit the default Vite `public/` output; reject executable/unknown public formats and symlinks, and allow custom `publicDir` only when explicitly verifiable.
+- [ ] Resolve all supported HTML module/script, CSS and media URLs (`src`, `srcset`, icons, modulepreload, relevant asset links) against physical files, preserving module ownership restrictions.
+- [ ] Reject unsupported HTML browsing contexts, inline execution/styling and ambiguous resource grammars instead of silently assuming the content is inert.
+- [ ] Run a real Vite build and browser/security/accessibility smoke tests to confirm the parsed HTML dependencies correspond to served/bundled output.
+
+### Worker, Vite HTML metadata and multipage verification
+
+- [ ] Verify that worker-specific `plugins`, `rollupOptions` or dynamic options cannot inject unchecked edges; only omitted or empty literal worker configuration is currently supported.
+- [ ] Include Vite-recognized `link.imagesrcset` candidates and allowed `meta[content]` image/media variants in the same physical ownership checks applied to `img.srcset`.
+- [ ] Reject unaudited secondary HTML pages accessible in Vite dev, including sibling and nested `.html`/`.htm`; separately audit `public/` assets.
+- [ ] Keep existing pre-refactor architecture fixtures aligned with precise error names, without weakening genuinely invalid-input tests.
+- [ ] Verify actual worker/main builds and dev-server HTML behavior as part of the outstanding complete quality and security gates.
+
+### Nested HTML exclusions, CSS entrypoint ownership and symlink failures
+
+- [ ] Apply Vite HTML discovery exclusions to **specific root-relative output/vendor directories**, not every nested directory with a matching basename.
+- [ ] Treat remote/data `stylesheet` and `preload as=style` links as active CSS dependencies that require explicit review and transitive checking; preserve intentional inert remote media.
+- [ ] Handle unreadable/dangling symlinks as validation diagnostics without throwing, and reject symlinked HTML documents or directories that could hide additional entrypoints.
+- [ ] Exercise both negative bypass cases and harmless controls in the installed architecture tests, plus actual Vite dev-server HTML and stylesheet behavior before merge.
+
+### Vite disabled publicDir, remote stylesheet directives and source symlinks
+
+- [ ] Do not conflate `publicDir:false` with removal of project-root HTML serving; reject unaudited root `public/**/*.html` in this configuration.
+- [ ] Reject unverified external or `data:` stylesheet directives introduced by *local* CSS/SCSS `@import`, `@use` and `@forward` while allowing audited Sass built-ins and decorative remote media.
+- [ ] Convert broken source and stylesheet realpath/read failures into actionable diagnostics; check dangling/valid internal/external symlink fixtures.
+- [ ] Run complete architecture tests and real Vite dev/build/browser checks before declaring the release gates passed.
+
+### First-party discovery and actual Vite development reachability
+
+- [ ] Scan every owned JS/TS and CSS/Sass/Less file under `src/`, including nested `dist`, `coverage`, `build` or `node_modules` folders; verify a transitive private-module import cannot hide behind a skipped basename.
+- [ ] Reject/audit root `dist`, `build`, `coverage`, `.next` and `.vite` HTML pages that remain reachable during Vite development; confirm with actual HTTP requests.
+- [ ] With `publicDir:false`, validate active/unknown root public assets (JS/CSS/SVG and symlinks) as well as secondary HTML; preserve allowlisted inert media.
+- [ ] Treat root third-party `node_modules/` and Git metadata as explicitly scoped exceptions, not proof that Vite never serves them. Perform a real dev/build graph audit before merging.
+
+### Import provenance and stable build artifacts
+
+- [ ] Distinguish legitimate bare imports into resolver-discovered installed package directories from relative/project-alias/baseUrl imports targeting arbitrary `node_modules`-named folders; test both TypeScript external-library metadata and ownership.
+- [ ] Verify first-party source folders that happen to be named `node_modules` remain owned and subject to all purity/module rules.
+- [ ] Run two actual native React builds consecutively without cleaning the checkout, verifying generated output stays outside Vite's dev-served root and neither check produces false architecture errors.
+- [ ] Confirm `npm run preview` loads the out-of-root production output and `/dist/hidden.html` inside the app root is still rejected by the architecture checker.
+
+### Import resolution and package CSS ownership
+
+- [ ] Fail closed for installed *bare stylesheet imports* even when TypeScript's module resolver returns no module; include CSS, `.module.css`, Sass/Less and query strings.
+- [ ] Keep regular first-party local CSS and explicitly mapped aliases in the owned stylesheet scan; do not mistakenly reject plain JS package imports.
+- [ ] Resolve pure-layer `baseUrl` JS/TS imports before labeling them external; allow legitimate first-party pure utilities and reject actual external packages and forbidden cross-layer imports.
+- [ ] Validate actual Vite stylesheet graph behavior before adding support for any externally sourced package stylesheet; never replace verified source ownership with a broad dependency allowlist.
+
+### Extensionless package stylesheet exports
+
+- [ ] Check import targets from *matching* package `exports` (including conditional TypeScript declaration targets and CSS import targets), rather than inferring solely from import specifier suffixes.
+- [ ] Fail closed on extensionless CSS root/subpath exports, scoped/wildcard cases, bare Stylus imports and unresolved active package imports; do not silently accept unknown bundle edges.
+- [ ] Preserve legitimate JS package exports even when the same package exposes separate CSS subpaths; preserve owned first-party aliases and type-only/test-file controls.
+- [ ] Verify these cases against actual Vite resolved import graphs and the pinned TypeScript version before release.
+
+
+### Executable configuration and package mapping assurance
+
+- [ ] npm-script shell redirection, interpolation, and opaque execution cannot change a Vite config between static checking and building.
+- [ ] Vite config imports only trusted integration modules, and unknown property initializers, computed test settings or resolution options fail closed.
+- [ ] Nearest-package self-name `exports` and `#imports` conditionals cannot disguise a CSS runtime target as an owned TypeScript declaration.
+- [ ] Automatically discovered PostCSS configuration (from project or ancestor files/package metadata) is rejected unless the transformed CSS graph is independently verified.
+- [ ] The authentic registry-backed lockfiles, pinned suites, two actual Vite builds, dependency audits and browser/accessibility checks are mandatory before merge.
+
+### Type-only and token-boundary regression assurance
+
+- [ ] Runtime package import maps are checked independently of TypeScript-only alias resolution, including `#name?raw`, chained `#imports`, third-party CSS export redirects and same-package self-exports.
+- [ ] Fully erased type imports do not generate CSS runtime diagnostics; inline type-only named bindings preserved as runtime empty imports still receive dependency checks.
+- [ ] Source CSS scans distinguish complete `url()`, `image-set()` and `load-css()` function identifiers from longer custom function names, including hyphenated and non-ASCII prefixes.

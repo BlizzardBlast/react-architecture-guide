@@ -91,3 +91,15 @@ Prefer composition across sibling modules. Stable one-way public dependencies ar
 ## Related materials
 
 [Dependency rules](dependency-rules.md) · [Placement](placement-guide.md) · [SOLID](solid-in-react.md) · [Example](../examples/orders/README.md)
+
+## Purity and boundary check behavior
+
+Pure `domain`, `model` and `application` files may import their permitted module layers and audited pure shared utilities, but not generated transport clients or technical `shared/api` services. A genuinely generic and pure `shared/lib` helper must also avoid React and infrastructure imports; its code is checked like a pure module. See [enforced dependency rules](dependency-rules.md).
+
+Static asset imports from presentation code are resolved separately from TypeScript dependencies. An alias referring to a workspace file outside the checked source root cannot be assumed safe without additional project-specific analysis.
+
+## Enforced module mode and migrations
+
+The checker detects mixed simple (`api/model`) and complex (`domain/application/infrastructure`) layers within a module and reports `mixed-module-layout`. During a reviewed incremental migration, declare a nonempty reason in `architecture.config.json` under `allowMixedLayouts` for the affected module. This does not permit importing directly across the two mode-specific structures. See [dependency rules](dependency-rules.md).
+
+Module ownership is determined using physical real paths for source files, so aliases and symlinks cannot make code appear to belong to a different layer or module. Missing or inaccessible package dependencies still require full typechecking and installation validation.

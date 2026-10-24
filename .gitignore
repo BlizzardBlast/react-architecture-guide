@@ -147,3 +147,6 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Vite reference output is intentionally outside examples/react-app (dev-served root)
+/.vite-build/
