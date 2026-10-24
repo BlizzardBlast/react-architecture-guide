@@ -878,6 +878,17 @@ function verifyViteAliases(projectDir, policy, errors) {
     errors.push('unsupported-vite-build-entry: custom build environments cannot be verified statically');
   }
 
+  // Vite can inject imports *after* the source import and stylesheet scan.
+  // Until the transformed module graph is verified, permit only inert empty
+  // option objects (and esbuild:false) instead of certifying unchecked edges.
+  for (const name of ['esbuild', 'css']) {
+    const setting = top.get(name);
+    if (!setting) continue;
+    const empty = ts.isObjectLiteralExpression(setting) && setting.properties.length === 0;
+    const disabled = name === 'esbuild' && setting.kind === ts.SyntaxKind.FalseKeyword;
+    if (!empty && !disabled) errors.push(
+      'unverifiable-vite-transforms: ' + name + ' may inject code or stylesheet dependencies');
+  }
   // Plugins can ADD aliases even when resolve.alias is absent; rejecting
   // only when aliases.size > 0 leaves an unchecked dependency-resolution path.
   // The reference app may use the exact pinned React JSX/Fast Refresh plugin
@@ -979,6 +990,99 @@ function verifyViteHtmlEntrypoints(projectDir, sourceRoot, errors) {
     const html = fs.readFileSync(htmlFile, 'utf8')
       .replace(/<!--[\s\S]*?-->/g, '');
     const checkedRoot = fs.realpathSync(sourceRoot);
+    // Reject executable/asset-bearing HTML that cannot be assigned source
+    // ownership. This is a bounded fail-closed tag/attribute scan, not a full
+    // HTML parser; actual Vite and browser integration checks remain required.
+    // Quoted '>' characters cannot terminate a tag while checking attributes.
+    for (let offset = 0; offset < html.length;) {
+      if (html[offset] !== '<') { offset++; continue; }
+      if (html.startsWith('<!', offset) || html.startsWith('<?', offset)) {
+        const end = html.indexOf('>', offset + 2);
+        if (end < 0) {
+          errors.push('unsupported-vite-html-inline: malformed HTML declaration');
+          break;
+        }
+        offset = end + 1;
+        continue;
+      }
+      let pos = offset + 1;
+      const closing = html[pos] === '/';
+      if (closing) pos++;
+      const tagName = /^[A-Za-z][A-Za-z\d:-]*/.exec(html.slice(pos));
+      if (!tagName) { offset++; continue; }
+      const tag = tagName[0].toLowerCase();
+      pos += tagName[0].length;
+      if (tag === 'style' && !closing) {
+        errors.push('unsupported-vite-html-inline: inline <style> must move to a checked CSS file');
+      }
+      const names = new Set();
+      let finished = false;
+      while (pos < html.length) {
+        while (/\s/.test(html[pos] || '')) pos++;
+        if (html[pos] === '>' || html[pos] === '/' && html[pos + 1] === '>') {
+          offset = pos + (html[pos] === '>' ? 1 : 2);
+          finished = true;
+          break;
+        }
+        const attr = /^[^\s=/>"'`<]+/.exec(html.slice(pos));
+        if (!attr) {
+          errors.push('unsupported-vite-html-inline: malformed attribute in <' + tag + '>');
+          offset = pos + 1;
+          finished = true;
+          break;
+        }
+        const key = attr[0].toLowerCase();
+        pos += attr[0].length;
+        while (/\s/.test(html[pos] || '')) pos++;
+        let value = '';
+        if (html[pos] === '=') {
+          pos++;
+          while (/\s/.test(html[pos] || '')) pos++;
+          const quote = html[pos] === '"' || html[pos] === "'" ? html[pos++] : '';
+          const from = pos;
+          if (quote) {
+            while (pos < html.length && html[pos] !== quote) pos++;
+            if (pos >= html.length) {
+              errors.push('unsupported-vite-html-inline: unterminated quoted attribute');
+              break;
+            }
+            value = html.slice(from, pos++);
+          } else {
+            while (pos < html.length && !/[\s>]/.test(html[pos])) pos++;
+            value = html.slice(from, pos);
+            if (pos === from || /["'`<]/.test(value)) {
+              errors.push('unsupported-vite-html-inline: malformed unquoted attribute');
+            }
+          }
+        }
+        if (names.has(key)) {
+          errors.push('unsupported-vite-html-inline: duplicate attribute ' + key);
+        }
+        names.add(key);
+        if (/^on[a-z]/.test(key)) {
+          errors.push('unsupported-vite-html-inline: executable event handler ' + key);
+        }
+        if (key === 'style' || key === 'srcdoc') {
+          errors.push('unsupported-vite-html-inline: unchecked inline ' + key);
+        }
+        // Refuse script-capable/obfuscated URI values rather than partially
+        // HTML-decoding them. Literal URLs with character references must
+        // be validated by a real HTML tokenizer/bundler-aware integration.
+        if (/^(?:href|src|action|formaction|xlink:href|data|poster|srcset)$/.test(key) &&
+            (/^\s*(?:java\s*script|vb\s*script):/i.test(value) ||
+             /&(?:#\d+|#x[\da-f]+|[a-z][a-z\d]+);?/i.test(value) ||
+             /[\u0000-\u001f]/.test(value))) {
+          errors.push('unsupported-vite-html-inline: unverified URL in ' + key);
+        }
+        if (tag === 'meta' && key === 'http-equiv' && value.toLowerCase() === 'refresh') {
+          errors.push('unsupported-vite-html-inline: meta refresh is not verified');
+        }
+      }
+      if (!finished) {
+        errors.push('unsupported-vite-html-inline: unterminated <' + tag + '> tag');
+        break;
+      }
+    }
     function htmlAttribute(attributes, key) {
       const match = new RegExp('(?:^|\\s)' + key +
         '\\s*=\\s*(?:"([^"]*)"|\x27([^\x27]*)\x27|([^\\s>]+))', 'i').exec(attributes);
@@ -1000,7 +1104,7 @@ function verifyViteHtmlEntrypoints(projectDir, sourceRoot, errors) {
     const scripts = /<script\b([^>]*?)>([\s\S]*?)<\/script\s*>/gi;
     for (const match of html.matchAll(scripts)) {
       const type = htmlAttribute(match[1], 'type');
-      if (type && /^(?:application\/json|application\/ld\+json|importmap)$/i.test(type)) continue;
+      if (type && /^(?:application\/json|application\/ld\+json)$/i.test(type)) continue;
       const spec = htmlAttribute(match[1], 'src');
       if (type !== 'module' || !spec || match[2].trim()) {
         errors.push('unsupported-vite-html-entry: script entry must be a module with an explicit src and no inline code');

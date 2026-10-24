@@ -54,3 +54,10 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] The real bundler uses only checked root and entrypoint sources. Unsupported custom roots, Rollup/lib/SSR inputs, multi-environment builders and unscanned HTML module/style entries fail static verification.
 - [ ] Run an actual Vite resolved-config/build check for supported plugin transforms: static syntax constraints are not a runtime proof.
 - [ ] Markdown reference definitions inside multiline inline code are excluded and do not hide active links.
+
+### Runtime source-injection and inline HTML assurance
+
+- [ ] Reject Vite `jsxInject`, CSS preprocessor `additionalData` and other unsupported nonempty computed `esbuild`/`css` settings unless transformed-code dependency edges are independently verified.
+- [ ] Check for executable HTML event attributes, JavaScript URL schemes and encoded URI values, `srcdoc`, inline import maps and redirect schemes. None may create unchecked runtime dependencies.
+- [ ] Inline `<style>` and `style=` CSS must not bypass ownership checks. Use reviewed source stylesheets and preserve genuinely safe inert HTML attributes and JSON data.
+- [ ] Verify the final Vite output and browser behavior independently, even where static syntax is accepted; do not claim that a handwritten HTML token scanner implements the browser parser.

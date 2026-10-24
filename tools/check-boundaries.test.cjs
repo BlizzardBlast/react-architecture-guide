@@ -1917,3 +1917,43 @@ test('default Vite HTML entry cannot bypass checking even without vite.config', 
   '../outside/main.ts': 'export const x = 1;',
   'app/start.ts': 'export const x = 1;',
 }, result => assert.match(result.errors.join(' '), /unsupported-vite-html-entry/)));
+
+test('Vite post-source JS/Sass dependency injection never receives static source-graph approval', () => {
+  for (const setting of [
+    'esbuild: { jsxInject: "import \'../../modules/orders/ui/private.ts\';" }',
+    'css: { preprocessorOptions: { scss: { additionalData: "@use \'../../modules/orders/ui/private.scss\';" } } }',
+    'esbuild: makeEsbuildOptions()',
+    'css: makeStyleOptions()',
+    'css: { modules: { generateScopedName: "x" } }',
+  ]) withFixture({
+    '../vite.config.ts': 'export default { plugins: [], ' + setting + ' };',
+    'shared/ui/component.tsx': 'export const View = () => null;',
+    'modules/orders/ui/private.ts': 'export const secret = true;',
+  }, result => assert.match(result.errors.join(' '), /unverifiable-vite-transforms/, setting));
+});
+
+test('empty transform options and explicitly disabled esbuild remain safe static configurations', () => {
+  for (const setting of ['esbuild: {}, css: {}', 'esbuild: false']) withFixture({
+    '../vite.config.ts': 'export default { plugins: [], ' + setting + ' };',
+    'app/start.ts': 'export const value = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('HTML event handlers, inline styles and executable URLs fail closed', () => {
+  for (const [name, html] of [["onload","<script type=\"module\" src=\"/src/app/start.ts\" onload=\"import('/src/modules/orders/ui/private.ts')\"></script>"],["onerror","<img onerror=\"import('/src/modules/orders/ui/private.ts')\"><script type=\"module\" src=\"/src/app/start.ts\"></script>"],["onclick","<button onclick=\"import('/src/modules/orders/ui/private.ts')\">Click</button><script type=\"module\" src=\"/src/app/start.ts\"></script>"],["quoted greater-than","<button data-example=\"a > b\" onpointerdown=\"import('/src/modules/orders/ui/private.ts')\">Click</button>"],["inline CSS import","<style>@import url(\"/src/modules/orders/ui/private.css\");</style><script type=\"module\" src=\"/src/app/start.ts\"></script>"],["inline CSS URL","<style>.x{background:url(\"/src/modules/orders/ui/private.css\")}</style>"],["CSS style attribute","<div style=\"background:url('/src/modules/orders/ui/private.css')\"></div>"],["javascript URL","<a href=\"javascript:import('/src/modules/orders/ui/private.ts')\">Click</a>"],["encoded javascript","<a href=\"java&#x73;cript:alert(1)\">Click</a>"],["srcdoc","<iframe srcdoc=\"<script>import('/src/private.ts')</script>\"></iframe>"],["import map","<script type=\"importmap\">{\"imports\":{\"x\":\"/src/modules/orders/ui/private.ts\"}}</script>"],["meta refresh","<meta http-equiv=\"refresh\" content=\"0;url=javascript:alert(1)\">"],["inline stylesheet attribute","<p STYLE=\"color:red\">hello</p>"]]) withFixture({
+    '../index.html': html,
+    'app/start.ts': 'export const start = true;',
+    'app/base.css': 'body { color: black; }',
+    'modules/orders/ui/private.ts': 'export const privateValue = true;',
+    'modules/orders/ui/private.css': '.private { color: red; }',
+  }, result => assert.match(result.errors.join(' '),
+    /unsupported-vite-html-(?:entry|inline)/, name));
+});
+
+test('ordinary HTML attributes, inert scripts and checked stylesheet entries remain valid', () => {
+  for (const html of ["<div data-example=\"x > y\" aria-label=\"Hello\">Hello</div><script type=\"module\" src=\"/src/app/start.ts\"></script>","<!-- <style>@import url(\"evil.css\");</style> --><script type=\"module\" src=\"/src/app/start.ts\"></script>","<link rel=\"stylesheet\" href=\"/src/app/base.css\"><script type=\"application/json\">{\"hello\":\"world\"}</script><script type=\"module\" src=\"/src/app/start.ts\"></script>","<div data-label=\"onerror=not-an-attribute\"></div><script type=\"module\" src=\"/src/app/start.ts\"></script>"]) withFixture({
+    '../index.html': html,
+    'app/start.ts': 'export const start = true;',
+    'app/base.css': 'body { color: black; }',
+  }, result => assert.deepEqual(result.errors, []));
+});

@@ -126,3 +126,11 @@ Custom `root`, nonempty `build` configuration, `environments` and `builder` opti
 The Markdown reference pre-index pass now tracks multiline inline-code spans using the same closer/paragraph rules as active-line parsing, preventing apparent definitions *inside code* from masking real HTML comments or inventing missing-link failures. Regression fixtures cover false definitions and real definitions following code spans.
 
 This PR remains draft while authentic lockfiles, clean installs, full TypeScript/React/orders suites, vulnerability audits, Vite integration and browser/a11y checks are unavailable.
+
+### Review #5636476418: transform injection and inline HTML dependencies
+
+The static Vite checker now fails closed for nonempty or computed `esbuild` and `css` configuration objects, because options such as `esbuild.jsxInject` and `css.preprocessorOptions.scss.additionalData` can inject dependencies **after** the checked source graph was collected. Empty literal objects remain supported; `esbuild: false` is an explicit non-injecting exception. Projects requiring other Vite transform or preprocessor settings must add a real transformed-module graph check rather than assuming source-only verification is sufficient.
+
+The default `index.html` scanner now rejects executable inline event-handler attributes (e.g. `onload`, `onclick` and `onerror`), inline `<style>` and `style=` content, embedded `srcdoc`, executable or entity-obfuscated URLs, and inline import maps. Move application logic into importable, checked source modules and styles into checked CSS files linked from HTML or imported by source. Ordinary attributes, accessibility metadata, static module entrypoints and linked stylesheets remain supported. This is a deliberately constrained HTML subset, not a complete browser HTML parser. Actual Vite/browser testing is still required.
+
+The review findings were addressed together without relaxing source, quality or security gates. Keep the PR in draft until authentic registry-based lockfiles, complete clean installs, dependency audits, actual Vite builds and browser/a11y checks pass.
