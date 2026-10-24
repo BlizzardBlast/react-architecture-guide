@@ -47,3 +47,10 @@ npm --prefix examples/react-app audit
 Also smoke-test browser navigation and checkout flows. These commands require genuine registry-backed lockfiles; install dependencies and commit lockfiles before asserting a reproducible run. The source checker is not a substitute for TypeScript, React runtime tests, a vulnerability audit or a comprehensive monorepo dependency graph.
 
 Review changes and findings together, validate locally, and push once per coherent batch. **Never remove required tests or security checks just to save GitHub Actions minutes.** If a check is blocked, state why, keep the PR in draft, and do not claim success.
+
+### Vite build and plugin integration scope
+
+- [ ] Vite plugins cannot silently create or override aliases, including when the static alias map is empty; document and independently verify any narrowly trusted plugin versions.
+- [ ] The real bundler uses only checked root and entrypoint sources. Unsupported custom roots, Rollup/lib/SSR inputs, multi-environment builders and unscanned HTML module/style entries fail static verification.
+- [ ] Run an actual Vite resolved-config/build check for supported plugin transforms: static syntax constraints are not a runtime proof.
+- [ ] Markdown reference definitions inside multiline inline code are excluded and do not hide active links.

@@ -861,13 +861,51 @@ function verifyViteAliases(projectDir, policy, errors) {
       }
     }
   }
-  // A Vite plugin config() hook can override resolve.alias after the AST
-  // check. The static map is not proof of effective aliases with plugins.
-  // Fail closed for alias-bearing configs with executable plugin expressions.
+  // Vite uses the project root and build inputs to select actual entrypoints.
+  // A scan of project/src cannot prove custom roots, Rollup inputs, libraries
+  // or multi-environment builders. Fail closed until a resolved bundler graph
+  // checker can explicitly cover every entrypoint and its dependencies.
+  if (top.has('root') &&
+      !(ts.isStringLiteral(top.get('root')) && top.get('root').text === '.')) {
+    errors.push('unsupported-vite-build-entry: non-default Vite root is outside verified source scope');
+  }
+  if (top.has('build') &&
+      !(ts.isObjectLiteralExpression(top.get('build')) &&
+        top.get('build').properties.length === 0)) {
+    errors.push('unsupported-vite-build-entry: custom build options or entrypoints require resolved bundler verification');
+  }
+  if (top.has('environments') || top.has('builder')) {
+    errors.push('unsupported-vite-build-entry: custom build environments cannot be verified statically');
+  }
+
+  // Plugins can ADD aliases even when resolve.alias is absent; rejecting
+  // only when aliases.size > 0 leaves an unchecked dependency-resolution path.
+  // The reference app may use the exact pinned React JSX/Fast Refresh plugin
+  // without custom options, provided it has no declared aliases. This is a
+  // deliberately narrow syntactic exception, not generic plugin trust.
   const plugins = top.get('plugins');
-  if (aliases.size && plugins &&
-      !(ts.isArrayLiteralExpression(plugins) && plugins.elements.length === 0)) {
-    errors.push('unverifiable-vite-plugin-alias: aliases with executable plugins require actual Vite resolved-config verification');
+  const pinnedReact = (() => {
+    if (!plugins || !ts.isArrayLiteralExpression(plugins) ||
+        plugins.elements.length !== 1 || aliases.size ||
+        Object.keys(policy.viteAliases).length) return false;
+    const invocation = plugins.elements[0];
+    if (!ts.isCallExpression(invocation) ||
+        !ts.isIdentifier(invocation.expression) ||
+        invocation.expression.text !== 'react' ||
+        invocation.arguments.length !== 0) return false;
+    const importedReact = source.statements.some(statement =>
+      ts.isImportDeclaration(statement) &&
+      literalString(statement.moduleSpecifier) === '@vitejs/plugin-react' &&
+      !statement.importClause?.isTypeOnly &&
+      statement.importClause?.name?.text === 'react');
+    if (!importedReact || !fs.existsSync(packageFile)) return false;
+    const manifest = JSON.parse(fs.readFileSync(packageFile, 'utf8'));
+    return (manifest.devDependencies?.['@vitejs/plugin-react'] ||
+      manifest.dependencies?.['@vitejs/plugin-react']) === '4.7.0';
+  })();
+  if (plugins && !(ts.isArrayLiteralExpression(plugins) &&
+      plugins.elements.length === 0) && !pinnedReact) {
+    errors.push('unverifiable-vite-plugin-alias: plugin hooks may add or override aliases; verify effective Vite config');
   }
   // Vite aliases are ordered rules. The checker map must preserve this order
   // so overlapping prefixes cannot resolve to a different physical target.
@@ -930,6 +968,61 @@ function verifyViteAliases(projectDir, policy, errors) {
   }
 }
 
+
+
+function verifyViteHtmlEntrypoints(projectDir, sourceRoot, errors) {
+  // The default Vite HTML entry may still point at an unscanned module,
+  // even if there is no custom root/build config. Check the local entry
+  // references conservatively; a real bundler graph check remains mandatory.
+  const htmlFile = path.join(projectDir, 'index.html');
+  if (fs.existsSync(htmlFile)) {
+    const html = fs.readFileSync(htmlFile, 'utf8')
+      .replace(/<!--[\s\S]*?-->/g, '');
+    const checkedRoot = fs.realpathSync(sourceRoot);
+    function htmlAttribute(attributes, key) {
+      const match = new RegExp('(?:^|\\s)' + key +
+        '\\s*=\\s*(?:"([^"]*)"|\x27([^\x27]*)\x27|([^\\s>]+))', 'i').exec(attributes);
+      return match ? match[1] ?? match[2] ?? match[3] : null;
+    }
+    function validateHtmlAsset(spec, label) {
+      if (!spec || /^(?:https?:|data:|\/\/|#)/i.test(spec) ||
+          /[?#]/.test(spec) || spec.includes('\\')) {
+        errors.push('unsupported-vite-html-entry: unverified ' + label + ': ' + spec);
+        return;
+      }
+      const candidate = path.resolve(projectDir, spec.startsWith('/') ? '.' + spec : spec);
+      if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile() ||
+          !isWithinRoot(fs.realpathSync(candidate), checkedRoot)) {
+        errors.push('unsupported-vite-html-entry: ' + label +
+          ' must be a local file in the inspected source tree: ' + spec);
+      }
+    }
+    const scripts = /<script\b([^>]*?)>([\s\S]*?)<\/script\s*>/gi;
+    for (const match of html.matchAll(scripts)) {
+      const type = htmlAttribute(match[1], 'type');
+      if (type && /^(?:application\/json|application\/ld\+json|importmap)$/i.test(type)) continue;
+      const spec = htmlAttribute(match[1], 'src');
+      if (type !== 'module' || !spec || match[2].trim()) {
+        errors.push('unsupported-vite-html-entry: script entry must be a module with an explicit src and no inline code');
+        continue;
+      }
+      validateHtmlAsset(spec, 'script');
+    }
+    const links = /<link\b([^>]*?)>/gi;
+    for (const match of html.matchAll(links)) {
+      if (/\bstylesheet\b/i.test(htmlAttribute(match[1], 'rel') || '')) {
+        validateHtmlAsset(htmlAttribute(match[1], 'href'), 'stylesheet');
+      }
+    }
+    // The regex above is deliberately bounded: reject malformed/opaque script
+    // markup rather than claiming it has been inspected.
+    const allScriptOpeners = (html.match(/<script\b/gi) || []).length;
+    const parsedScriptOpeners = [...html.matchAll(scripts)].length;
+    if (allScriptOpeners !== parsedScriptOpeners) {
+      errors.push('unsupported-vite-html-entry: script markup cannot be statically verified');
+    }
+  }
+}
 
 
 // One ownership/layer policy for script, stylesheet and static-asset edges.
@@ -1092,6 +1185,7 @@ function check(srcDir) {
   const options = configFor(path.dirname(root)).options;
   const policy = loadBoundaryConfig(path.dirname(root));
   verifyViteAliases(path.dirname(root), policy, errors);
+  verifyViteHtmlEntrypoints(path.dirname(root), root, errors);
   const files = walk(root).map(f => path.resolve(f));
   if (files.length === 0) errors.push('no-source-files: No supported source files found');
   const known = new Set(files);

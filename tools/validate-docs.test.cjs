@@ -537,3 +537,13 @@ test('real HTML comments with fence-like content still hide inactive links', () 
   '<!--\n~~~md\n[Hidden](missing.md)\n~~~\n-->\n[Broken](missing2.md)',
   root => assert.deepEqual(checkAll(root).issues, ['README.md:6: missing local link: missing2.md']),
 ));
+
+test('reference pre-indexing excludes pseudo-definitions inside multiline code spans', () => {
+  for (const markdown of ["`literal\n[foo <!--]: README.md\nliteral`\n[foo <!--]\n[Inactive](missing.md)\n-->\n[Broken](missing2.md)","Before `code\n[foo <!--]: README.md\nend`\n[foo <!--]\n[Inactive](missing.md)\n-->\n[Broken](missing2.md)"]) fixture(markdown, root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:7: missing local link: missing2.md']),
+  );
+});
+test('real reference definitions following completed multiline spans remain usable', () => fixture(
+  "Before `code\nstill code`\n\n[foo <!--]: README.md\n[foo <!--]\n[Broken](missing.md)",
+  root => assert.deepEqual(checkAll(root).issues, ['README.md:6: missing local link: missing.md']),
+));

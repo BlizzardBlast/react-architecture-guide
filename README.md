@@ -116,3 +116,13 @@ Executable Vite `plugins` can override the aliases seen in a static AST pass thr
 The root `npm run verify` now includes `npm run check:orders` to enforce architectural boundaries in `examples/orders/src`. The Markdown scanner now recognizes fences before processing HTML-looking info-string text, while preserving real HTML-comment precedence.
 
 **Release status remains DRAFT.** Authentic lockfiles, clean installs, complete dependency-backed test/build suites, npm audits, effective bundler alias verification and browser/accessibility smoke tests still require execution in an environment with npm registry access.
+
+### Review #5636325323: plugin-created aliases, build scope and code-span references
+
+The Vite config checker now **rejects every unverified nonempty/dynamic plugin expression**, including plugins that can introduce aliases when `resolve.alias` is empty. A narrow exception keeps the example's zero-argument `react()` import from `@vitejs/plugin-react` with an exact `4.7.0` package declaration, only when there are no static/policy aliases. Changed plugin versions, options, plugin arrays and imports fail closed pending independent resolved-Vite verification.
+
+Custom `root`, nonempty `build` configuration, `environments` and `builder` options are rejected instead of certifying an unscanned build entry. The supported default `index.html` also checks module script and stylesheet paths against the scanned source root, rejecting inline scripts, external/unscanned entries and malformed script tags. Real Vite resolved configuration and a production build remain mandatory; this intentionally restricted static grammar is not a full HTML parser or bundler graph.
+
+The Markdown reference pre-index pass now tracks multiline inline-code spans using the same closer/paragraph rules as active-line parsing, preventing apparent definitions *inside code* from masking real HTML comments or inventing missing-link failures. Regression fixtures cover false definitions and real definitions following code spans.
+
+This PR remains draft while authentic lockfiles, clean installs, full TypeScript/React/orders suites, vulnerability audits, Vite integration and browser/a11y checks are unavailable.

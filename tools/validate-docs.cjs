@@ -118,7 +118,33 @@ function inspectMarkdown(relative, contents, root) {
   let referenceFence = null, referenceComment = false;
   let referenceHtml = null;
   let referenceIndent = false, referencePreviousBlank = true;
-  for (const sourceLine of lines) {
+  // Definitions inside multiline inline code spans cannot become references.
+  // Reuse the same closer/paragraph-interruption rules as the inline pass.
+  let referenceTicks = 0;
+  function referenceVisible(text, row) {
+    const chars = text.split('');
+    for (let i = 0; i < text.length;) {
+      if (text[i] !== '`') {
+        if (referenceTicks) chars[i] = ' ';
+        i++;
+        continue;
+      }
+      const start = i;
+      while (text[i] === '`') i++;
+      const width = i - start;
+      if (referenceTicks === width) {
+        for (let k = start; k < i; k++) chars[k] = ' ';
+        referenceTicks = 0;
+      } else if (referenceTicks ||
+          !isEscaped(text, start) && hasCodeSpanCloser(text, i, width, row)) {
+        for (let k = start; k < i; k++) chars[k] = ' ';
+        if (!referenceTicks) referenceTicks = width;
+      }
+    }
+    return chars.join('');
+  }
+  for (let row = 0; row < lines.length; row++) {
+    const sourceLine = lines[row];
     const line = sourceLine.replace(/^ {0,3}(?:>[ \t]?)+/, '');
     const marker = fenceMarker.exec(line);
     if (referenceFence) {
@@ -141,6 +167,7 @@ function inspectMarkdown(relative, contents, root) {
       referenceHtml = null;
     }
     if (marker) {
+      referenceTicks = 0;
       referenceFence = { char: marker[1][0], length: marker[1].length };
       referencePreviousBlank = false;
       continue;
@@ -152,9 +179,10 @@ function inspectMarkdown(relative, contents, root) {
       continue;
     }
     referenceIndent = false;
-    if (!line.trim()) { referencePreviousBlank = true; continue; }
+    if (!line.trim()) { referenceTicks = 0; referencePreviousBlank = true; continue; }
     referencePreviousBlank = false;
     if (/^ {0,3}<!--/.test(line)) {
+      referenceTicks = 0;
       referenceComment = !line.includes('-->');
       continue;
     }
@@ -171,12 +199,13 @@ function inspectMarkdown(relative, contents, root) {
       referenceHtml = { close: null };
       continue;
     }
-    const start = /^ {0,3}\[/.exec(line);
+    const visible = referenceVisible(line, row);
+    const start = /^ {0,3}\[/.exec(visible);
     if (!start) continue;
-    const end = closingBracket(line, start[0].length - 1);
-    if (end !== -1 && line[end + 1] === ':' &&
-        /^\s*(?:<[^>]+>|\S+)/.test(line.slice(end + 2))) {
-      knownReferences.add(normalizeReference(line.slice(start[0].length, end)));
+    const end = closingBracket(visible, start[0].length - 1);
+    if (end !== -1 && visible[end + 1] === ':' &&
+        /^\s*(?:<[^>]+>|\S+)/.test(visible.slice(end + 2))) {
+      knownReferences.add(normalizeReference(visible.slice(start[0].length, end)));
     }
   }
   function maskLinkMetadata(line) {

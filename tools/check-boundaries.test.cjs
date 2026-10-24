@@ -548,7 +548,7 @@ test('Vite alias map must reflect Vite config in both directions', () => withFix
 }, result => assert.match(result.errors.join(' '), /unverified-vite-alias/)));
 
 test('inline Vite defineConfig with no aliases is supported', () => withFixture({
-  '../vite.config.ts': 'import { defineConfig } from "vitest/config"; export default defineConfig({ plugins: [react()], test: { environment: "jsdom" } });',
+  '../vite.config.ts': 'import { defineConfig } from "vitest/config"; export default defineConfig({ plugins: [], test: { environment: "jsdom" } });',
   'app/setup.ts': 'export const setup = 1;',
 }, result => assert.deepEqual(result.errors, [])));
 
@@ -1844,3 +1844,76 @@ test('root verify includes orders architecture check', () => {
   assert.equal(rootManifest.scripts['check:orders'], 'node tools/check-boundaries.cjs examples/orders/src');
   assert.match(rootManifest.scripts.verify, /npm run check:orders/);
 });
+
+test('plugin-added aliases fail even when no static alias map exists', () => {
+  for (const plugins of [
+    "[{ name: 'inject', config() { return { resolve: { alias: { '@orders': '/elsewhere' } } }; } }]",
+    '[untrustedPlugin()]',
+    'getPlugins()',
+  ]) withFixture({
+    '../vite.config.ts': 'export default { plugins: ' + plugins + ' };',
+    'shared/ui/view.ts': 'import value from "@orders/private"; export const view = value;',
+    'modules/orders/ui/private.ts': 'export const secret = true;',
+  }, result => assert.match(result.errors.join(' '), /unverifiable-vite-plugin-alias/));
+});
+
+test('pinned unconfigured React Fast Refresh plugin is a narrow exception', () => withFixture({
+  '../vite.config.ts': 'import react from "@vitejs/plugin-react"; export default { plugins: [react()] };',
+  '../package.json': JSON.stringify({ devDependencies: { '@vitejs/plugin-react': '4.7.0' } }),
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('React plugin exception refuses changed versions, options, imports and extra plugins', () => {
+  const cfg = 'import react from "@vitejs/plugin-react"; export default { plugins: [react()] };';
+  for (const [config, manifest] of [
+    [cfg, { devDependencies: { '@vitejs/plugin-react': '^4.7.0' } }],
+    [cfg.replace('react()', 'react({})'), { devDependencies: { '@vitejs/plugin-react': '4.7.0' } }],
+    [cfg.replace('[react()]', '[react(), injected()]'), { devDependencies: { '@vitejs/plugin-react': '4.7.0' } }],
+    [cfg.replace('import react from "@vitejs/plugin-react"', 'import react from "./unsafe"'), { devDependencies: { '@vitejs/plugin-react': '4.7.0' } }],
+  ]) withFixture({
+    '../vite.config.ts': config,
+    '../package.json': JSON.stringify(manifest),
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unverifiable-vite-plugin-alias/));
+});
+
+test('Vite custom root and bundler entrypoint overrides cannot hide unscanned code', () => {
+  for (const body of [
+    'root: "../unverified-app"',
+    'root: makeRoot()',
+    'build: { rollupOptions: { input: "../unverified-app/index.html" } }',
+    'build: { lib: { entry: "../unverified-app/index.ts" } }',
+    'build: { ssr: "../unverified-app/index.ts" }',
+    'environments: { client: { build: { rollupOptions: { input: "../outside.ts" } } } }',
+    'builder: customBuilder()',
+  ]) withFixture({
+    '../vite.config.ts': 'export default { ' + body + ' };',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-build-entry/));
+});
+
+test('default root and empty build block remain within supported static grammar', () => withFixture({
+  '../vite.config.ts': 'export default { root: ".", build: {}, plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite default HTML entrypoints cannot load unverified files or inline modules', () => {
+  for (const [name, html] of [["outside JS","<script type=\"module\" src=\"/other/main.ts\"></script>"],["inline JS","<script type=\"module\">import \"../other/main.ts\"</script>"],["outside style","<link rel=\"stylesheet\" href=\"/other/styles.css\">"],["classic script","<script src=\"/src/main.ts\"></script>"]]) withFixture({
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../index.html': html,
+    '../other/main.ts': 'export const main = true;',
+    '../other/styles.css': '.x {}',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-html-entry/, name));
+});
+test('Vite default HTML entries inside scanned source remain supported', () => withFixture({
+  '../vite.config.ts': 'export default { plugins: [] };',
+  '../index.html': '<!doctype html><script type="module" src="/src/app/start.ts"></script>',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('default Vite HTML entry cannot bypass checking even without vite.config', () => withFixture({
+  '../index.html': '<script type="module" src="/outside/main.ts"></script>',
+  '../outside/main.ts': 'export const x = 1;',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-html-entry/)));
