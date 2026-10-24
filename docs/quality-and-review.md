@@ -105,3 +105,10 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Verify first-party source folders that happen to be named `node_modules` remain owned and subject to all purity/module rules.
 - [ ] Run two actual native React builds consecutively without cleaning the checkout, verifying generated output stays outside Vite's dev-served root and neither check produces false architecture errors.
 - [ ] Confirm `npm run preview` loads the out-of-root production output and `/dist/hidden.html` inside the app root is still rejected by the architecture checker.
+
+### Import resolution and package CSS ownership
+
+- [ ] Fail closed for installed *bare stylesheet imports* even when TypeScript's module resolver returns no module; include CSS, `.module.css`, Sass/Less and query strings.
+- [ ] Keep regular first-party local CSS and explicitly mapped aliases in the owned stylesheet scan; do not mistakenly reject plain JS package imports.
+- [ ] Resolve pure-layer `baseUrl` JS/TS imports before labeling them external; allow legitimate first-party pure utilities and reject actual external packages and forbidden cross-layer imports.
+- [ ] Validate actual Vite stylesheet graph behavior before adding support for any externally sourced package stylesheet; never replace verified source ownership with a broad dependency allowlist.

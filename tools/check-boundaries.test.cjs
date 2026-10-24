@@ -2459,3 +2459,97 @@ test('a project alias into a legitimate linked package is still an explicit loca
     assert.match(check(fixture.root).errors.join(' '), /outside-source-import/);
   } finally { fixture.cleanup(); }
 });
+
+
+test('bare installed CSS packages fail closed instead of vanishing from the source graph', () => {
+  for (const [file, contents] of [
+    ['theme.css', '@import "https://cdn.example.org/private.css";'],
+    ['theme.module.css', '.hidden { color: red }'],
+    ['theme.scss', '@use "https://cdn.example.org/private.scss";'],
+    ['theme.less', '@import "https://cdn.example.org/private.less";'],
+  ]) withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0',
+    }),
+    ['../node_modules/ui-kit/' + file]: contents,
+    'app/start.ts': 'import "ui-kit/' + file + '"; export const app = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> ui-kit\//, file));
+});
+
+test('query-qualified bare stylesheet imports do not bypass fail-closed verification', () => {
+  for (const suffix of ['?inline', '?raw', '?url']) withFixture({
+    '../node_modules/ui-kit/theme.css': '.theme { color: red }',
+    'app/start.ts': 'import "ui-kit/theme.css' + suffix + '"; export const app = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> ui-kit\/theme\.css/, suffix));
+});
+
+test('pure layers reject active bare package stylesheets even if a package is allowlisted', () =>
+  withFixture({
+    '../architecture.config.json': JSON.stringify({ allowPureExternal: ['ui-kit/theme.css'] }),
+    '../node_modules/ui-kit/theme.css': 'body { color: red }',
+    'shared/lib/math.ts': 'import "ui-kit/theme.css"; export const price = 1;',
+  }, result => {
+    const errors = result.errors.join(' ');
+    assert.match(errors, /unverified-package-stylesheet/);
+    assert.match(errors, /pure-layer-static-asset/);
+  }));
+
+test('local stylesheets, audited aliases, and ordinary external JavaScript remain supported', () => {
+  withFixture({
+    'modules/orders/ui/button.ts': 'import "./button.css"; export const button = 1;',
+    'modules/orders/ui/button.css': '.button { color: red }',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: 'src', paths: { '@ui/*': ['shared/ui/*'] },
+    } }),
+    'app/start.ts': 'import "@ui/site.css"; export const start = true;',
+    'shared/ui/site.css': '.site { color: blue }',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    '../node_modules/js-kit/package.json': JSON.stringify({
+      name: 'js-kit', version: '1.0.0', types: 'index.d.ts',
+    }),
+    '../node_modules/js-kit/index.d.ts': 'export declare const value: number;',
+    'app/start.ts': 'import { value } from "js-kit"; export const start = value;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('pure first-party baseUrl source imports do not require external-package exceptions', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: 'src/shared/lib' } }),
+    'shared/lib/math.ts': 'export const sum = (a: number, b: number) => a + b;',
+    'shared/lib/price.ts': 'import { sum } from "math"; export const price = sum(1, 2);',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('pure-layer baseUrl still enforces forbidden first-party module dependencies', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: 'src' } }),
+    'modules/orders/domain/order.ts':
+      'import { form } from "modules/orders/ui/form"; export const value = form;',
+    'modules/orders/ui/form.ts': 'export const form = 1;',
+  }, result => {
+    assert.match(result.errors.join(' '), /pure-domain-import/);
+    assert.doesNotMatch(result.errors.join(' '), /pure-layer-external-package/);
+  }));
+
+test('real third-party packages remain restricted in pure modules', () =>
+  withFixture({
+    '../node_modules/react/package.json': JSON.stringify({
+      name: 'react', version: '19.0.0', types: 'index.d.ts',
+    }),
+    '../node_modules/react/index.d.ts': 'export declare const useMemo: () => unknown;',
+    'shared/lib/calculate.ts': 'import { useMemo } from "react"; export const memo = useMemo;',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-external-package/)));
+
+test('approved genuine external packages retain their pure-layer exception', () =>
+  withFixture({
+    '../architecture.config.json': JSON.stringify({ allowPureExternal: ['pure-kit'] }),
+    '../node_modules/pure-kit/package.json': JSON.stringify({
+      name: 'pure-kit', version: '1.0.0', types: 'index.d.ts',
+    }),
+    '../node_modules/pure-kit/index.d.ts': 'export declare const amount: number;',
+    'shared/lib/value.ts': 'import { amount } from "pure-kit"; export const value = amount;',
+  }, result => assert.deepEqual(result.errors, [])));

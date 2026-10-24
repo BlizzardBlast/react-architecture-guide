@@ -1425,6 +1425,19 @@ function check(srcDir) {
       const staticAsset = assetPath(dep.spec) ||
         ((dep.fromUrl || filesystemSpec !== dep.spec) && !sourceExt.test(filesystemSpec)
           ? filesystemSpec : null);
+      // Vite bundles stylesheet side-effect imports even when TypeScript
+      // cannot resolve them. Bare package stylesheets are outside our
+      // first-party CSS graph, so reject instead of silently skipping them.
+      // This includes .module.css and query-qualified Sass/Less imports.
+      const bareStylesheet = !relativeSpec && !projectAlias &&
+        styleExt.test(filesystemSpec);
+      if (bareStylesheet) {
+        errors.push(`unverified-package-stylesheet: ${source.relative} -> ${dep.spec}`);
+        if (pureCode && !isTest) {
+          errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
+        }
+        continue;
+      }
       const localAsset = Boolean((staticAsset || dep.fromUrl || filesystemSpec !== dep.spec) &&
         (relativeSpec || projectAlias));
       // Assets are still architectural dependencies. Resolve the physical path,
@@ -1473,9 +1486,12 @@ function check(srcDir) {
           isExternalLibraryImport = Boolean(resolvedModule?.isExternalLibraryImport);
           originalExternalPath = isExternalLibraryImport ? resolvedModule?.originalPath : undefined;
         }
-        // Pure-layer package policy depends on the import's actual name and
-        // source, never whether a first-party folder has a vendor-like name.
-        if (pureCode && !isTest && barePackage &&
+        // A baseUrl specifier may look exactly like a package name but
+        // resolve to a first-party file (e.g. shared/lib/price -> "math").
+        // Apply package purity restrictions only after checking the
+        // resolved target against the audited first-party source set.
+        const ownedSource = resolved && known.has(path.resolve(resolved));
+        if (pureCode && !isTest && barePackage && !ownedSource &&
             !policy.allowPureExternal.includes(dep.spec)) {
           errors.push(`pure-layer-external-package: ${source.relative} -> ${dep.spec}`);
         }
