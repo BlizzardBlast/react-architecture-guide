@@ -61,3 +61,11 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Check for executable HTML event attributes, JavaScript URL schemes and encoded URI values, `srcdoc`, inline import maps and redirect schemes. None may create unchecked runtime dependencies.
 - [ ] Inline `<style>` and `style=` CSS must not bypass ownership checks. Use reviewed source stylesheets and preserve genuinely safe inert HTML attributes and JSON data.
 - [ ] Verify the final Vite output and browser behavior independently, even where static syntax is accepted; do not claim that a handwritten HTML token scanner implements the browser parser.
+
+### HTML5 and Vite public output assurance
+
+- [ ] Parse `index.html` using a standards-based HTML5 tokenizer: comment handling in `title`/`textarea`, inert JSON scripts and quoted greater-than characters must agree with a browser.
+- [ ] Audit the default Vite `public/` output; reject executable/unknown public formats and symlinks, and allow custom `publicDir` only when explicitly verifiable.
+- [ ] Resolve all supported HTML module/script, CSS and media URLs (`src`, `srcset`, icons, modulepreload, relevant asset links) against physical files, preserving module ownership restrictions.
+- [ ] Reject unsupported HTML browsing contexts, inline execution/styling and ambiguous resource grammars instead of silently assuming the content is inert.
+- [ ] Run a real Vite build and browser/security/accessibility smoke tests to confirm the parsed HTML dependencies correspond to served/bundled output.

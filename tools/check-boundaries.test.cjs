@@ -1957,3 +1957,91 @@ test('ordinary HTML attributes, inert scripts and checked stylesheet entries rem
     'app/base.css': 'body { color: black; }',
   }, result => assert.deepEqual(result.errors, []));
 });
+
+
+test('browser RCDATA cannot mask script, event or CSS violations as comments', () => {
+  const main = '<script type="module" src="/src/app/start.ts"></script>';
+  for (const html of [
+    '<title><!--</title><style>@import "/src/modules/orders/ui/private.css";</style>-->' + main,
+    '<textarea><!--</textarea><script type="module" src="/outside/evil.ts"></script>-->' + main,
+    '<title><!--</title><button onclick="import(\'/src/private.ts\')">Go</button>-->' + main,
+  ]) withFixture({
+    '../index.html': html,
+    'app/start.ts': 'export const start = true;',
+    'modules/orders/ui/private.css': '.x { color: red; }',
+  }, result => assert.match(result.errors.join(' '),
+    /unsupported-vite-html-(?:inline|entry|url)|missing-html-asset/, html));
+});
+
+test('Vite public directory cannot silently ship executable or unknown files', () => {
+  for (const name of ['hidden.html', 'evil.js', 'style.css', 'image.svg', 'unverified.xyz']) {
+    withFixture({
+      ['../public/' + name]: '<script>alert(1)</script>',
+      'app/start.ts': 'export const start = true;',
+    }, result => assert.match(result.errors.join(' '),
+      /unverified-vite-public-dir: unsupported public asset/, name));
+  }
+});
+
+test('raster public assets and default public HTML references are checked', () => withFixture({
+  '../public/images/logo.png': 'test binary fixture',
+  '../index.html': '<img src="/images/logo.png"><script type="module" src="/src/app/start.ts"></script>',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('HTML private asset and responsive image references cannot bypass ownership', () => {
+  for (const image of [
+    '<img src="/src/modules/orders/ui/private.svg">',
+    '<img srcset="/src/modules/orders/ui/private.svg 1x">',
+    '<source src="/src/modules/orders/ui/private.svg">',
+    '<link rel="icon" href="/src/modules/orders/ui/private.svg">',
+  ]) withFixture({
+    '../index.html': image + '<script type="module" src="/src/app/start.ts"></script>',
+    'app/start.ts': 'export const start = true;',
+    'modules/orders/ui/private.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/, image));
+});
+
+test('HTML references missing or outside-source files fail closed', () => {
+  for (const html of [
+    '<img src="/not-found.png">',
+    '<script type="module" src="/unscanned.ts"></script>',
+  ]) withFixture({
+    '../index.html': html,
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /missing-html-asset/, html));
+});
+
+test('Vite publicDir cannot select an unchecked sibling directory', () => {
+  for (const setting of ['"../elsewhere"', 'makePublicDir()', '"assets"']) withFixture({
+    '../vite.config.ts': 'export default { plugins: [], publicDir: ' + setting + ' };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-public-dir/));
+});
+
+test('disabling Vite publicDir prevents shipping files from its unused default directory', () => withFixture({
+  '../vite.config.ts': 'export default { plugins: [], publicDir: false };',
+  '../public/unused.html': '<script>alert(1)</script>',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('valid quoted greater-than in a module script attribute must remain supported', () => {
+  for (const html of [
+    '<script type="module" src="/src/app/start.ts" data-note="a > b"></script>',
+    "<script data-note='a > b' src='/src/app/start.ts' type='module'></script>",
+  ]) withFixture({
+    '../index.html': html,
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('HTML-embedded browsing contexts are unsupported until their graphs are audited', () => {
+  for (const element of [
+    '<iframe src="/hidden.html"></iframe>',
+    '<object data="/hidden.html"></object>',
+  ]) withFixture({
+    '../index.html': element,
+    '../public/hidden.html': '<script type="module" src="/src/private.ts"></script>',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-html-embed/, element));
+});

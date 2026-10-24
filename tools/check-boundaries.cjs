@@ -30,6 +30,7 @@ function loadTypeScript(projectDir = process.argv[2]) {
 }
 const ts = loadTypeScript();
 const { scanCssDependencies } = require('./css-dependencies.cjs');
+const { scanHtml } = require('./html-dependencies.cjs');
 // The dot is required: filenames such as "assets" are not source files.
 const sourceExt = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const assetExt = /\.(?:css|scss|sass|less|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|mp4|webm|json)$/i;
@@ -386,7 +387,7 @@ function resolveLocalSource(candidate, options) {
   const basename = './' + path.basename(candidate);
   return ts.resolveModuleName(basename, importer, options, ts.sys).resolvedModule?.resolvedFileName;
 }
-function verifyViteAliases(projectDir, policy, errors) {
+function verifyViteAliases(projectDir, policy, errors, viteState) {
   // Discover ALL default Vite filenames, and recognize explicitly selected
   // npm-script configs. Never silently inspect a different Vite config.
   const supportedExt = /\.(?:ts|mts|js|mjs|cts|cjs)$/;
@@ -861,6 +862,16 @@ function verifyViteAliases(projectDir, policy, errors) {
       }
     }
   }
+  // The default public/ tree ships without any transformation. Explicit
+  // publicDir overrides must be static and limited to default or disabled.
+  const publicConfig = top.get('publicDir');
+  if (publicConfig) {
+    if (publicConfig.kind === ts.SyntaxKind.FalseKeyword) {
+      viteState.publicDirDisabled = true;
+    } else if (!(ts.isStringLiteral(publicConfig) && publicConfig.text === 'public')) {
+      errors.push('unsupported-vite-public-dir: publicDir must be "public" or false');
+    }
+  }
   // Vite uses the project root and build inputs to select actual entrypoints.
   // A scan of project/src cannot prove custom roots, Rollup inputs, libraries
   // or multi-environment builders. Fail closed until a resolved bundler graph
@@ -981,153 +992,77 @@ function verifyViteAliases(projectDir, policy, errors) {
 
 
 
-function verifyViteHtmlEntrypoints(projectDir, sourceRoot, errors) {
-  // The default Vite HTML entry may still point at an unscanned module,
-  // even if there is no custom root/build config. Check the local entry
-  // references conservatively; a real bundler graph check remains mandatory.
-  const htmlFile = path.join(projectDir, 'index.html');
-  if (fs.existsSync(htmlFile)) {
-    const html = fs.readFileSync(htmlFile, 'utf8')
-      .replace(/<!--[\s\S]*?-->/g, '');
-    const checkedRoot = fs.realpathSync(sourceRoot);
-    // Reject executable/asset-bearing HTML that cannot be assigned source
-    // ownership. This is a bounded fail-closed tag/attribute scan, not a full
-    // HTML parser; actual Vite and browser integration checks remain required.
-    // Quoted '>' characters cannot terminate a tag while checking attributes.
-    for (let offset = 0; offset < html.length;) {
-      if (html[offset] !== '<') { offset++; continue; }
-      if (html.startsWith('<!', offset) || html.startsWith('<?', offset)) {
-        const end = html.indexOf('>', offset + 2);
-        if (end < 0) {
-          errors.push('unsupported-vite-html-inline: malformed HTML declaration');
-          break;
-        }
-        offset = end + 1;
-        continue;
+const publicSafeAsset = /\.(?:png|jpe?g|gif|webp|avif|ico|bmp|woff2?|ttf|otf|mp4|webm)$/i;
+
+function verifyVitePublicDirectory(projectDir, errors, state) {
+  if (state.publicDirDisabled) return;
+  const publicRoot = path.join(projectDir, 'public');
+  if (!fs.existsSync(publicRoot)) return;
+  const projectPhysicalRoot = fs.realpathSync(projectDir);
+  if (fs.lstatSync(publicRoot).isSymbolicLink() ||
+      !isWithinRoot(fs.realpathSync(publicRoot), projectPhysicalRoot)) {
+    errors.push('unverified-vite-public-dir: public directory symlink escapes checked project');
+    return;
+  }
+  function scan(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      const relative = normPath(path.relative(publicRoot, full));
+      if (entry.isSymbolicLink()) {
+        errors.push('unverified-vite-public-dir: symlink ' + relative);
+      } else if (entry.isDirectory()) {
+        scan(full);
+      } else if (!entry.isFile() || !publicSafeAsset.test(relative)) {
+        // HTML, SVG, JS, CSS and unknown formats can ship executable or
+        // dependency-bearing data. Refuse an unverified public graph.
+        errors.push('unverified-vite-public-dir: unsupported public asset ' + relative);
       }
-      let pos = offset + 1;
-      const closing = html[pos] === '/';
-      if (closing) pos++;
-      const tagName = /^[A-Za-z][A-Za-z\d:-]*/.exec(html.slice(pos));
-      if (!tagName) { offset++; continue; }
-      const tag = tagName[0].toLowerCase();
-      pos += tagName[0].length;
-      if (tag === 'style' && !closing) {
-        errors.push('unsupported-vite-html-inline: inline <style> must move to a checked CSS file');
-      }
-      const names = new Set();
-      let finished = false;
-      while (pos < html.length) {
-        while (/\s/.test(html[pos] || '')) pos++;
-        if (html[pos] === '>' || html[pos] === '/' && html[pos + 1] === '>') {
-          offset = pos + (html[pos] === '>' ? 1 : 2);
-          finished = true;
-          break;
-        }
-        const attr = /^[^\s=/>"'`<]+/.exec(html.slice(pos));
-        if (!attr) {
-          errors.push('unsupported-vite-html-inline: malformed attribute in <' + tag + '>');
-          offset = pos + 1;
-          finished = true;
-          break;
-        }
-        const key = attr[0].toLowerCase();
-        pos += attr[0].length;
-        while (/\s/.test(html[pos] || '')) pos++;
-        let value = '';
-        if (html[pos] === '=') {
-          pos++;
-          while (/\s/.test(html[pos] || '')) pos++;
-          const quote = html[pos] === '"' || html[pos] === "'" ? html[pos++] : '';
-          const from = pos;
-          if (quote) {
-            while (pos < html.length && html[pos] !== quote) pos++;
-            if (pos >= html.length) {
-              errors.push('unsupported-vite-html-inline: unterminated quoted attribute');
-              break;
-            }
-            value = html.slice(from, pos++);
-          } else {
-            while (pos < html.length && !/[\s>]/.test(html[pos])) pos++;
-            value = html.slice(from, pos);
-            if (pos === from || /["'`<]/.test(value)) {
-              errors.push('unsupported-vite-html-inline: malformed unquoted attribute');
-            }
-          }
-        }
-        if (names.has(key)) {
-          errors.push('unsupported-vite-html-inline: duplicate attribute ' + key);
-        }
-        names.add(key);
-        if (/^on[a-z]/.test(key)) {
-          errors.push('unsupported-vite-html-inline: executable event handler ' + key);
-        }
-        if (key === 'style' || key === 'srcdoc') {
-          errors.push('unsupported-vite-html-inline: unchecked inline ' + key);
-        }
-        // Refuse script-capable/obfuscated URI values rather than partially
-        // HTML-decoding them. Literal URLs with character references must
-        // be validated by a real HTML tokenizer/bundler-aware integration.
-        if (/^(?:href|src|action|formaction|xlink:href|data|poster|srcset)$/.test(key) &&
-            (/^\s*(?:java\s*script|vb\s*script):/i.test(value) ||
-             /&(?:#\d+|#x[\da-f]+|[a-z][a-z\d]+);?/i.test(value) ||
-             /[\u0000-\u001f]/.test(value))) {
-          errors.push('unsupported-vite-html-inline: unverified URL in ' + key);
-        }
-        if (tag === 'meta' && key === 'http-equiv' && value.toLowerCase() === 'refresh') {
-          errors.push('unsupported-vite-html-inline: meta refresh is not verified');
-        }
-      }
-      if (!finished) {
-        errors.push('unsupported-vite-html-inline: unterminated <' + tag + '> tag');
-        break;
-      }
-    }
-    function htmlAttribute(attributes, key) {
-      const match = new RegExp('(?:^|\\s)' + key +
-        '\\s*=\\s*(?:"([^"]*)"|\x27([^\x27]*)\x27|([^\\s>]+))', 'i').exec(attributes);
-      return match ? match[1] ?? match[2] ?? match[3] : null;
-    }
-    function validateHtmlAsset(spec, label) {
-      if (!spec || /^(?:https?:|data:|\/\/|#)/i.test(spec) ||
-          /[?#]/.test(spec) || spec.includes('\\')) {
-        errors.push('unsupported-vite-html-entry: unverified ' + label + ': ' + spec);
-        return;
-      }
-      const candidate = path.resolve(projectDir, spec.startsWith('/') ? '.' + spec : spec);
-      if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile() ||
-          !isWithinRoot(fs.realpathSync(candidate), checkedRoot)) {
-        errors.push('unsupported-vite-html-entry: ' + label +
-          ' must be a local file in the inspected source tree: ' + spec);
-      }
-    }
-    const scripts = /<script\b([^>]*?)>([\s\S]*?)<\/script\s*>/gi;
-    for (const match of html.matchAll(scripts)) {
-      const type = htmlAttribute(match[1], 'type');
-      if (type && /^(?:application\/json|application\/ld\+json)$/i.test(type)) continue;
-      const spec = htmlAttribute(match[1], 'src');
-      if (type !== 'module' || !spec || match[2].trim()) {
-        errors.push('unsupported-vite-html-entry: script entry must be a module with an explicit src and no inline code');
-        continue;
-      }
-      validateHtmlAsset(spec, 'script');
-    }
-    const links = /<link\b([^>]*?)>/gi;
-    for (const match of html.matchAll(links)) {
-      if (/\bstylesheet\b/i.test(htmlAttribute(match[1], 'rel') || '')) {
-        validateHtmlAsset(htmlAttribute(match[1], 'href'), 'stylesheet');
-      }
-    }
-    // The regex above is deliberately bounded: reject malformed/opaque script
-    // markup rather than claiming it has been inspected.
-    const allScriptOpeners = (html.match(/<script\b/gi) || []).length;
-    const parsedScriptOpeners = [...html.matchAll(scripts)].length;
-    if (allScriptOpeners !== parsedScriptOpeners) {
-      errors.push('unsupported-vite-html-entry: script markup cannot be statically verified');
     }
   }
+  scan(publicRoot);
 }
 
+function verifyViteHtmlEntrypoints(projectDir, sourceRoot, policy, errors, state) {
+  const htmlFile = path.join(projectDir, 'index.html');
+  if (!fs.existsSync(htmlFile)) return;
+  const physicalRoot = fs.realpathSync(sourceRoot);
+  const publicRoot = path.join(projectDir, 'public');
+  const { errors: parseErrors, references } = scanHtml(fs.readFileSync(htmlFile, 'utf8'));
+  errors.push(...parseErrors.map(message => message + ': index.html'));
+  for (const { spec, kind } of references) {
+    const projectCandidate = path.resolve(projectDir, spec.startsWith('/') ? '.' + spec : spec);
+    const publicCandidate = path.resolve(publicRoot, spec.startsWith('/') ? '.' + spec : spec);
+    const local = fs.existsSync(projectCandidate) &&
+      fs.statSync(projectCandidate).isFile();
+    const fromPublic = !local && !state.publicDirDisabled &&
+      fs.existsSync(publicCandidate) && fs.statSync(publicCandidate).isFile();
+    const target = local ? projectCandidate : fromPublic ? publicCandidate : null;
+    if (!target) {
+      errors.push('missing-html-asset: index.html -> ' + spec);
+      continue;
+    }
+    const physical = fs.realpathSync(target);
+    if (kind === 'script' && !sourceExt.test(target)) {
+      errors.push('unsupported-vite-html-entry: module script is not a JS/TS file: ' + spec);
+      continue;
+    }
+    if (fromPublic) {
+      if (!fs.existsSync(publicRoot) || !isWithinRoot(physical, fs.realpathSync(publicRoot)) ||
+          !publicSafeAsset.test(target) || kind === 'script') {
+        errors.push('unverified-html-public-asset: index.html -> ' + spec);
+      }
+      continue;
+    }
+    if (!isWithinRoot(physical, physicalRoot)) {
+      errors.push('outside-source-html-import: index.html -> ' + spec);
+      continue;
+    }
+    // index.html is app-level composition, not a public API of another module.
+    const source = { layer: 'app', relative: 'index.html' };
+    const dest = category(physical, physicalRoot);
+    checkOwnedDependency(source, dest, policy, errors, { asset: kind !== 'script' });
+  }
+}
 
 // One ownership/layer policy for script, stylesheet and static-asset edges.
 // Only the resolution mechanism and runtime cycle semantics differ.
@@ -1288,8 +1223,10 @@ function check(srcDir) {
   const physicalRoot = fs.realpathSync(root);
   const options = configFor(path.dirname(root)).options;
   const policy = loadBoundaryConfig(path.dirname(root));
-  verifyViteAliases(path.dirname(root), policy, errors);
-  verifyViteHtmlEntrypoints(path.dirname(root), root, errors);
+  const viteState = { publicDirDisabled: false };
+  verifyViteAliases(path.dirname(root), policy, errors, viteState);
+  verifyVitePublicDirectory(path.dirname(root), errors, viteState);
+  verifyViteHtmlEntrypoints(path.dirname(root), root, policy, errors, viteState);
   const files = walk(root).map(f => path.resolve(f));
   if (files.length === 0) errors.push('no-source-files: No supported source files found');
   const known = new Set(files);
