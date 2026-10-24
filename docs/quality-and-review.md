@@ -112,3 +112,10 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Keep regular first-party local CSS and explicitly mapped aliases in the owned stylesheet scan; do not mistakenly reject plain JS package imports.
 - [ ] Resolve pure-layer `baseUrl` JS/TS imports before labeling them external; allow legitimate first-party pure utilities and reject actual external packages and forbidden cross-layer imports.
 - [ ] Validate actual Vite stylesheet graph behavior before adding support for any externally sourced package stylesheet; never replace verified source ownership with a broad dependency allowlist.
+
+### Extensionless package stylesheet exports
+
+- [ ] Check import targets from *matching* package `exports` (including conditional TypeScript declaration targets and CSS import targets), rather than inferring solely from import specifier suffixes.
+- [ ] Fail closed on extensionless CSS root/subpath exports, scoped/wildcard cases, bare Stylus imports and unresolved active package imports; do not silently accept unknown bundle edges.
+- [ ] Preserve legitimate JS package exports even when the same package exposes separate CSS subpaths; preserve owned first-party aliases and type-only/test-file controls.
+- [ ] Verify these cases against actual Vite resolved import graphs and the pinned TypeScript version before release.

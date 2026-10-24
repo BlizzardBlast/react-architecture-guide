@@ -349,6 +349,66 @@ function matchesAlias(spec, patterns) {
       : spec.startsWith(chunks[0]) && spec.endsWith(chunks[chunks.length - 1]);
   });
 }
+// Vite may resolve bare package exports to CSS without a stylesheet suffix,
+// while TypeScript resolves a declaration or nothing at all. Inspect the
+// *matching* export subpath, including conditional alternatives.
+function packageStyleExport(spec, importer) {
+  if (spec.startsWith('#') || spec.startsWith('node:')) return false;
+  const parts = spec.split('/');
+  const scoped = spec.startsWith('@');
+  if ((scoped && parts.length < 2) || !parts[0]) return false;
+  const packageName = scoped ? parts.slice(0, 2).join('/') : parts[0];
+  const subpath = parts.slice(scoped ? 2 : 1).join('/');
+  const exportKey = subpath ? './' + subpath : '.';
+  const isStyle = target => /\.(?:css|scss|sass|less|styl|stylus)$/i.test(fileSpecifier(target));
+  function containsStyles(value) {
+    if (typeof value === 'string') return isStyle(value);
+    if (Array.isArray(value)) return value.some(containsStyles);
+    return Boolean(value && typeof value === 'object' &&
+      Object.values(value).some(containsStyles));
+  }
+  function exportTargets(exportsField) {
+    if (typeof exportsField !== 'object' || exportsField === null ||
+        Array.isArray(exportsField)) return exportKey === '.' ? exportsField : undefined;
+    const keys = Object.keys(exportsField);
+    // Root conditional exports have no "." or "./subpath" keys.
+    if (keys.every(key => !key.startsWith('.'))) {
+      return exportKey === '.' ? exportsField : undefined;
+    }
+    if (Object.hasOwn(exportsField, exportKey)) return exportsField[exportKey];
+    const matching = keys.filter(key => {
+      const star = key.indexOf('*');
+      return star >= 0 && key.startsWith('./') &&
+        exportKey.startsWith(key.slice(0, star)) &&
+        exportKey.endsWith(key.slice(star + 1)) &&
+        exportKey.length >= key.length - 1;
+    });
+    // Node's subpath patterns prefer the longest prefix, then suffix.
+    // A broad CSS pattern cannot taint a more-specific JavaScript export.
+    matching.sort((a, b) => {
+      const ap = a.indexOf('*'), bp = b.indexOf('*');
+      return bp - ap || (b.length - bp) - (a.length - ap);
+    });
+    return matching.length ? exportsField[matching[0]] : undefined;
+  }
+  for (let dir = path.dirname(importer); ; dir = path.dirname(dir)) {
+    const manifest = path.join(dir, 'node_modules', packageName, 'package.json');
+    if (fs.existsSync(manifest)) {
+      let pkg;
+      try { pkg = JSON.parse(fs.readFileSync(manifest, 'utf8')); }
+      catch { return true; } // Unverifiable installed package: fail closed.
+      if (pkg.exports !== undefined) return containsStyles(exportTargets(pkg.exports));
+      if (exportKey === '.') {
+        return ['module', 'main', 'browser'].some(key =>
+          typeof pkg[key] === 'string' && isStyle(pkg[key]));
+      }
+      return Boolean(pkg.browser && typeof pkg.browser === 'object' &&
+        containsStyles(pkg.browser['./' + subpath]));
+    }
+    if (path.dirname(dir) === dir) return false;
+  }
+}
+
 function loadBoundaryConfig(parent) {
   const file = path.join(parent, 'architecture.config.json');
   if (!fs.existsSync(file)) return { allowPureExternal: [], allowCrossModule: {}, allowMixedLayouts: {}, viteAliases: {}, viteConfig: null };
@@ -1430,7 +1490,7 @@ function check(srcDir) {
       // first-party CSS graph, so reject instead of silently skipping them.
       // This includes .module.css and query-qualified Sass/Less imports.
       const bareStylesheet = !relativeSpec && !projectAlias &&
-        styleExt.test(filesystemSpec);
+        /\.(?:css|scss|sass|less|styl|stylus)$/i.test(filesystemSpec);
       if (bareStylesheet) {
         errors.push(`unverified-package-stylesheet: ${source.relative} -> ${dep.spec}`);
         if (pureCode && !isTest) {
@@ -1486,17 +1546,29 @@ function check(srcDir) {
           isExternalLibraryImport = Boolean(resolvedModule?.isExternalLibraryImport);
           originalExternalPath = isExternalLibraryImport ? resolvedModule?.originalPath : undefined;
         }
-        // A baseUrl specifier may look exactly like a package name but
-        // resolve to a first-party file (e.g. shared/lib/price -> "math").
-        // Apply package purity restrictions only after checking the
-        // resolved target against the audited first-party source set.
+        // Owned baseUrl imports are local regardless of their bare spelling.
         const ownedSource = resolved && known.has(path.resolve(resolved));
+        const styleExport = barePackage && !ownedSource &&
+          packageStyleExport(filesystemSpec, file);
+        if (styleExport) {
+          errors.push(`unverified-package-stylesheet: ${source.relative} -> ${dep.spec}`);
+          if (pureCode && !isTest) {
+            errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
+          }
+          continue;
+        }
         if (pureCode && !isTest && barePackage && !ownedSource &&
             !policy.allowPureExternal.includes(dep.spec)) {
           errors.push(`pure-layer-external-package: ${source.relative} -> ${dep.spec}`);
         }
         if (!resolved) {
-          if (relativeSpec || projectAlias) errors.push(`${source.relative}: unresolved internal import ${dep.spec}`);
+          if (relativeSpec || projectAlias) {
+            errors.push(`${source.relative}: unresolved internal import ${dep.spec}`);
+          } else if (barePackage && dep.runtime && !isTest &&
+                     !filesystemSpec.startsWith('node:')) {
+            // Unresolved bare runtime imports might be Vite-only stylesheets.
+            errors.push(`unverified-package-import: ${source.relative} -> ${dep.spec}`);
+          }
           continue;
         }
       }

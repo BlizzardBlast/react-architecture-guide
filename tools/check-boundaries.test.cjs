@@ -2553,3 +2553,117 @@ test('approved genuine external packages retain their pure-layer exception', () 
     '../node_modules/pure-kit/index.d.ts': 'export declare const amount: number;',
     'shared/lib/value.ts': 'import { amount } from "pure-kit"; export const value = amount;',
   }, result => assert.deepEqual(result.errors, [])));
+
+
+test('extensionless package CSS exports fail closed at both package root and deep subpaths', () => {
+  for (const spec of ['ui-kit', 'ui-kit/theme']) withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0',
+      exports: { '.': './index.css', './theme': './theme.css' },
+    }),
+    '../node_modules/ui-kit/index.css': 'body { color: red }',
+    '../node_modules/ui-kit/theme.css': '@import "https://cdn.example.org/private.css";',
+    'app/start.ts': 'import "' + spec + '"; export const ready = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet/, spec));
+});
+
+test('conditional export CSS cannot hide behind TypeScript declaration paths', () =>
+  withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0',
+      exports: { './theme': {
+        types: './theme.d.ts',
+        import: './theme.css',
+        default: './theme.css',
+      } },
+    }),
+    '../node_modules/ui-kit/theme.d.ts': 'declare const classes: Record<string, string>; export default classes;',
+    '../node_modules/ui-kit/theme.css': '.private { color: red }',
+    'app/start.ts': 'import styles from "ui-kit/theme"; export const ready = styles;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/)));
+
+test('scoped and wildcard package style exports cannot bypass graph checks', () => {
+  for (const [spec, pattern, target, file] of [
+    ['@ui-kit/theme/dark', './theme/*', './assets/*.css', 'assets/dark.css'],
+    ['@ui-kit/theme', './theme', './theme.scss', 'theme.scss'],
+    ['@ui-kit/stylus', './stylus', './theme.styl', 'theme.styl'],
+  ]) withFixture({
+    '../node_modules/@ui-kit/package/package.json': JSON.stringify({
+      name: '@ui-kit/package', version: '1.0.0', exports: { [pattern]: target },
+    }),
+    ['../node_modules/@ui-kit/package/' + file]: '.theme { color: red }',
+    'app/start.ts': 'import "' + spec.replace('@ui-kit/', '@ui-kit/package/') +
+      '"; export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/, spec));
+});
+
+test('legacy package main and module stylesheet entries fail closed', () => {
+  for (const field of ['main', 'module', 'browser']) withFixture({
+    '../node_modules/theme-kit/package.json': JSON.stringify({
+      name: 'theme-kit', version: '1.0.0', [field]: './styles.css',
+    }),
+    '../node_modules/theme-kit/styles.css': '.theme { color: black }',
+    'app/start.ts': 'import "theme-kit"; export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/, field));
+});
+
+test('explicit bare Stylus styles and opaque side-effect package imports fail closed', () => {
+  withFixture({
+    '../node_modules/theme-kit/theme.styl': '.theme\n  color red',
+    'app/start.ts': 'import "theme-kit/theme.styl"; export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/));
+  withFixture({
+    'app/start.ts': 'import "unresolvable-theme"; export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-import/));
+});
+
+test('JS exports with a separate stylesheet subpath stay supported for the JS import', () =>
+  withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0',
+      exports: { '.': { types: './index.d.ts', default: './index.js' },
+        './theme': './theme.css' },
+    }),
+    '../node_modules/ui-kit/index.d.ts': 'export declare const ready: boolean;',
+    '../node_modules/ui-kit/index.js': 'export const ready = true;',
+    '../node_modules/ui-kit/theme.css': '.theme { color: blue }',
+    'app/start.ts': 'import { ready } from "ui-kit"; export const value = ready;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('first-party baseUrl and mapped style aliases still follow owned-source rules', () => {
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: 'src/shared/lib' } }),
+    'shared/lib/math.ts': 'export const value = 1;',
+    'shared/lib/start.ts': 'import { value } from "math"; export const ready = value;',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: 'src', paths: { '@style/*': ['shared/ui/*'] },
+    } }),
+    'app/start.ts': 'import "@style/theme.css"; export const ready = true;',
+    'shared/ui/theme.css': '.theme { color: teal }',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('unresolved runtime package errors do not misclassify type-only imports', () =>
+  withFixture({
+    'app/start.ts': 'import type { Theme } from "uninstalled-types"; export type AppTheme = Theme;',
+  }, result => assert.equal(
+    result.errors.some(e => e.includes('unverified-package-import')), false)));
+
+
+test('more-specific JavaScript package wildcard does not inherit broad stylesheet pattern', () =>
+  withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0',
+      exports: {
+        './*': './styles/*.css',
+        './utils/*': { types: './utils/*.d.ts', default: './utils/*.js' },
+      },
+    }),
+    '../node_modules/ui-kit/utils/math.d.ts': 'export declare const value: number;',
+    '../node_modules/ui-kit/utils/math.js': 'export const value = 5;',
+    '../node_modules/ui-kit/styles/utils/math.css': '.fake { color: red }',
+    'app/start.ts': 'import { value } from "ui-kit/utils/math"; export const ready = value;',
+  }, result => assert.deepEqual(result.errors, [])));
