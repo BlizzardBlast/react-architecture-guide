@@ -76,3 +76,34 @@ test('template contents are checked because JavaScript can instantiate them', ()
   assert.match(scanHtml('<template><button onclick="alert(1)">Go</button></template>').errors.join(' '),
     /executable event handler/);
 });
+
+test('Vite link imagesrcset candidates are collected independently of href', () => {
+  const result = scanHtml('<link rel="preload" as="image" href="/src/shared/a.png" ' +
+    'imagesrcset="/src/shared/b.png 1x, /src/modules/orders/ui/private.svg 2x">');
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.references.map(x => x.spec), [
+    '/src/shared/b.png', '/src/modules/orders/ui/private.svg', '/src/shared/a.png',
+  ]);
+});
+
+test('Vite-recognized meta images and media become owned source references', () => {
+  for (const attrs of [
+    'name="twitter:image"', 'name="msapplication-tileimage"',
+    'name="msapplication-config"', 'property="og:image"',
+    'property="og:image:url"', 'property="og:image:secure_url"',
+    'property="og:audio"', 'property="og:video:secure_url"',
+  ]) {
+    assert.deepEqual(scanHtml('<meta ' + attrs + ' content="/src/modules/orders/ui/private.svg">'), {
+      errors: [], references: [{
+        spec: '/src/modules/orders/ui/private.svg', kind: 'asset',
+      }],
+    }, attrs);
+  }
+});
+
+test('descriptive meta values stay inert while unsupported image candidates fail closed', () => {
+  assert.deepEqual(scanHtml('<meta name="description" content="A > B">' +
+    '<meta property="og:title" content="Home">'), { errors: [], references: [] });
+  assert.match(scanHtml('<link rel="preload" as="image" href="/src/a.png" ' +
+    'imagesrcset="/src/a.png 1x 2x">').errors.join(' '), /unsupported-vite-html-srcset/);
+});

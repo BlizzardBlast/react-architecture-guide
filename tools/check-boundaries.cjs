@@ -862,6 +862,12 @@ function verifyViteAliases(projectDir, policy, errors, viteState) {
       }
     }
   }
+  // Worker plugins and Rollup settings run in a separate build pipeline.
+  // The source-only dependency graph cannot certify injected worker imports.
+  const worker = top.get('worker');
+  if (worker && !(ts.isObjectLiteralExpression(worker) && worker.properties.length === 0)) {
+    errors.push('unverifiable-vite-worker-graph: worker-specific transforms require bundler-graph verification');
+  }
   // The default public/ tree ships without any transformation. Explicit
   // publicDir overrides must be static and limited to default or disabled.
   const publicConfig = top.get('publicDir');
@@ -1020,6 +1026,33 @@ function verifyVitePublicDirectory(projectDir, errors, state) {
     }
   }
   scan(publicRoot);
+}
+
+// The dev server serves other project HTML files, even with a single-page
+// production build. Reject them until they are explicitly audited.
+function verifyViteSecondaryHtml(projectDir, errors) {
+  const excluded = new Set([
+    '.git', 'node_modules', 'dist', 'build', 'coverage',
+    '.next', '.turbo', '.vite', 'public',
+  ]);
+  function scan(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (excluded.has(entry.name)) continue;
+      const file = path.join(dir, entry.name);
+      const relative = normPath(path.relative(projectDir, file));
+      if (entry.isSymbolicLink()) {
+        // Symlinked directories might contain Vite-addressable HTML.
+        if (fs.statSync(file).isDirectory() || /\.html?$/i.test(entry.name)) {
+          errors.push('unverified-vite-html-page: symlinked HTML/directory ' + relative);
+        }
+      } else if (entry.isDirectory()) {
+        scan(file);
+      } else if (/\.html?$/i.test(entry.name) && relative !== 'index.html') {
+        errors.push('unverified-vite-html-page: secondary HTML entry ' + relative);
+      }
+    }
+  }
+  scan(projectDir);
 }
 
 function verifyViteHtmlEntrypoints(projectDir, sourceRoot, policy, errors, state) {
@@ -1226,6 +1259,7 @@ function check(srcDir) {
   const viteState = { publicDirDisabled: false };
   verifyViteAliases(path.dirname(root), policy, errors, viteState);
   verifyVitePublicDirectory(path.dirname(root), errors, viteState);
+  verifyViteSecondaryHtml(path.dirname(root), errors);
   verifyViteHtmlEntrypoints(path.dirname(root), root, policy, errors, viteState);
   const files = walk(root).map(f => path.resolve(f));
   if (files.length === 0) errors.push('no-source-files: No supported source files found');

@@ -1897,14 +1897,19 @@ test('default root and empty build block remain within supported static grammar'
   'app/start.ts': 'export const x = 1;',
 }, result => assert.deepEqual(result.errors, [])));
 
-test('Vite default HTML entrypoints cannot load unverified files or inline modules', () => {
-  for (const [name, html] of [["outside JS","<script type=\"module\" src=\"/other/main.ts\"></script>"],["inline JS","<script type=\"module\">import \"../other/main.ts\"</script>"],["outside style","<link rel=\"stylesheet\" href=\"/other/styles.css\">"],["classic script","<script src=\"/src/main.ts\"></script>"]]) withFixture({
+test('Vite HTML source scope and executable entries retain specific error identifiers', () => {
+  for (const [name, html, expected] of [
+    ['outside JS', '<script type="module" src="/other/main.ts"></script>', /outside-source-html-import/],
+    ['inline JS', '<script type="module">import "../other/main.ts"</script>', /unsupported-vite-html-entry/],
+    ['outside style', '<link rel="stylesheet" href="/other/styles.css">', /outside-source-html-import/],
+    ['classic script', '<script src="/src/main.ts"></script>', /unsupported-vite-html-entry/],
+  ]) withFixture({
     '../vite.config.ts': 'export default { plugins: [] };',
     '../index.html': html,
     '../other/main.ts': 'export const main = true;',
     '../other/styles.css': '.x {}',
     'app/start.ts': 'export const x = 1;',
-  }, result => assert.match(result.errors.join(' '), /unsupported-vite-html-entry/, name));
+  }, result => assert.match(result.errors.join(' '), expected, name));
 });
 test('Vite default HTML entries inside scanned source remain supported', () => withFixture({
   '../vite.config.ts': 'export default { plugins: [] };',
@@ -1916,7 +1921,7 @@ test('default Vite HTML entry cannot bypass checking even without vite.config', 
   '../index.html': '<script type="module" src="/outside/main.ts"></script>',
   '../outside/main.ts': 'export const x = 1;',
   'app/start.ts': 'export const x = 1;',
-}, result => assert.match(result.errors.join(' '), /unsupported-vite-html-entry/)));
+}, result => assert.match(result.errors.join(' '), /outside-source-html-import/)));
 
 test('Vite post-source JS/Sass dependency injection never receives static source-graph approval', () => {
   for (const setting of [
@@ -2044,4 +2049,53 @@ test('HTML-embedded browsing contexts are unsupported until their graphs are aud
     '../public/hidden.html': '<script type="module" src="/src/private.ts"></script>',
     'app/start.ts': 'export const start = true;',
   }, result => assert.match(result.errors.join(' '), /unsupported-vite-html-embed/, element));
+});
+
+test('worker-only Vite transforms and Rollup inputs cannot hide unchecked imports', () => {
+  for (const worker of [
+    'worker: { plugins: () => [{ name: "inject", transform(code) { return code; } }] }',
+    'worker: { plugins: loadPlugins() }',
+    'worker: { rollupOptions: { input: "./outside/worker.ts" } }',
+    'worker: getWorkerConfig()',
+    'worker: { format: "es" }',
+  ]) withFixture({
+    '../vite.config.ts': 'export default { plugins: [], ' + worker + ' };',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unverifiable-vite-worker-graph/, worker));
+});
+
+test('an inert empty Vite worker option object remains supported', () => withFixture({
+  '../vite.config.ts': 'export default { plugins: [], worker: {} };',
+  'app/start.ts': 'export const ready = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite additional dev HTML pages fail closed outside the checked index', () => {
+  for (const file of ['about.html', 'blog/index.html', 'src/app/hidden.html']) withFixture({
+    ['../' + file]: '<script type="module" src="/src/modules/orders/ui/private.ts"></script>',
+    '../index.html': '<script type="module" src="/src/app/start.ts"></script>',
+    'app/start.ts': 'export const ready = true;',
+    'modules/orders/ui/private.ts': 'export const hidden = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-html-page/, file));
+});
+
+test('default Vite HTML and ignored build/vendor output do not trigger secondary page errors', () =>
+  withFixture({
+    '../index.html': '<script type="module" src="/src/app/start.ts"></script>',
+    '../dist/built.html': '<script type="module" src="/outside.ts"></script>',
+    '../node_modules/pkg/demo.html': '<script type="module" src="/outside.ts"></script>',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('Vite metadata and responsive link references enforce physical module ownership', () => {
+  for (const html of [
+    '<meta property="og:image" content="/src/modules/orders/ui/private.svg">',
+    '<meta name="twitter:image" content="/src/modules/orders/ui/private.svg">',
+    '<link rel="preload" as="image" href="/src/app/safe.png" ' +
+      'imagesrcset="/src/modules/orders/ui/private.svg 2x">',
+  ]) withFixture({
+    '../index.html': html,
+    'app/start.ts': 'export const ready = true;',
+    'app/safe.png': 'placeholder',
+    'modules/orders/ui/private.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/, html));
 });

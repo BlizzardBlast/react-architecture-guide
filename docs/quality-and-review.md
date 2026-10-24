@@ -69,3 +69,11 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Resolve all supported HTML module/script, CSS and media URLs (`src`, `srcset`, icons, modulepreload, relevant asset links) against physical files, preserving module ownership restrictions.
 - [ ] Reject unsupported HTML browsing contexts, inline execution/styling and ambiguous resource grammars instead of silently assuming the content is inert.
 - [ ] Run a real Vite build and browser/security/accessibility smoke tests to confirm the parsed HTML dependencies correspond to served/bundled output.
+
+### Worker, Vite HTML metadata and multipage verification
+
+- [ ] Verify that worker-specific `plugins`, `rollupOptions` or dynamic options cannot inject unchecked edges; only omitted or empty literal worker configuration is currently supported.
+- [ ] Include Vite-recognized `link.imagesrcset` candidates and allowed `meta[content]` image/media variants in the same physical ownership checks applied to `img.srcset`.
+- [ ] Reject unaudited secondary HTML pages accessible in Vite dev, including sibling and nested `.html`/`.htm`; separately audit `public/` assets.
+- [ ] Keep existing pre-refactor architecture fixtures aligned with precise error names, without weakening genuinely invalid-input tests.
+- [ ] Verify actual worker/main builds and dev-server HTML behavior as part of the outstanding complete quality and security gates.

@@ -4,6 +4,8 @@
 const { parse } = require('parse5');
 
 const inertScriptTypes = new Set(['application/json', 'application/ld+json']);
+const viteMetaAssetNames = new Set(["msapplication-tileimage","msapplication-square70x70logo","msapplication-square150x150logo","msapplication-wide310x150logo","msapplication-square310x310logo","msapplication-config","twitter:image"]);
+const viteMetaAssetProperties = new Set(["og:image","og:image:url","og:image:secure_url","og:audio","og:audio:secure_url","og:video","og:video:secure_url"]);
 const urlAttributes = new Set([
   'href', 'src', 'srcset', 'poster', 'action', 'formaction',
   'xlink:href', 'data', 'cite', 'background', 'manifest',
@@ -113,6 +115,9 @@ function scanHtml(html) {
         }
       }
       if (tag === 'link') {
+        // Vite also rewrites <link imagesrcset>; a harmless href cannot mask
+        // a private candidate in this independent responsive image list.
+        if (attrs.has('imagesrcset')) addSrcset(attrs.get('imagesrcset'));
         const rel = new Set((attrs.get('rel') || '').toLowerCase().split(/\s+/));
         if (rel.has('stylesheet')) addReference(attrs.get('href'), 'asset');
         else if (rel.has('modulepreload')) addReference(attrs.get('href'), 'script');
@@ -128,6 +133,15 @@ function scanHtml(html) {
                    !rel.has('alternate') && !rel.has('preconnect') &&
                    !rel.has('dns-prefetch')) {
           errors.push('unsupported-vite-html-link: unsupported resource link');
+        }
+      }
+      // Vite rewrites selected HTML metadata image/audio/video references.
+      // Ordinary descriptive content stays text rather than a file path.
+      if (tag === 'meta' && attrs.has('content')) {
+        const name = (attrs.get('name') || '').toLowerCase();
+        const property = (attrs.get('property') || '').toLowerCase();
+        if (viteMetaAssetNames.has(name) || viteMetaAssetProperties.has(property)) {
+          addReference(attrs.get('content'), 'asset');
         }
       }
       // Legacy HTML background URLs also fetch assets. Unknown URL-bearing
