@@ -206,3 +206,10 @@ Negative and positive regression fixtures cover the original bypass and related 
 **Pass 1:** added conservative manifest-export target classification (root/subpath, scoped/wildcard, conditional `types` vs `import`, arrays and legacy package entry fields), `.styl` and `.stylus` recognition, and a fail-closed diagnostic for otherwise unresolved bare runtime imports. Preserved real JS dependency resolution, first-party alias handling and test-only import controls. Eight architecture fixture groups exercise the original and related cases. The staged helper passed 17/17 synthetic manifest cases; independent TypeScript 5.8.3 filesystem tests demonstrated root CSS unresolved, conditional CSS resolving only to a `.d.ts`, and unavailable CSS modules. These are focused tests and **not** the repository's pinned TypeScript 5.9.3 / parse5-backed architecture suite.
 
 **Still outstanding:** 0/3 authentic lockfiles, dependency installation and complete root/React/orders tests, two actual Vite builds, actual package export conformance in the bundler, npm audits, and browser/accessibility checks. No new CI workflow or needless remote pushes were added; keep draft/unmerged until real validation passes.
+
+
+### Remediation scope: executable configuration and package style mappings
+
+The boundary checker now fails closed on shell expansion/redirection in entrypoint/Vite scripts, arbitrary runtime imports and unknown executable properties in Vite configs, package self-exports and `#imports` pointing to stylesheet targets, and automatically discovered PostCSS config. Negative controls and benign configurations have regression fixtures. This is static protection only: none of these checks replace actual Vite/TypeScript integration validation.
+
+**Merge blockers remain until objectively verified:** registry-generated and committed lockfiles for the root, orders and React examples; exact pinned dependency installations, complete tests and audits; two actual Vite builds and preview; browser/accessibility checks and the repository's required security/review gates. Do not treat isolated source probes or absent GitHub Actions statuses as passing these gates.

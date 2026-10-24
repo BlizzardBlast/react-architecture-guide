@@ -2667,3 +2667,116 @@ test('more-specific JavaScript package wildcard does not inherit broad styleshee
     '../node_modules/ui-kit/styles/utils/math.css': '.fake { color: red }',
     'app/start.ts': 'import { value } from "ui-kit/utils/math"; export const ready = value;',
   }, result => assert.deepEqual(result.errors, [])));
+
+
+test('active npm scripts reject shell redirection changing the Vite execution graph', () => {
+  for (const script of [
+    'echo altered > vite.config.ts && vite build',
+    'printf altered 1>vite.config.ts && vite build',
+    'vite build > build.log',
+    'npm run build -- --config hidden.ts > output.log',
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: script } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unsupported-vite-custom-config/, script));
+  // A comparison operator inside a quoted echo argument is inert.
+  withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      build: 'echo "1 > 0" && vite build',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('Vite config rejects executable imports, ignored side effects and unknown resolution', () => {
+  for (const config of [
+    'import "./extra-build.mjs"; export default { plugins: [] };',
+    'import { configure } from "./extra-build.mjs"; export default { plugins: [] };',
+    'export default { plugins: [], unchecked: (() => true)() };',
+    'export default { plugins: [], test: { include: (() => ["src/**/*.test.ts"])() } };',
+    'export default { plugins: [], resolve: { conditions: ["custom"] } };',
+  ]) withFixture({
+    '../vite.config.ts': config,
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unsupported-vite-alias-config|unverifiable-vite-config-expression|unverifiable-vite-resolution-option/, config));
+  withFixture({
+    '../vite.config.ts': 'export default { plugins: [], test: { environment: "jsdom", include: ["src/**/*.test.ts"], clearMocks: true } };',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('package imports mappings expose CSS even when types resolve to owned declarations', () => {
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture-pkg', type: 'module',
+      imports: { '#theme': {
+        types: './src/shared/lib/theme.d.ts',
+        default: './src/modules/orders/ui/private.css',
+      } },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'shared/lib/theme.d.ts': 'declare const theme: string; export default theme;',
+    'modules/orders/ui/private.css': '.hidden { color: red }',
+    'app/start.ts': 'import theme from "#theme"; export const ready = theme;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> #theme/));
+});
+
+test('package self-name exports cannot mask CSS with a declaration path', () => {
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture-pkg', type: 'module',
+      exports: { './theme': {
+        types: './src/shared/lib/theme.d.ts',
+        default: './src/modules/orders/ui/private.css',
+      } },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'shared/lib/theme.d.ts': 'declare const theme: string; export default theme;',
+    'modules/orders/ui/private.css': '.hidden { color: red }',
+    'app/start.ts': 'import theme from "fixture-pkg/theme"; export const ready = theme;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> fixture-pkg\/theme/));
+  // Self exports to JavaScript, not CSS, retain a working positive control.
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture-pkg',
+      exports: { './math': {
+        types: './src/shared/lib/math.d.ts', default: './src/shared/lib/math.js',
+      } },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'shared/lib/math.d.ts': 'export declare const value: number;',
+    'shared/lib/math.js': 'export const value = 5;',
+    'app/start.ts': 'import { value } from "fixture-pkg/math"; export const ready = value;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('Vite auto-discovered PostCSS configurations cannot bypass the CSS scanner', () => {
+  for (const file of [
+    '../postcss.config.js', '../postcss.config.cjs',
+    '../postcss.config.ts', '../.postcssrc', '../.postcssrc.json',
+  ]) withFixture({
+    [file]: 'module.exports = { plugins: [] }',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverifiable-vite-postcss-config/, file));
+  withFixture({
+    '../package.json': JSON.stringify({ postcss: { plugins: {} } }),
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverifiable-vite-postcss-config/));
+  withFixture({
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});

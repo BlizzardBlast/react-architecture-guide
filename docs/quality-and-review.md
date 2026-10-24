@@ -119,3 +119,12 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Fail closed on extensionless CSS root/subpath exports, scoped/wildcard cases, bare Stylus imports and unresolved active package imports; do not silently accept unknown bundle edges.
 - [ ] Preserve legitimate JS package exports even when the same package exposes separate CSS subpaths; preserve owned first-party aliases and type-only/test-file controls.
 - [ ] Verify these cases against actual Vite resolved import graphs and the pinned TypeScript version before release.
+
+
+### Executable configuration and package mapping assurance
+
+- [ ] npm-script shell redirection, interpolation, and opaque execution cannot change a Vite config between static checking and building.
+- [ ] Vite config imports only trusted integration modules, and unknown property initializers, computed test settings or resolution options fail closed.
+- [ ] Nearest-package self-name `exports` and `#imports` conditionals cannot disguise a CSS runtime target as an owned TypeScript declaration.
+- [ ] Automatically discovered PostCSS configuration (from project or ancestor files/package metadata) is rejected unless the transformed CSS graph is independently verified.
+- [ ] The authentic registry-backed lockfiles, pinned suites, two actual Vite builds, dependency audits and browser/accessibility checks are mandatory before merge.

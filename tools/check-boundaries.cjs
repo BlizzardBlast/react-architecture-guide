@@ -352,14 +352,8 @@ function matchesAlias(spec, patterns) {
 // Vite may resolve bare package exports to CSS without a stylesheet suffix,
 // while TypeScript resolves a declaration or nothing at all. Inspect the
 // *matching* export subpath, including conditional alternatives.
-function packageStyleExport(spec, importer) {
-  if (spec.startsWith('#') || spec.startsWith('node:')) return false;
-  const parts = spec.split('/');
-  const scoped = spec.startsWith('@');
-  if ((scoped && parts.length < 2) || !parts[0]) return false;
-  const packageName = scoped ? parts.slice(0, 2).join('/') : parts[0];
-  const subpath = parts.slice(scoped ? 2 : 1).join('/');
-  const exportKey = subpath ? './' + subpath : '.';
+function packageStyleExport(spec, importer, ownedSource = false) {
+  if (spec.startsWith('node:')) return false;
   const isStyle = target => /\.(?:css|scss|sass|less|styl|stylus)$/i.test(fileSpecifier(target));
   function containsStyles(value) {
     if (typeof value === 'string') return isStyle(value);
@@ -367,37 +361,63 @@ function packageStyleExport(spec, importer) {
     return Boolean(value && typeof value === 'object' &&
       Object.values(value).some(containsStyles));
   }
-  function exportTargets(exportsField) {
-    if (typeof exportsField !== 'object' || exportsField === null ||
-        Array.isArray(exportsField)) return exportKey === '.' ? exportsField : undefined;
-    const keys = Object.keys(exportsField);
-    // Root conditional exports have no "." or "./subpath" keys.
-    if (keys.every(key => !key.startsWith('.'))) {
-      return exportKey === '.' ? exportsField : undefined;
+  function matchingTargets(field, key) {
+    if (typeof field !== 'object' || field === null || Array.isArray(field)) {
+      return key === '.' ? field : undefined;
     }
-    if (Object.hasOwn(exportsField, exportKey)) return exportsField[exportKey];
-    const matching = keys.filter(key => {
-      const star = key.indexOf('*');
-      return star >= 0 && key.startsWith('./') &&
-        exportKey.startsWith(key.slice(0, star)) &&
-        exportKey.endsWith(key.slice(star + 1)) &&
-        exportKey.length >= key.length - 1;
+    const keys = Object.keys(field);
+    if (key === '.' && keys.every(k => !k.startsWith('.') && !k.startsWith('#'))) {
+      return field;
+    }
+    if (Object.hasOwn(field, key)) return field[key];
+    const matching = keys.filter(k => {
+      const star = k.indexOf('*');
+      return star >= 0 && k.indexOf('*', star + 1) < 0 &&
+        (k.startsWith('./') || k.startsWith('#')) &&
+        key.startsWith(k.slice(0, star)) &&
+        key.endsWith(k.slice(star + 1)) &&
+        key.length >= k.length - 1;
     });
-    // Node's subpath patterns prefer the longest prefix, then suffix.
-    // A broad CSS pattern cannot taint a more-specific JavaScript export.
     matching.sort((a, b) => {
       const ap = a.indexOf('*'), bp = b.indexOf('*');
       return bp - ap || (b.length - bp) - (a.length - ap);
     });
-    return matching.length ? exportsField[matching[0]] : undefined;
+    return matching.length ? field[matching[0]] : undefined;
   }
+  // Nearest package imports and self-name exports may point to CSS at runtime
+  // while TypeScript resolves to owned declarations. Inspect both targets.
+  let scope;
+  for (let dir = path.dirname(importer); ; dir = path.dirname(dir)) {
+    const manifest = path.join(dir, 'package.json');
+    if (fs.existsSync(manifest)) {
+      try { scope = JSON.parse(fs.readFileSync(manifest, 'utf8')); }
+      catch { return true; }
+      break;
+    }
+    if (path.dirname(dir) === dir) break;
+  }
+  if (spec.startsWith('#')) {
+    return scope?.imports !== undefined &&
+      containsStyles(matchingTargets(scope.imports, spec));
+  }
+  const parts = spec.split('/');
+  const scoped = spec.startsWith('@');
+  if ((scoped && parts.length < 2) || !parts[0]) return false;
+  const packageName = scoped ? parts.slice(0, 2).join('/') : parts[0];
+  const subpath = parts.slice(scoped ? 2 : 1).join('/');
+  const exportKey = subpath ? './' + subpath : '.';
+  if (scope?.name === packageName && scope.exports !== undefined) {
+    return containsStyles(matchingTargets(scope.exports, exportKey));
+  }
+  // Owned baseUrl imports must not be tainted by unrelated installed packages.
+  if (ownedSource) return false;
   for (let dir = path.dirname(importer); ; dir = path.dirname(dir)) {
     const manifest = path.join(dir, 'node_modules', packageName, 'package.json');
     if (fs.existsSync(manifest)) {
       let pkg;
       try { pkg = JSON.parse(fs.readFileSync(manifest, 'utf8')); }
-      catch { return true; } // Unverifiable installed package: fail closed.
-      if (pkg.exports !== undefined) return containsStyles(exportTargets(pkg.exports));
+      catch { return true; }
+      if (pkg.exports !== undefined) return containsStyles(matchingTargets(pkg.exports, exportKey));
       if (exportKey === '.') {
         return ['module', 'main', 'browser'].some(key =>
           typeof pkg[key] === 'string' && isStyle(pkg[key]));
@@ -408,7 +428,6 @@ function packageStyleExport(spec, importer) {
     if (path.dirname(dir) === dir) return false;
   }
 }
-
 function loadBoundaryConfig(parent) {
   const file = path.join(parent, 'architecture.config.json');
   if (!fs.existsSync(file)) return { allowPureExternal: [], allowCrossModule: {}, allowMixedLayouts: {}, viteAliases: {}, viteConfig: null };
@@ -543,6 +562,25 @@ function verifyViteAliases(projectDir, policy, errors, viteState) {
     push();
     return words;
   }
+
+  // Expansion and redirection can change config after static inspection.
+  // Refuse these syntax forms even when echo, printf, or vite looks trusted.
+  function hasUncheckedShellEffects(script) {
+    let quote = null, escaped = false;
+    for (const c of script) {
+      if (escaped) { escaped = false; continue; }
+      if (c === '\\' && quote !== "'") { escaped = true; continue; }
+      if (c === '"' || c === "'") {
+        if (quote === c) quote = null;
+        else if (!quote) quote = c;
+        continue;
+      }
+      if (quote === "'") continue;
+      if ((!quote && (c === '<' || c === '>')) ||
+          c === '$' || c.charCodeAt(0) === 96 || c === '\n' || c === '\r') return true;
+    }
+    return false;
+  }
   function viteArguments(words) {
     let index = 0;
     // Recognize actual launchers, not an incidental "vite" in echo text.
@@ -673,6 +711,11 @@ function verifyViteAliases(projectDir, policy, errors, viteState) {
     }
     const commandsWithVite = tokens.map(words => ({ words, args: viteArguments(words) }))
       .filter(entry => entry.args !== null);
+    if ((executableScripts.has(scriptName) || commandsWithVite.length) &&
+        hasUncheckedShellEffects(script)) {
+      errors.push('unsupported-vite-custom-config: shell expansion or redirection can change the executed Vite graph: ' + scriptName);
+      return;
+    }
     // For build/dev entrypoints, the actual Vite invocation must be visible.
     // An opaque Node/tsx build file or an unrelated npm script can invoke Vite
     // programmatically with a different config after validation.
@@ -885,9 +928,15 @@ function verifyViteAliases(projectDir, policy, errors, viteState) {
   // Side-effecting ESM declarations can mutate the exported config after
   // static inspection, just as CommonJS initializers can. Imports and erased
   // TypeScript type declarations are the only allowed companions of export.
+  // An import executes its target module. Only known Vite/React/config
+  // integration modules can be statically trusted for this reference checker.
+  const trustedConfigModules = new Set(['vite', 'vitest/config', '@vitejs/plugin-react', 'node:url']);
   const inert = statement =>
     (ts.isExpressionStatement(statement) && ts.isStringLiteral(statement.expression)) ||
-    (!cjsFile && (ts.isImportDeclaration(statement) ||
+    (!cjsFile && ((ts.isImportDeclaration(statement) &&
+      (statement.importClause?.isTypeOnly ||
+        Boolean(statement.importClause &&
+          trustedConfigModules.has(literalString(statement.moduleSpecifier))))) ||
       ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)));
   if (source.statements.some(statement => statement !== exports[0] && !inert(statement))) {
     errors.push('unsupported-vite-alias-config: additional top-level executable declarations');
@@ -936,6 +985,34 @@ function verifyViteAliases(projectDir, policy, errors, viteState) {
     return properties;
   }
   const top = objectProperties(config, 'top-level');
+  const allowedTop = new Set([
+    'resolve', 'plugins', 'worker', 'publicDir', 'root', 'build',
+    'environments', 'builder', 'esbuild', 'css', 'test',
+  ]);
+  for (const name of top.keys()) {
+    if (!allowedTop.has(name)) errors.push(
+      'unverifiable-vite-config-expression: unknown config property ' + name);
+  }
+  // Object property initializers execute even when their keys are ignored.
+  const testOptions = top.get('test');
+  if (testOptions) {
+    if (!ts.isObjectLiteralExpression(testOptions)) {
+      errors.push('unverifiable-vite-config-expression: test must be a literal object');
+    } else {
+      const options = objectProperties(testOptions, 'test');
+      for (const [name, value] of options) {
+        const strings = ts.isArrayLiteralExpression(value) &&
+          value.elements.every(ts.isStringLiteral);
+        const accepted =
+          (name === 'environment' && ts.isStringLiteral(value)) ||
+          (['setupFiles', 'include'].includes(name) && strings) ||
+          (name === 'clearMocks' &&
+            [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword].includes(value.kind));
+        if (!accepted) errors.push(
+          'unverifiable-vite-config-expression: executable or unknown test option ' + name);
+      }
+    }
+  }
   const configured = top.get('resolve');
   const aliases = new Map();
   if (configured) {
@@ -943,6 +1020,10 @@ function verifyViteAliases(projectDir, policy, errors, viteState) {
       errors.push('unsupported-vite-alias-config: resolve must be a static object');
     } else {
       const resolve = objectProperties(configured, 'resolve');
+      for (const name of resolve.keys()) {
+        if (name !== 'alias') errors.push(
+          'unverifiable-vite-resolution-option: unchecked resolve option ' + name);
+      }
       if (resolve.has('alias')) {
         const aliasValue = resolve.get('alias');
         if (!ts.isObjectLiteralExpression(aliasValue)) {
@@ -1090,6 +1171,33 @@ function verifyViteAliases(projectDir, policy, errors, viteState) {
 }
 
 
+
+
+// Vite discovers PostCSS independently of vite.config.ts. PostCSS plugins
+// can inject CSS edges that the raw source scanner never sees.
+function verifyVitePostcssConfig(projectDir, errors) {
+  const configName = /^(?:postcss\.config\.(?:[cm]?[jt]s|json|ya?ml)|\.postcssrc(?:\.(?:[cm]?[jt]s|json|ya?ml))?)$/i;
+  for (let dir = projectDir; ; dir = path.dirname(dir)) {
+    for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (configName.test(item.name)) {
+        errors.push('unverifiable-vite-postcss-config: PostCSS config ' +
+          normPath(path.join(dir, item.name)) + ' may transform CSS imports');
+      }
+    }
+    const packageFile = path.join(dir, 'package.json');
+    if (fs.existsSync(packageFile)) {
+      let pkg;
+      try { pkg = JSON.parse(fs.readFileSync(packageFile, 'utf8')); }
+      catch {
+        errors.push('unverifiable-vite-postcss-config: unreadable package manifest ' + packageFile);
+      }
+      if (pkg && Object.hasOwn(pkg, 'postcss')) {
+        errors.push('unverifiable-vite-postcss-config: package.json postcss configuration in ' + dir);
+      }
+    }
+    if (path.dirname(dir) === dir) break;
+  }
+}
 
 const publicSafeAsset = /\.(?:png|jpe?g|gif|webp|avif|ico|bmp|woff2?|ttf|otf|mp4|webm)$/i;
 
@@ -1412,6 +1520,7 @@ function check(srcDir) {
   const policy = loadBoundaryConfig(path.dirname(root));
   const viteState = { publicDirDisabled: false };
   verifyViteAliases(path.dirname(root), policy, errors, viteState);
+  verifyVitePostcssConfig(path.dirname(root), errors);
   verifyVitePublicDirectory(path.dirname(root), errors, viteState);
   verifyViteSecondaryHtml(path.dirname(root), errors, viteState);
   verifyViteHtmlEntrypoints(path.dirname(root), root, policy, errors, viteState);
@@ -1548,8 +1657,8 @@ function check(srcDir) {
         }
         // Owned baseUrl imports are local regardless of their bare spelling.
         const ownedSource = resolved && known.has(path.resolve(resolved));
-        const styleExport = barePackage && !ownedSource &&
-          packageStyleExport(filesystemSpec, file);
+        const styleExport = barePackage &&
+          packageStyleExport(filesystemSpec, file, Boolean(ownedSource));
         if (styleExport) {
           errors.push(`unverified-package-stylesheet: ${source.relative} -> ${dep.spec}`);
           if (pureCode && !isTest) {
