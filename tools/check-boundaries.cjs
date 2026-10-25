@@ -487,7 +487,8 @@ function runtimePackageTargets(spec, importer) {
   function walk(name) {
     if (visited.has(name)) return { paths: [], unverifiable: true };
     visited.add(name);
-    const self = ownName && (name === ownName || name.startsWith(ownName + '/'));
+    try {
+      const self = ownName && (name === ownName || name.startsWith(ownName + '/'));
     const mapping = name.startsWith('#') ? match(scope.imports, name) :
       self ? match(scope.exports, name === ownName ? '.' : './' + name.slice(ownName.length + 1)) : null;
     if (!mapping) return { paths: [], unverifiable: true };
@@ -500,6 +501,10 @@ function runtimePackageTargets(spec, importer) {
           paths.push(path.resolve(scopeDir, value));
         } else if (value.startsWith('#') || value === ownName ||
                    ownName && value.startsWith(ownName + '/')) {
+          // Node package imports do not allow another #imports key as the
+          // target. Audit any reachable source for ownership, but reject the
+          // nonconforming redirect instead of certifying a safe runtime path.
+          if (value.startsWith('#')) unverifiable = true;
           const follow = walk(value);
           paths.push(...follow.paths);
           unverifiable ||= follow.unverifiable;
@@ -523,8 +528,13 @@ function runtimePackageTargets(spec, importer) {
         unverifiable = true;
       }
     }
-    evaluate(mapping.target, mapping.wildcard);
-    return { paths, unverifiable };
+      evaluate(mapping.target, mapping.wildcard);
+      return { paths, unverifiable };
+    } finally {
+      // A completed sibling branch is not a recursion cycle. Keep only the
+      // active call chain in visited, including when an alias is unresolved.
+      visited.delete(name);
+    }
   }
   return walk(spec);
 }
@@ -1686,6 +1696,15 @@ function check(srcDir) {
         continue;
       }
       const filesystemSpec = fileSpecifier(dep.spec);
+      const query = dep.spec.slice(filesystemSpec.length);
+      // Vite ?raw/?url imports are assets, not executable module edges.
+      // Worker query entrypoints still execute and must enter the runtime graph.
+      const workerQuery = /(?:[?&])(?:worker|sharedworker)(?:[=&]|$)/.test(query) ||
+        Boolean(dep.workerEntry);
+      const dataQuery = /(?:[?&])(?:raw|url|inline|no-inline)(?:[=&]|$)/.test(query) &&
+        !workerQuery;
+      const mappedAsset = dataQuery || (Boolean(dep.fromUrl) && !dep.workerEntry);
+      const transformedImport = Boolean(query) || Boolean(dep.fromUrl);
       const relativeSpec = filesystemSpec.startsWith('.');
       const rootAbsolute = filesystemSpec.startsWith('/');
       const rootPath = rootAbsolute ? path.resolve(path.dirname(root), '.' + filesystemSpec) : null;
@@ -1721,6 +1740,8 @@ function check(srcDir) {
         if (pureCode && !isTest) errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
         continue;
       }
+      const localAsset = Boolean((staticAsset || dep.fromUrl || filesystemSpec !== dep.spec) &&
+        (relativeSpec || projectAlias));
       if (dep.runtime && !relativeSpec && !rootAbsolute && !viteAlias) {
         const mapping = runtimePackageTargets(filesystemSpec, file);
         if (mapping) {
@@ -1745,8 +1766,14 @@ function check(srcDir) {
             }
             const dest = category(physical, physicalRoot);
             checkOwnedDependency(source, dest, policy, errors,
-              { asset: false, isTest });
-            resolvedRuntime.push(path.resolve(target));
+              { asset: mappedAsset, isTest });
+            // A transformed file is an asset value even if its underlying
+            // package mapping names JavaScript or TypeScript source.
+            if (pureCode && !isTest && transformedImport && !localAsset) {
+              errors.push('pure-layer-static-asset: ' +
+                source.relative + ' -> ' + dep.spec);
+            }
+            if (!mappedAsset) resolvedRuntime.push(path.resolve(target));
           }
           if (unverifiable) {
             errors.push('unverified-package-runtime-mapping: ' +
@@ -1759,8 +1786,7 @@ function check(srcDir) {
           }
         }
       }
-      const localAsset = Boolean((staticAsset || dep.fromUrl || filesystemSpec !== dep.spec) &&
-        (relativeSpec || projectAlias));
+
       // Assets are still architectural dependencies. Resolve the physical path,
       // then apply the same ownership/layer checks used for source imports.
       let resolved;
@@ -1856,13 +1882,10 @@ function check(srcDir) {
         continue;
       }
       checkOwnedDependency(source, dest, policy, errors, { asset: localAsset, isTest });
-      // ?raw and ?url treat source files as bytes/data, not executable imports.
-      // ?worker imports are bundled entrypoints and must remain graph edges.
-      const query = dep.spec.slice(filesystemSpec.length);
-      const dataQuery = /(?:[?&])(?:raw|url|inline|no-inline)(?:[=&]|$)/.test(query) &&
-        !/(?:[?&])worker(?:[=&]|$)/.test(query);
-      if (!localAsset || (sourceExt.test(filesystemSpec) && !dataQuery &&
-          (!dep.fromUrl || dep.workerEntry))) {
+      // Preserve Vite's asset/execution distinction for mapped #imports,
+      // relative imports, and source files transformed through a query.
+      if (!dataQuery && (!dep.fromUrl || dep.workerEntry) &&
+          (!localAsset || sourceExt.test(filesystemSpec))) {
         edges.get(file).push({ target, runtime: dep.runtime });
       }
     }

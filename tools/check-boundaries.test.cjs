@@ -3061,3 +3061,155 @@ test('runtime package mappings outside src are never considered owned sources', 
     'shared/lib/safe.ts': 'export const safe = 1;',
     'app/start.ts': 'import { safe } from "#private"; export const result = safe;',
   }, result => assert.match(result.errors.join(' '), /unverified-package-runtime-mapping/)));
+
+
+test('package-mapped Vite raw and URL assets are forbidden in pure domain code', () => {
+  for (const query of ['raw', 'url']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        imports: { '#source': './src/modules/orders/domain/payload.js' },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'modules/orders/domain/payload.ts': 'export const payload = true;',
+      'modules/orders/domain/order.ts':
+        'import value from "#source?' + query + '"; export const order = value;',
+    }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/, query));
+  }
+});
+
+test('package-mapped ?raw and ?url are non-executable assets, not runtime cycles', () => {
+  for (const query of ['raw', 'url']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        imports: { '#source': './src/modules/orders/ui/b.js' },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'modules/orders/ui/a.ts': 'import value from "#source?' + query + '"; export const a = value;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => {
+      assert.doesNotMatch(result.errors.join(' '), /runtime-cycle/, query);
+      assert.deepEqual(result.errors, [], query);
+    });
+  }
+});
+
+test('package-mapped executable modules and ?worker still contribute runtime edges', () => {
+  for (const suffix of ['', '?worker']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        imports: { '#source': './src/modules/orders/ui/b.js' },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'modules/orders/ui/a.ts': 'import { b } from "#source' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
+  }
+});
+
+test('a package raw import still observes architectural ownership as an asset', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      imports: { '#private': './src/modules/orders/infrastructure/secret.js' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'modules/orders/infrastructure/secret.ts': 'export const secret = "private";',
+    'app/start.ts': 'import contents from "#private?raw"; export const result = contents;',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/)));
+
+test('a valid Vite query asset imported through a TS alias remains non-executable', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      imports: { '#source': './src/modules/orders/ui/b.js' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+      baseUrl: '.', paths: { '#source': ['src/modules/orders/ui/b.ts'] },
+    } }),
+    'modules/orders/ui/a.ts': 'import value from "#source?raw"; export const a = value;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => {
+    assert.deepEqual(result.errors, []);
+    assert.doesNotMatch(result.errors.join(' '), /runtime-cycle/);
+  }));
+
+test('repeated valid self-package targets across conditions are not cycles', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      exports: { './shared': './src/shared/lib/math.js' },
+      imports: {
+        '#entry': { node: 'fixture/shared', default: 'fixture/shared' },
+      },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'shared/lib/math.ts': 'export const value = 2;',
+    'app/start.ts': 'import { value } from "#entry"; export const result = value;',
+  }, result => assert.deepEqual(result.errors, [])));
+test('valid conditional and fallback-array mappings reuse exports without false cycles', () => {
+  for (const spec of ['#entry', '#array']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        exports: {
+          './left': './src/shared/lib/math.js',
+          './right': './src/shared/lib/math.js',
+        },
+        imports: {
+          '#entry': { browser: 'fixture/left', default: 'fixture/right' },
+          '#array': ['fixture/left', 'fixture/left'],
+        },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'shared/lib/math.ts': 'export const value = 2;',
+      'app/start.ts': 'import { value } from "' + spec + '"; export const result = value;',
+    }, result => assert.deepEqual(result.errors, [], spec));
+  }
+});
+test('genuine recursive #imports remain unverifiable after the branch-stack fix', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      imports: { '#first': '#second', '#second': '#first' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+      baseUrl: '.', paths: { '#first': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const value = 2;',
+    'app/start.ts': 'import { value } from "#first"; export const result = value;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-runtime-mapping/)));
+
+
+test('nonconforming nested #imports targets fail closed even when a source exists', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      imports: {
+        '#leaf': './src/shared/lib/math.js',
+        '#entry': '#leaf',
+      },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+      baseUrl: '.', paths: { '#entry': ['src/shared/lib/math.ts'] },
+    } }),
+    'shared/lib/math.ts': 'export const value = 2;',
+    'app/start.ts': 'import { value } from "#entry"; export const result = value;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-runtime-mapping/)));

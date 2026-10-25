@@ -140,3 +140,9 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Runtime `#imports` and self-name JavaScript `exports` targets are checked independently of the TypeScript-resolved file, including conditional targets, wildcard patterns, runtime cycles, and source-root containment.
 - [ ] Ordinary same-owner `.js`-to-`.ts` mappings, erased `import type`, and unrelated installed JavaScript packages continue to work; unknown or unresolvable redirects must not receive a false pass.
 - [ ] Stylus `.styl`/`.stylus` files fail closed until their transitive dependency semantics have real build-graph verification, including HTML entrypoints and script side-effect imports.
+
+### Package-query and repeated-target regression checks
+
+- [ ] A mapped `#name?raw` or `#name?url` import is checked as a data/asset dependency, forbidden in pure layers and excluded from executable-cycle edges; the owning source file and architectural boundaries remain checked.
+- [ ] Mapped ordinary JavaScript and `?worker` imports remain executable dependency edges; a genuine cycle is still rejected.
+- [ ] Repeated safe import-map targets through `node`/`default`, branching aliases or fallback arrays are not mistaken for recursive cycles; unsupported `#`-to-`#` redirects and self-recursive maps are rejected.
