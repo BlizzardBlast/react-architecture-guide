@@ -3368,3 +3368,126 @@ test('manifestless installed legacy package still shadows a TS-only alias', () =
     'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
   }, result => assert.match(result.errors.join(' '),
     /unverified-package-runtime-mapping: app\/start\.ts -> ui-kit/)));
+
+
+test('relative TypeScript inline modifiers preserve executable runtime cycles', () => {
+  for (const suffix of ['?inline', '?no-inline', '?inline&no-inline']) {
+    withFixture({
+      'modules/orders/ui/a.ts': 'import { b } from "./b.ts' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
+  }
+});
+
+test('relative JavaScript inline modifiers preserve executable runtime cycles', () => {
+  for (const suffix of ['?inline', '?no-inline']) {
+    withFixture({
+      'modules/orders/ui/a.js': 'import { b } from "./b.js' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.js': 'import { a } from "./a.js"; export const b = a;',
+    }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
+  }
+});
+
+test('source-only inline modifiers stay valid in a pure domain layer', () => {
+  for (const suffix of ['?inline', '?no-inline']) {
+    withFixture({
+      'modules/orders/domain/a.ts': 'import { b } from "./b.ts' + suffix + '"; export const a = b;',
+      'modules/orders/domain/b.ts': 'export const b = 7;',
+    }, result => assert.deepEqual(result.errors, [], suffix));
+  }
+});
+
+test('package-mapped inline JavaScript imports still contribute runtime edges', () => {
+  for (const suffix of ['?inline', '?no-inline']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        imports: { '#source': './src/modules/orders/ui/b.js' },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'modules/orders/ui/a.ts': 'import { b } from "#source' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
+  }
+});
+
+test('package import inline modifiers do not introduce false pure asset errors', () => {
+  for (const suffix of ['?inline', '?no-inline']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        imports: { '#source': './src/modules/orders/domain/b.js' },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'modules/orders/domain/a.ts': 'import { b } from "#source' + suffix + '"; export const a = b;',
+      'modules/orders/domain/b.ts': 'export const b = 3;',
+    }, result => assert.deepEqual(result.errors, [], suffix));
+  }
+});
+
+test('self-package runtime exports retain executable edges with inline modifiers', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      exports: { './b': './src/modules/orders/ui/b.js' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'modules/orders/ui/a.ts': 'import { b } from "fixture/b?inline"; export const a = b;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+test('Vite-aliased source inline modifiers retain executable runtime graph edges', () => {
+  for (const suffix of ['?inline', '?no-inline']) {
+    withFixture({
+      '../vite.config.ts': 'import { fileURLToPath } from "node:url";\n' +
+        'export default { resolve: { alias: { "@b": fileURLToPath(new URL("./src/modules/orders/ui/b.ts", import.meta.url)) } } };',
+      '../architecture.config.json': JSON.stringify({
+        viteAliases: { '@b': 'src/modules/orders/ui/b.ts' },
+      }),
+      'modules/orders/ui/a.ts': 'import { b } from "@b' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
+  }
+});
+
+test('inline/no-inline CSS and images remain assets, including in pure layers', () => {
+  for (const [file, content] of [
+    ['style.css', '.style { color: blue }'],
+    ['picture.svg', '<svg xmlns="http://www.w3.org/2000/svg"></svg>'],
+  ]) {
+    for (const suffix of ['?inline', '?no-inline']) {
+      withFixture({
+        ['modules/orders/ui/' + file]: content,
+        'modules/orders/ui/a.ts': 'import asset from "./' + file + suffix + '"; export const a = asset;',
+      }, result => assert.deepEqual(result.errors, [], file + suffix));
+      withFixture({
+        ['modules/orders/domain/' + file]: content,
+        'modules/orders/domain/a.ts': 'import asset from "./' + file + suffix + '"; export const a = asset;',
+      }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/, file + suffix));
+    }
+  }
+});
+
+test('raw/url transforms remain data even with inline modifiers', () => {
+  for (const suffix of ['?raw&inline', '?url&no-inline']) {
+    withFixture({
+      'modules/orders/ui/a.ts': 'import value from "./b.ts' + suffix + '"; export const a = value;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => {
+      assert.doesNotMatch(result.errors.join(' '), /runtime-cycle/, suffix);
+      assert.deepEqual(result.errors, [], suffix);
+    });
+  }
+});
+
+test('worker entrypoint with inline modifier remains executable', () =>
+  withFixture({
+    'modules/orders/ui/a.ts': 'import Worker from "./b.ts?worker&inline"; export const a = Worker;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => assert.match(result.errors.join(' '), /runtime-cycle/)));

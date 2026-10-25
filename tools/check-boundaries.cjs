@@ -1718,14 +1718,19 @@ function check(srcDir) {
       }
       const filesystemSpec = fileSpecifier(dep.spec);
       const query = dep.spec.slice(filesystemSpec.length);
-      // Vite ?raw/?url imports are assets, not executable module edges.
-      // Worker query entrypoints still execute and must enter the runtime graph.
+      // Vite ?raw/?url explicitly load data. ?inline/?no-inline only control
+      // asset inlining; on JS/TS they are not an asset loader and still execute
+      // the source module. Worker entries must also retain executable edges.
       const workerQuery = /(?:[?&])(?:worker|sharedworker)(?:[=&]|$)/.test(query) ||
         Boolean(dep.workerEntry);
-      const dataQuery = /(?:[?&])(?:raw|url|inline|no-inline)(?:[=&]|$)/.test(query) &&
+      const dataQuery = /(?:[?&])(?:raw|url)(?:[=&]|$)/.test(query) &&
         !workerQuery;
+      // Treat solely these known inline modifiers as non-transforming for
+      // source modules. Unknown or combined query modes stay conservative.
+      const inlineModifiersOnly = /^\?(?:inline|no-inline)(?:&(?:inline|no-inline))*$/.test(query);
       const mappedAsset = dataQuery || (Boolean(dep.fromUrl) && !dep.workerEntry);
-      const transformedImport = Boolean(query) || Boolean(dep.fromUrl);
+      const transformedImport = Boolean(dep.fromUrl) ||
+        (Boolean(query) && !inlineModifiersOnly);
       const relativeSpec = filesystemSpec.startsWith('.');
       const rootAbsolute = filesystemSpec.startsWith('/');
       const rootPath = rootAbsolute ? path.resolve(path.dirname(root), '.' + filesystemSpec) : null;
@@ -1788,7 +1793,8 @@ function check(srcDir) {
         }
         continue;
       }
-      const localAsset = Boolean((staticAsset || dep.fromUrl || filesystemSpec !== dep.spec) &&
+      const localAsset = Boolean((staticAsset || dep.fromUrl ||
+        (filesystemSpec !== dep.spec && !inlineModifiersOnly)) &&
         (relativeSpec || projectAlias));
       if (dep.runtime && !relativeSpec && !rootAbsolute && !viteAlias) {
         const mapping = runtimePackageTargets(filesystemSpec, file);
@@ -1860,9 +1866,9 @@ function check(srcDir) {
           errors.push(`missing-static-asset: ${source.relative} -> ${dep.spec}`);
           continue;
         }
-        // Pure data imports require ordinary, unmodified JSON. Any query
-        // (?raw/?url/?worker/etc.) or new URL() produces an asset value,
-        // even when the referenced file ends in .json or .ts.
+        // Pure data imports require ordinary, unmodified JSON. Raw/URL/worker
+        // transformations and other asset queries are not pure data, even
+        // when their underlying file has a .json or source extension.
         const querySuffix = dep.spec.slice(filesystemSpec.length);
         const plainJson = !querySuffix && !dep.fromUrl &&
           filesystemSpec.toLowerCase().endsWith('.json');
