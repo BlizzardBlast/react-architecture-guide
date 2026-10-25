@@ -154,3 +154,10 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] A runtime bare import cannot be certified by a TS `paths`/`baseUrl` source alias when a same-name installed package would instead be resolved by Vite. Check CSS, JS, scoped/subpath exports and manifestless installed directories.
 - [ ] An explicitly audited, matching Vite `resolve.alias` overrides the installed package; unrelated installed packages and `paths: { "*": ["*"] }` fallback resolutions do not generate false collisions.
 - [ ] Fully erased type-only imports remain non-executable and do not generate package runtime diagnostics.
+
+### Runtime query and external wildcard provenance controls
+
+- [ ] TypeScript `paths` (including `"*"`) and `baseUrl` patterns only count as owned aliases when their **resolved target** is first-party; ordinary dependencies that resolve unchanged through unaliased `node_modules` resolution remain external and retain pure-layer and package-style restrictions.
+- [ ] Deliberate aliases into `node_modules`, outside-source paths, and owned-source/package collisions must not gain a false pass because an unrelated installed package shares a name.
+- [ ] Raw/URL/worker query classifiers use Vite's exact token boundaries: `?raw=true`, `?url=1`, and `?worker=1` must not imitate genuine Vite flags. Unknown syntax fails closed, preserves executable code edges, and cannot bypass public barrels.
+- [ ] Verified `?raw`/`?url` data loads, `?worker`/`?sharedworker` entries, and `?inline`/`?no-inline` JS/TS and asset controls keep their respective runtime/asset semantics.

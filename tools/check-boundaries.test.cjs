@@ -3491,3 +3491,145 @@ test('worker entrypoint with inline modifier remains executable', () =>
     'modules/orders/ui/a.ts': 'import Worker from "./b.ts?worker&inline"; export const a = Worker;',
     'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
   }, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+
+test('wildcard paths resolving an installed package stays an external runtime import', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '*': ['*'] },
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0', types: './index.d.ts', main: './index.js',
+    }),
+    '../node_modules/ui-kit/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/ui-kit/index.js': 'exports.safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('a paths wildcard resolving a scoped installed package stays external', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '*': ['*'] },
+    } }),
+    '../node_modules/@vendor/client/package.json': JSON.stringify({
+      name: '@vendor/client', version: '1.0.0', types: './index.d.ts', main: './index.js',
+    }),
+    '../node_modules/@vendor/client/index.d.ts': 'export declare const value: number;',
+    '../node_modules/@vendor/client/index.js': 'exports.value = 2;',
+    'app/start.ts': 'import { value } from "@vendor/client"; export const result = value;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('pure code still requires external package review under wildcard paths', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '*': ['*'] },
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0', types: './index.d.ts', main: './index.js',
+    }),
+    '../node_modules/ui-kit/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/ui-kit/index.js': 'exports.safe = 1;',
+    'modules/orders/domain/order.ts': 'import { safe } from "ui-kit"; export const total = safe;',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-external-package/)));
+
+test('baseUrl package-like prefixes can still resolve genuine installed dependencies', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+    } }),
+    '../node_modules/modules/package.json': JSON.stringify({
+      name: 'modules', version: '1.0.0',
+      exports: { './helpers': { types: './helpers.d.ts', default: './helpers.js' } },
+    }),
+    '../node_modules/modules/helpers.d.ts': 'export declare const safe: number;',
+    '../node_modules/modules/helpers.js': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "modules/helpers"; export const result = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('a wildcard that genuinely targets owned source keeps architectural checks', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '*': ['src/*'] },
+    } }),
+    'modules/orders/infrastructure/private.ts': 'export const hidden = 1;',
+    'app/start.ts': 'import { hidden } from "modules/orders/infrastructure/private"; export const result = hidden;',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/)));
+
+test('query flags with assigned values are not Vite raw or URL data loaders', () => {
+  for (const suffix of ['?raw=true', '?url=1', '?foo=1&raw=true', '?worker=1']) {
+    withFixture({
+      'modules/orders/ui/a.ts': 'import { b } from "./b.ts' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => {
+      const errors = result.errors.join(' ');
+      assert.match(errors, /unverified-vite-import-query/, suffix);
+      assert.match(errors, /runtime-cycle/, suffix);
+    });
+  }
+});
+
+test('invalid source-query flags do not bypass an internal public-barrel ban', () =>
+  withFixture({
+    'modules/orders/index.ts': 'export const shared = 1;',
+    'modules/orders/ui/form.ts': 'import { shared } from "../index.ts?raw=true"; export const f = shared;',
+  }, result => {
+    const errors = result.errors.join(' ');
+    assert.match(errors, /unverified-vite-import-query/);
+    assert.match(errors, /no-self-barrel/);
+  }));
+
+test('package-mapped invalid raw flags still expose real executable cycles', () => {
+  for (const suffix of ['?raw=true', '?url=1']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        imports: { '#source': './src/modules/orders/ui/b.js' },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'modules/orders/ui/a.ts': 'import { b } from "#source' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => {
+      const errors = result.errors.join(' ');
+      assert.match(errors, /unverified-vite-import-query/, suffix);
+      assert.match(errors, /runtime-cycle/, suffix);
+    });
+  }
+});
+
+test('invalid query tokens fail closed without impersonating static asset imports', () =>
+  withFixture({
+    'modules/orders/domain/a.ts': 'import { b } from "./b.ts?raw=1"; export const a = b;',
+    'modules/orders/domain/b.ts': 'export const b = 4;',
+  }, result => {
+    const errors = result.errors.join(' ');
+    assert.match(errors, /unverified-vite-import-query/);
+    assert.doesNotMatch(errors, /pure-layer-static-asset/);
+  }));
+
+test('genuine raw/URL tokens still load data without creating runtime cycle edges', () => {
+  for (const suffix of ['?raw', '?url', '?raw&inline', '?url&no-inline']) {
+    withFixture({
+      'modules/orders/ui/a.ts': 'import value from "./b.ts' + suffix + '"; export const a = value;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => assert.deepEqual(result.errors, [], suffix));
+  }
+});
+
+test('recognized worker tokens remain executable while worker=value fails closed', () => {
+  for (const suffix of ['?worker', '?sharedworker', '?worker&inline']) {
+    withFixture({
+      'modules/orders/ui/a.ts': 'import Worker from "./b.ts' + suffix + '"; export const a = Worker;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
+  }
+  withFixture({
+    'modules/orders/ui/a.ts': 'import Worker from "./b.ts?worker=1"; export const a = Worker;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-import-query/));
+});

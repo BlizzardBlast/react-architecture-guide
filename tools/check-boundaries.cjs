@@ -332,6 +332,22 @@ function isInstalledDependencyPath(filename, importer, originalPath) {
     return false;
   }
 }
+// A paths/baseUrl pattern is only an owned alias when it actually resolves to
+// first-party code. A broad "*" mapping can fall through to node_modules.
+// Compare with unaliased Node-style package resolution before trusting an
+// external fallback; never excuse a local alias deliberately routed to vendor.
+function isUnaliasedInstalledPackage(spec, importer, options, resolvedModule) {
+  if (!resolvedModule?.isExternalLibraryImport || !resolvedModule.resolvedFileName ||
+      !isInstalledDependencyPath(resolvedModule.resolvedFileName, importer,
+        resolvedModule.originalPath)) return false;
+  const noAliases = { ...options, paths: undefined, baseUrl: undefined };
+  const ordinary = ts.resolveModuleName(spec, importer, noAliases, ts.sys).resolvedModule;
+  return Boolean(ordinary?.isExternalLibraryImport && ordinary.resolvedFileName &&
+    path.resolve(ordinary.resolvedFileName) ===
+      path.resolve(resolvedModule.resolvedFileName) &&
+    isInstalledDependencyPath(ordinary.resolvedFileName, importer, ordinary.originalPath));
+}
+
 const publicEntrypoints = new Set([
   'index.ts', 'index.tsx', 'index.mts', 'index.cts',
   'index.js', 'index.jsx', 'index.mjs', 'index.cjs',
@@ -1721,13 +1737,20 @@ function check(srcDir) {
       // Vite ?raw/?url explicitly load data. ?inline/?no-inline only control
       // asset inlining; on JS/TS they are not an asset loader and still execute
       // the source module. Worker entries must also retain executable edges.
-      const workerQuery = /(?:[?&])(?:worker|sharedworker)(?:[=&]|$)/.test(query) ||
+      // Mirror Vite 7.3.7's exact query-token syntax. "=value" is
+      // not a raw/url/worker flag, and must not suppress execution edges.
+      const workerQuery = /(?:[?&])(?:worker|sharedworker)(?:&|$)/.test(query) ||
         Boolean(dep.workerEntry);
-      const dataQuery = /(?:[?&])(?:raw|url)(?:[=&]|$)/.test(query) &&
+      const dataQuery = /(?:[?&])(?:raw|url)(?:&|$)/.test(query) &&
         !workerQuery;
       // Treat solely these known inline modifiers as non-transforming for
       // source modules. Unknown or combined query modes stay conservative.
       const inlineModifiersOnly = /^\?(?:inline|no-inline)(?:&(?:inline|no-inline))*$/.test(query);
+      const knownQuerySyntax = !query ||
+        /^\?(?:raw|url|inline|no-inline|worker|sharedworker)(?:&(?:raw|url|inline|no-inline|worker|sharedworker))*$/.test(query);
+      if (dep.runtime && !knownQuerySyntax) {
+        errors.push('unverified-vite-import-query: ' + source.relative + ' -> ' + dep.spec);
+      }
       const mappedAsset = dataQuery || (Boolean(dep.fromUrl) && !dep.workerEntry);
       const transformedImport = Boolean(dep.fromUrl) ||
         (Boolean(query) && !inlineModifiersOnly);
@@ -1735,8 +1758,17 @@ function check(srcDir) {
       const rootAbsolute = filesystemSpec.startsWith('/');
       const rootPath = rootAbsolute ? path.resolve(path.dirname(root), '.' + filesystemSpec) : null;
       const viteAlias = resolveViteAlias(filesystemSpec, policy.viteAliases, path.dirname(root));
-      const projectAlias = rootAbsolute || Boolean(viteAlias) || matchesAlias(filesystemSpec, options.paths) ||
-        (Boolean(options.baseUrl) && /^(?:modules|shared|routes|app|testing|generated)\//.test(filesystemSpec));
+      const pathPattern = matchesAlias(filesystemSpec, options.paths);
+      const baseUrlCandidate = Boolean(options.baseUrl) &&
+        /^(?:modules|shared|routes|app|testing|generated)\//.test(filesystemSpec);
+      const possibleAlias = pathPattern || baseUrlCandidate;
+      const tsCandidate = possibleAlias && !relativeSpec && !rootAbsolute && !viteAlias
+        ? ts.resolveModuleName(filesystemSpec, file, options, ts.sys).resolvedModule
+        : null;
+      const externalFallback = possibleAlias && isUnaliasedInstalledPackage(
+        filesystemSpec, file, options, tsCandidate);
+      const projectAlias = rootAbsolute || Boolean(viteAlias) ||
+        (possibleAlias && !externalFallback);
       const barePackage = !relativeSpec && !projectAlias;
       const isTest = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file);
       const pureCode = isPureModule(source) ||
@@ -1793,8 +1825,13 @@ function check(srcDir) {
         }
         continue;
       }
+      // A query that is not an actual data/worker loader cannot turn source
+      // code into a static asset or bypass public-barrel ownership rules.
+      // Unknown source queries still fail closed above, and retain code edges.
+      const executableSourceQuery = sourceExt.test(filesystemSpec) && !dataQuery &&
+        !workerQuery && !dep.fromUrl;
       const localAsset = Boolean((staticAsset || dep.fromUrl ||
-        (filesystemSpec !== dep.spec && !inlineModifiersOnly)) &&
+        (filesystemSpec !== dep.spec && !inlineModifiersOnly && !executableSourceQuery)) &&
         (relativeSpec || projectAlias));
       if (dep.runtime && !relativeSpec && !rootAbsolute && !viteAlias) {
         const mapping = runtimePackageTargets(filesystemSpec, file);
