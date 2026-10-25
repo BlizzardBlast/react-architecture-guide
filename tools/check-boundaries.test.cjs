@@ -4028,3 +4028,17 @@ test('Less plugin syntax remains forbidden next to otherwise valid asset URLs', 
     'shared/ui/@plugin.svg': '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
     'app/start.ts': 'export const ready = true;',
   }, result => assert.match(result.errors.join(' '), /unsupported-less-plugin/)));
+
+test('Less @plugin variable declarations and detached-ruleset calls remain allowed', () =>
+  withFixture({
+    'shared/ui/theme.less': '@plugin : { color: red; };\n@plugin();',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('a real executable Less plugin remains forbidden after a safe @plugin variable', () =>
+  withFixture({
+    'shared/ui/theme.less': '@plugin : { color: red; };\n@plugin();\n' +
+      '@plugin "../../modules/orders/infrastructure/plugin.js";',
+    'modules/orders/infrastructure/plugin.js': 'module.exports = {};',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-less-plugin/)));

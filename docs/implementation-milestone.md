@@ -283,3 +283,10 @@ Less `@plugin` directives fail closed until preprocessing JavaScript dependencie
 The Less plugin guard now scans at-rule positions outside function parentheses, comments, and CSS strings. Unquoted asset URLs containing an `@plugin` path segment and Less variables named `@plugin` are not treated as executable plugin declarations; actual `@plugin` directives still fail closed. Added direct scanner tests for local/remote/data URLs, variables, nested functions, live directives, and integration fixtures for valid local assets and actual plugins.
 
 **CR-P1-011 remains blocked:** registry access is unavailable, so authentic lockfiles, pinned clean installs, the complete architecture/React/orders suites, audits and browser verification remain required before merging.
+
+
+### CR-P2-030 — Less variables and detached-ruleset calls
+
+The Less plugin scanner now distinguishes executable `@plugin` imports from a variable named `@plugin` with optional whitespace or a comment before its colon, and from detached-ruleset calls such as `@plugin();`. The actual Less parser accepts whitespace in variable declarations and requires whitespace after the name for the executable plugin directive. Positive/negative scanner and architecture fixtures check both forms together, preserve prior URL handling and continue to fail closed on executable plugins.
+
+**CR-P1-011 remains BLOCKED:** the npm registry cannot be resolved in this execution environment. Authentic three-project lockfiles, clean `npm ci` installations, full suites, audits, production Vite build/preview and browser accessibility checks must still be performed before merging.

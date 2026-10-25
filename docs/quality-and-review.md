@@ -184,3 +184,5 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] HTML raw-text `script`, `pre`, `style` and `textarea` elements with literal `<!--` do not hide later active Markdown links.
 
 - [ ] Less `@plugin` detection distinguishes executable directives from unquoted URL paths, function contents, CSS strings, and Less variable names without accepting real plugin statements.
+
+- [ ] Less `@plugin` variables with whitespace/comments before `:`, and detached-ruleset calls (`@plugin();`), remain distinct from executable `@plugin "plugin.js"` imports; valid URL cases still pass.

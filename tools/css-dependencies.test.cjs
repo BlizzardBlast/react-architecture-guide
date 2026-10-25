@@ -197,3 +197,42 @@ test('longer Less identifiers are not treated as executable @plugin at-rules', (
   const result = scan('@plugin-theme: red; @plugin-other: blue;', { filename: 'x.less' });
   assert.deepEqual(result, { references: [], errors: [] });
 });
+
+test('Less @plugin variables allow whitespace and comments before the colon', () => {
+  for (const source of [
+    '@plugin : "settings";',
+    '@plugin\t: 1;',
+    '@plugin\n: 1;',
+    '@plugin /* comment */ : { color: red; };',
+    '@PLUGIN : 10;',
+  ]) {
+    assert.deepEqual(scan(source, { filename: 'theme.less' }),
+      { references: [], errors: [] }, source);
+  }
+});
+
+test('Less detached-ruleset variable call is not an executable plugin import', () => {
+  const source = '@plugin: { color: red; };\n@plugin();';
+  assert.deepEqual(scan(source, { filename: 'theme.less' }),
+    { references: [], errors: [] });
+});
+
+test('executable Less plugins still fail closed beside variable declarations and calls', () => {
+  for (const source of [
+    '@plugin : "settings";\n@plugin "./dangerous.js";',
+    '@plugin: { color: red; };\n@plugin();\n@plugin (mode="unsafe") "./dangerous.js";',
+    '.theme { @plugin : 1; @plugin "./dangerous.js"; }',
+    '@plugin /* comment */ (mode="unsafe") "./dangerous.js";',
+    '@plugin @computed;',
+  ]) {
+    assert.match(scan(source, { filename: 'theme.less' }).errors.join(' '),
+      /unsupported-less-plugin/, source);
+  }
+});
+
+test('the Less @plugin exception does not change other stylesheet formats', () => {
+  for (const extension of ['css', 'scss', 'sass']) {
+    assert.deepEqual(scan('@plugin : "theme";', { filename: 'style.' + extension }),
+      { references: [], errors: [] });
+  }
+});

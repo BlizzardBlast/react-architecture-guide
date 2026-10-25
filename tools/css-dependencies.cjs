@@ -112,10 +112,18 @@ function scanCssDependencies(css, { filename = 'style.css' } = {}) {
     let previousToken = '';
     for (let offset = 0; offset < mask.length; offset++) {
       const c = mask[offset];
+      // Less also permits @plugin : value and a detached-ruleset call
+      // @plugin(); neither loads preprocessing JavaScript. Only actual
+      // directives require whitespace after the name, and a colon following
+      // that whitespace belongs to a variable declaration.
       if (c === '@' && parentheses === 0 &&
           (previousToken === '' || /[;{}]/.test(previousToken)) &&
-          /^@plugin(?=[\s(])/i.test(mask.slice(offset, offset + 8))) {
-        errors.push('unsupported-less-plugin: executable Less @plugin at offset ' + offset);
+          /^@plugin(?=\s)/i.test(mask.slice(offset, offset + 8))) {
+        let next = offset + 7;
+        while (next < mask.length && /\s/.test(mask[next])) next++;
+        if (mask[next] !== ':') {
+          errors.push('unsupported-less-plugin: executable Less @plugin at offset ' + offset);
+        }
       }
       if (c === '(') parentheses++;
       else if (c === ')') parentheses = Math.max(0, parentheses - 1);
