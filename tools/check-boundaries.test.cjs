@@ -3213,3 +3213,158 @@ test('nonconforming nested #imports targets fail closed even when a source exist
     'shared/lib/math.ts': 'export const value = 2;',
     'app/start.ts': 'import { value } from "#entry"; export const result = value;',
   }, result => assert.match(result.errors.join(' '), /unverified-package-runtime-mapping/)));
+
+
+test('installed CSS export shadows a TypeScript-only paths alias without a Vite alias', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit/theme': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', exports: {
+        './theme': { types: './theme.d.ts', default: './theme.css' },
+      },
+    }),
+    '../node_modules/ui-kit/theme.d.ts': 'export declare const safe: number;',
+    '../node_modules/ui-kit/theme.css': '.private { color: red }',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit/theme"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> ui-kit\/theme/)));
+
+test('installed executable package shadows a TypeScript-only local alias', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit/private': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', type: 'module',
+      exports: { './private': {
+        types: './private.d.ts', default: './private.js',
+      } },
+    }),
+    '../node_modules/ui-kit/private.d.ts': 'export declare const safe: number;',
+    '../node_modules/ui-kit/private.js': 'export const safe = 2;',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit/private"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-runtime-mapping: app\/start\.ts -> ui-kit\/private/)));
+
+test('installed scoped package shadowing a TS wildcard alias also fails closed', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '@scope/ui-kit/*': ['src/shared/lib/*.ts'] },
+    } }),
+    '../node_modules/@scope/ui-kit/package.json': JSON.stringify({
+      name: '@scope/ui-kit',
+      exports: { './theme': './theme.css' },
+    }),
+    '../node_modules/@scope/ui-kit/theme.css': '.theme {}',
+    'shared/lib/theme.ts': 'export const theme = 1;',
+    'app/start.ts': 'import { theme } from "@scope/ui-kit/theme"; export const value = theme;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> @scope\/ui-kit\/theme/)));
+
+test('an actual audited Vite alias takes precedence over an installed CSS package', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url";\n' +
+      'export default { resolve: { alias: { "ui-kit": fileURLToPath(new URL("./src/shared/lib/safe.ts", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({
+      viteAliases: { 'ui-kit': 'src/shared/lib/safe.ts' },
+    }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', exports: { '.': './theme.css' },
+    }),
+    '../node_modules/ui-kit/theme.css': '.theme {}',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('an actual audited Vite alias takes precedence over an installed JS package', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url";\n' +
+      'export default { resolve: { alias: { "ui-kit": fileURLToPath(new URL("./src/shared/lib/safe.ts", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({
+      viteAliases: { 'ui-kit': 'src/shared/lib/safe.ts' },
+    }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', type: 'module', exports: { '.': './unsafe.js' },
+    }),
+    '../node_modules/ui-kit/unsafe.js': 'export const unsafe = 1;',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('type-only imports stay source-checked but do not inspect runtime shadow packages', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit': ['src/shared/lib/safe.ts'] },
+      verbatimModuleSyntax: true,
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', exports: { '.': './theme.css' },
+    }),
+    '../node_modules/ui-kit/theme.css': '.theme {}',
+    'shared/lib/safe.ts': 'export type Safe = { value: number };',
+    'app/start.ts': 'import type { Safe } from "ui-kit"; export type Result = Safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('non-colliding TS alias and ordinary installed library keep passing', () => {
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, []));
+
+  withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0', types: './index.d.ts', main: './index.js',
+    }),
+    '../node_modules/ui-kit/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/ui-kit/index.js': 'exports.safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+
+test('a wildcard paths entry does not reclassify an actually external installed package', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '*': ['*'] },
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0', types: './index.d.ts', main: './index.js',
+    }),
+    '../node_modules/ui-kit/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/ui-kit/index.js': 'exports.safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+
+test('manifestless installed legacy package still shadows a TS-only alias', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../node_modules/ui-kit/index.js': 'exports.safe = 2;',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-runtime-mapping: app\/start\.ts -> ui-kit/)));

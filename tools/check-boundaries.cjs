@@ -538,6 +538,27 @@ function runtimePackageTargets(spec, importer) {
   }
   return walk(spec);
 }
+
+// A TypeScript paths/baseUrl alias does not rewrite the emitted bare import.
+// Without an audited Vite alias, an installed package with the same name can
+// shadow the TypeScript target at runtime. Locate the nearest actual package,
+// rather than trusting an unrelated vendor/node_modules directory.
+function hasInstalledPackageCandidate(spec, importer) {
+  if (spec.startsWith('#') || spec.startsWith('node:')) return false;
+  const parts = spec.split('/');
+  const scoped = spec.startsWith('@');
+  if ((scoped && (parts.length < 2 || !parts[1])) || !parts[0]) return false;
+  const packageName = scoped ? parts.slice(0, 2).join('/') : parts[0];
+  for (let dir = path.dirname(importer); ; dir = path.dirname(dir)) {
+    const packageDir = path.join(dir, 'node_modules', packageName);
+    // Some legacy packages have an index.js but no package.json; Vite can
+    // resolve these too. The directory is enough to create a runtime collision.
+    if (fs.existsSync(packageDir) && fs.statSync(packageDir).isDirectory()) {
+      return true;
+    }
+    if (path.dirname(dir) === dir) return false;
+  }
+}
 function loadBoundaryConfig(parent) {
   const file = path.join(parent, 'architecture.config.json');
   if (!fs.existsSync(file)) return { allowPureExternal: [], allowCrossModule: {}, allowMixedLayouts: {}, viteAliases: {}, viteConfig: null };
@@ -1733,11 +1754,38 @@ function check(srcDir) {
       }
       // Validate Node package imports and self-name exports independently of
       // TypeScript paths; source aliases do not change emitted runtime imports.
-      const mappedStyle = dep.runtime && !relativeSpec && !rootAbsolute &&
+      const mappedStyle = dep.runtime && !relativeSpec && !rootAbsolute && !viteAlias &&
         packageStyleExport(filesystemSpec, file, true);
       if (mappedStyle) {
         errors.push(`unverified-package-stylesheet: ${source.relative} -> ${dep.spec}`);
         if (pureCode && !isTest) errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
+        continue;
+      }
+      // A TS-only alias does not change Vite's runtime package resolution.
+      // This condition is relevant only to owned TS/baseUrl aliases; ordinary
+      // external packages continue through their existing provenance checks.
+      // Explicit, verified Vite aliases take precedence over installed packages.
+      const shadowCandidate = dep.runtime && projectAlias && !relativeSpec &&
+        !rootAbsolute && !viteAlias && !filesystemSpec.startsWith('#') &&
+        runtimePackageTargets(filesystemSpec, file) === null &&
+        hasInstalledPackageCandidate(filesystemSpec, file);
+      // Broad TS paths such as "*": ["*"] may fall through to a genuine
+      // installed dependency. Reject only when TypeScript instead certified
+      // an owned source that Vite would not use for the same bare specifier.
+      const shadowTypes = shadowCandidate ?
+        ts.resolveModuleName(filesystemSpec, file, options, ts.sys).resolvedModule : null;
+      const shadowedPackage = Boolean(shadowTypes?.resolvedFileName &&
+        known.has(path.resolve(shadowTypes.resolvedFileName)));
+      if (shadowedPackage) {
+        const style = packageStyleExport(filesystemSpec, file, false);
+        errors.push((style ? 'unverified-package-stylesheet: ' :
+          'unverified-package-runtime-mapping: ') +
+          source.relative + ' -> ' + dep.spec);
+        if (pureCode && !isTest) {
+          errors.push(style ? 'pure-layer-static-asset: ' +
+            source.relative + ' -> ' + dep.spec :
+            'pure-layer-external-package: ' + source.relative + ' -> ' + dep.spec);
+        }
         continue;
       }
       const localAsset = Boolean((staticAsset || dep.fromUrl || filesystemSpec !== dep.spec) &&

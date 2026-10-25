@@ -146,3 +146,9 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] A mapped `#name?raw` or `#name?url` import is checked as a data/asset dependency, forbidden in pure layers and excluded from executable-cycle edges; the owning source file and architectural boundaries remain checked.
 - [ ] Mapped ordinary JavaScript and `?worker` imports remain executable dependency edges; a genuine cycle is still rejected.
 - [ ] Repeated safe import-map targets through `node`/`default`, branching aliases or fallback arrays are not mistaken for recursive cycles; unsupported `#`-to-`#` redirects and self-recursive maps are rejected.
+
+### TypeScript/package shadowing controls
+
+- [ ] A runtime bare import cannot be certified by a TS `paths`/`baseUrl` source alias when a same-name installed package would instead be resolved by Vite. Check CSS, JS, scoped/subpath exports and manifestless installed directories.
+- [ ] An explicitly audited, matching Vite `resolve.alias` overrides the installed package; unrelated installed packages and `paths: { "*": ["*"] }` fallback resolutions do not generate false collisions.
+- [ ] Fully erased type-only imports remain non-executable and do not generate package runtime diagnostics.
