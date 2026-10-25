@@ -153,6 +153,10 @@ Review changes and findings together, validate locally, and push once per cohere
 
 - [ ] A runtime bare import cannot be certified by a TS `paths`/`baseUrl` source alias when a same-name installed package would instead be resolved by Vite. Check CSS, JS, scoped/subpath exports and manifestless installed directories.
 - [ ] An explicitly audited, matching Vite `resolve.alias` overrides the installed package; unrelated installed packages and `paths: { "*": ["*"] }` fallback resolutions do not generate false collisions.
+- [ ] Single-segment and arbitrary multi-segment `baseUrl` imports use actual resolved first-party ownership, not a list of directory-name prefixes; installed CSS/JS/scoped/subpath packages still fail closed when they would shadow owned source.
+- [ ] BaseUrl-backed `?raw` or `?url` imports of owned source fail `pure-layer-static-asset` in domain/model/application or pure shared code and stay available in UI; concrete owned baseUrl CSS/images likewise remain assets.
+- [ ] Normal non-colliding baseUrl source imports, type-only source imports, and ordinary external package fallbacks keep passing; source-root escapes cannot be certified by bare spelling.
+- [ ] Inferred owned baseUrl imports must not override Node `#imports` or package self-exports, including query-qualified `?raw`/`?url` mapped data imports.
 - [ ] Fully erased type-only imports remain non-executable and do not generate package runtime diagnostics.
 
 ### Runtime query and external wildcard provenance controls

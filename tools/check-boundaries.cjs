@@ -1759,12 +1759,40 @@ function check(srcDir) {
       const rootPath = rootAbsolute ? path.resolve(path.dirname(root), '.' + filesystemSpec) : null;
       const viteAlias = resolveViteAlias(filesystemSpec, policy.viteAliases, path.dirname(root));
       const pathPattern = matchesAlias(filesystemSpec, options.paths);
-      const baseUrlCandidate = Boolean(options.baseUrl) &&
-        /^(?:modules|shared|routes|app|testing|generated)\//.test(filesystemSpec);
-      const possibleAlias = pathPattern || baseUrlCandidate;
-      const tsCandidate = possibleAlias && !relativeSpec && !rootAbsolute && !viteAlias
+      // baseUrl can resolve arbitrary specifiers such as "helpers" or
+      // "features/helpers"; the names of source directories are not evidence
+      // of first-party ownership. Check the actual TypeScript result against
+      // the enumerated source tree before classifying a bare import.
+      const tsCandidate = !relativeSpec && !rootAbsolute && !viteAlias
         ? ts.resolveModuleName(filesystemSpec, file, options, ts.sys).resolvedModule
         : null;
+      // A #imports entry or self-name exports mapping has its own executable
+      // resolution rules below. Its TS target is not a baseUrl alias: treating
+      // it as one would turn valid mapped ?raw/?url requests into missing
+      // local-asset errors and skip package-map provenance checks.
+      const packageMapOwnsRuntime = !relativeSpec && !rootAbsolute && !viteAlias &&
+        runtimePackageTargets(filesystemSpec, file) !== null;
+      const ownedTsSource = Boolean(!filesystemSpec.startsWith('#') &&
+        !packageMapOwnsRuntime && tsCandidate?.resolvedFileName &&
+        known.has(path.resolve(tsCandidate.resolvedFileName)));
+      // TypeScript does not resolve arbitrary CSS/image imports. For baseUrl
+      // assets use a concrete, source-contained file, not its bare spelling.
+      // Preserve explicit paths mappings' precedence over baseUrl fallback.
+      const baseUrlAsset = !relativeSpec && !rootAbsolute && !viteAlias &&
+        !pathPattern && options.baseUrl && assetPath(dep.spec)
+        ? path.resolve(options.baseUrl, filesystemSpec) : null;
+      let ownedBaseUrlAsset = false;
+      if (baseUrlAsset && fs.existsSync(baseUrlAsset) &&
+          fs.statSync(baseUrlAsset).isFile()) {
+        const physicalAsset = fs.realpathSync(baseUrlAsset);
+        ownedBaseUrlAsset = isWithinRoot(physicalAsset, physicalRoot);
+      }
+      const baseUrlCandidate = Boolean(options.baseUrl) &&
+        /^(?:modules|shared|routes|app|testing|generated)\//.test(filesystemSpec);
+      const possibleAlias = pathPattern || baseUrlCandidate ||
+        ownedTsSource || ownedBaseUrlAsset;
+      // A paths wildcard falling through to the same installed package under
+      // ordinary Node resolution must remain external.
       const externalFallback = possibleAlias && isUnaliasedInstalledPackage(
         filesystemSpec, file, options, tsCandidate);
       const projectAlias = rootAbsolute || Boolean(viteAlias) ||
@@ -1806,13 +1834,12 @@ function check(srcDir) {
         !rootAbsolute && !viteAlias && !filesystemSpec.startsWith('#') &&
         runtimePackageTargets(filesystemSpec, file) === null &&
         hasInstalledPackageCandidate(filesystemSpec, file);
-      // Broad TS paths such as "*": ["*"] may fall through to a genuine
-      // installed dependency. Reject only when TypeScript instead certified
-      // an owned source that Vite would not use for the same bare specifier.
-      const shadowTypes = shadowCandidate ?
-        ts.resolveModuleName(filesystemSpec, file, options, ts.sys).resolvedModule : null;
-      const shadowedPackage = Boolean(shadowTypes?.resolvedFileName &&
-        known.has(path.resolve(shadowTypes.resolvedFileName)));
+      // Broad TS paths may fall through to installed dependencies. A local
+      // asset that TypeScript cannot type-resolve can also be shadowed by an
+      // installed package (e.g. bare "theme.css"). Reject collisions for
+      // owned source or concrete baseUrl assets without a verified Vite alias.
+      const shadowedPackage = Boolean(shadowCandidate &&
+        (ownedTsSource || ownedBaseUrlAsset));
       if (shadowedPackage) {
         const style = packageStyleExport(filesystemSpec, file, false);
         errors.push((style ? 'unverified-package-stylesheet: ' :

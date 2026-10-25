@@ -3633,3 +3633,183 @@ test('recognized worker tokens remain executable while worker=value fails closed
     'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
   }, result => assert.match(result.errors.join(' '), /unverified-vite-import-query/));
 });
+
+
+test('arbitrary single-segment baseUrl source detects installed stylesheet shadow', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    '../node_modules/helpers/package.json': JSON.stringify({
+      name: 'helpers', exports: { '.': { types: './index.d.ts', default: './style.css' } },
+    }),
+    '../node_modules/helpers/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/helpers/style.css': '.shadow { color: red }',
+    'helpers.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "helpers"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> helpers/)));
+
+test('arbitrary baseUrl imports reject executable installed package shadow', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    '../node_modules/helpers/package.json': JSON.stringify({
+      name: 'helpers', exports: { '.': { types: './index.d.ts', default: './index.js' } },
+    }),
+    '../node_modules/helpers/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/helpers/index.js': 'export const safe = 2;',
+    'helpers.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "helpers"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-runtime-mapping: app\/start\.ts -> helpers/)));
+
+test('nested arbitrary baseUrl aliases still see scoped and subpath package collisions', () => {
+  for (const [specifier, local, manifest] of [
+    ['features/helpers', 'features/helpers.ts', {
+      name: 'features', exports: { './helpers': { types: './helpers.d.ts', default: './unsafe.css' } },
+    }],
+    ['@internal/helpers', '@internal/helpers.ts', {
+      name: '@internal/helpers', exports: { '.': { types: './index.d.ts', default: './unsafe.css' } },
+    }],
+  ]) withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    ['../node_modules/' + manifest.name + '/package.json']: JSON.stringify(manifest),
+    [local]: 'export const value = 1;',
+    'app/start.ts': 'import { value } from "' + specifier + '"; export const result = value;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet/, specifier));
+});
+
+test('non-colliding arbitrary baseUrl source stays owned and accepted', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    'helpers.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "helpers"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('arbitrary baseUrl source still enforces cross-layer ownership', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    'private/ui/form.ts': 'export const hidden = 1;',
+    'shared/lib/consumer.ts': 'import { hidden } from "private/ui/form"; export const value = hidden;',
+  }, result => assert.match(result.errors.join(' '),
+    /pure-layer-imports-nonpure-source|pure-layer-imports-technical/)));
+
+test('arbitrary baseUrl raw source imports remain static assets in pure layers', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src/shared/lib',
+    } }),
+    'shared/lib/config.ts': 'export const secret = 1;',
+    'shared/lib/consumer.ts': 'import config from "config?raw"; export const value = config;',
+  }, result => assert.match(result.errors.join(' '),
+    /pure-layer-static-asset: shared\/lib\/consumer\.ts -> config\?raw/)));
+
+test('arbitrary baseUrl raw source imports remain valid in UI', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src/shared/lib',
+    } }),
+    'shared/lib/config.ts': 'export const secret = 1;',
+    'shared/ui/view.ts': 'import config from "config?raw"; export const value = config;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('arbitrary baseUrl CSS assets remain pure-layer restricted but supported in UI', () => {
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src/shared/lib',
+    } }),
+    'shared/lib/theme.css': '.theme { color: blue }',
+    'shared/lib/consumer.ts': 'import "theme.css?inline"; export const value = 1;',
+  }, result => assert.match(result.errors.join(' '),
+    /pure-layer-static-asset/));
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src/shared/ui',
+    } }),
+    'shared/ui/theme.css': '.theme { color: blue }',
+    'shared/ui/view.ts': 'import "theme.css?inline"; export const value = 1;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('arbitrary baseUrl CSS assets cannot be shadowed by installed CSS packages', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src/shared/ui',
+    } }),
+    '../node_modules/theme.css/package.json': JSON.stringify({
+      name: 'theme.css', exports: { '.': './other.css' },
+    }),
+    '../node_modules/theme.css/other.css': '.shadow { color: red }',
+    'shared/ui/theme.css': '.theme { color: blue }',
+    'shared/ui/view.ts': 'import "theme.css"; export const value = 1;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet/)));
+
+test('erased baseUrl type-only imports do not inspect installed runtime shadows', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+      verbatimModuleSyntax: true,
+    } }),
+    '../node_modules/helpers/package.json': JSON.stringify({
+      name: 'helpers', exports: { '.': './style.css' },
+    }),
+    '../node_modules/helpers/style.css': '.shadow {}',
+    'helpers.ts': 'export type Safe = { value: number };',
+    'app/start.ts': 'import type { Safe } from "helpers"; export type Result = Safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('ordinary external package fallback remains valid under broad baseUrl', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    '../node_modules/helpers/package.json': JSON.stringify({
+      name: 'helpers', version: '1.0.0', types: './index.d.ts', main: './index.js',
+    }),
+    '../node_modules/helpers/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/helpers/index.js': 'exports.safe = 1;',
+    'app/start.ts': 'import { safe } from "helpers"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+
+test('baseUrl inference does not override #imports data mappings', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      imports: { '#payload': './src/modules/orders/ui/b.js' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    'modules/orders/ui/a.ts': 'import value from "#payload?raw"; export const a = value;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => {
+    assert.doesNotMatch(result.errors.join(' '), /missing-static-asset|runtime-cycle/);
+    assert.deepEqual(result.errors, []);
+  }));
+
+test('baseUrl inference does not override self-package URL data mappings', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      exports: { './payload': './src/modules/orders/ui/b.js' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    'modules/orders/ui/a.ts': 'import value from "fixture/payload?url"; export const a = value;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => {
+    assert.doesNotMatch(result.errors.join(' '), /missing-static-asset|runtime-cycle/);
+    assert.deepEqual(result.errors, []);
+  }));
