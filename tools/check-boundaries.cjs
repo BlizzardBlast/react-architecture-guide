@@ -34,7 +34,7 @@ const { scanHtml } = require('./html-dependencies.cjs');
 // The dot is required: filenames such as "assets" are not source files.
 const sourceExt = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const assetExt = /\.(?:css|scss|sass|less|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|mp4|webm|json)$/i;
-const styleExt = /\.(?:css|scss|sass|less)$/i;
+const styleExt = /\.(?:css|scss|sass|less|styl|stylus)$/i;
 function fileSpecifier(spec) {
   // Vite query directives are compilation modes, not filesystem path components.
   // Preserve Node/TypeScript '#imports' specifiers: the leading # is a name,
@@ -438,6 +438,95 @@ function packageStyleExport(spec, importer, ownedSource = false, visited = new S
     }
     if (path.dirname(dir) === dir) return false;
   }
+}
+
+// Node package imports and self-name exports are runtime resolution rules.
+// TypeScript paths can name a different file entirely, so inspect the active
+// targets independently. The resolver deliberately fails closed on external,
+// unresolved, cyclic or computed targets rather than misreporting ownership.
+function runtimePackageTargets(spec, importer) {
+  let scope = null, scopeDir = null;
+  for (let dir = path.dirname(importer); ; dir = path.dirname(dir)) {
+    const filename = path.join(dir, 'package.json');
+    if (fs.existsSync(filename)) {
+      try { scope = JSON.parse(fs.readFileSync(filename, 'utf8')); }
+      catch { return { paths: [], unverifiable: true }; }
+      scopeDir = dir;
+      break;
+    }
+    if (path.dirname(dir) === dir) break;
+  }
+  if (!scope) return null;
+  const ownName = typeof scope.name === 'string' ? scope.name : '';
+  const isSelf = ownName && (spec === ownName || spec.startsWith(ownName + '/'));
+  if (!spec.startsWith('#') && !isSelf) return null;
+  const visited = new Set();
+  function match(field, key) {
+    if (typeof field !== 'object' || field === null || Array.isArray(field)) {
+      return key === '.' ? { target: field, wildcard: null } : null;
+    }
+    const keys = Object.keys(field);
+    if (key === '.' && keys.every(k => !k.startsWith('.') && !k.startsWith('#'))) {
+      return { target: field, wildcard: null };
+    }
+    if (Object.hasOwn(field, key)) return { target: field[key], wildcard: null };
+    const hits = keys.flatMap(k => {
+      const star = k.indexOf('*');
+      if (star < 0 || k.indexOf('*', star + 1) !== -1 ||
+          !(k.startsWith('#') || k.startsWith('./'))) return [];
+      const prefix = k.slice(0, star), suffix = k.slice(star + 1);
+      if (!key.startsWith(prefix) || !key.endsWith(suffix) ||
+          key.length < prefix.length + suffix.length) return [];
+      return [{ k, prefix, suffix,
+        wildcard: key.slice(prefix.length, key.length - suffix.length) }];
+    });
+    hits.sort((a, b) => b.prefix.length - a.prefix.length ||
+      b.suffix.length - a.suffix.length);
+    return hits.length ? { target: field[hits[0].k], wildcard: hits[0].wildcard } : null;
+  }
+  function walk(name) {
+    if (visited.has(name)) return { paths: [], unverifiable: true };
+    visited.add(name);
+    const self = ownName && (name === ownName || name.startsWith(ownName + '/'));
+    const mapping = name.startsWith('#') ? match(scope.imports, name) :
+      self ? match(scope.exports, name === ownName ? '.' : './' + name.slice(ownName.length + 1)) : null;
+    if (!mapping) return { paths: [], unverifiable: true };
+    const paths = [];
+    let unverifiable = false;
+    function evaluate(target, wildcard) {
+      if (typeof target === 'string') {
+        const value = wildcard === null ? target : target.replace(/\*/g, wildcard);
+        if (value.startsWith('./')) {
+          paths.push(path.resolve(scopeDir, value));
+        } else if (value.startsWith('#') || value === ownName ||
+                   ownName && value.startsWith(ownName + '/')) {
+          const follow = walk(value);
+          paths.push(...follow.paths);
+          unverifiable ||= follow.unverifiable;
+        } else {
+          // Bare redirects can execute package JS independently of TS paths.
+          unverifiable = true;
+        }
+      } else if (Array.isArray(target)) {
+        if (!target.length) unverifiable = true;
+        for (const item of target) evaluate(item, wildcard);
+      } else if (target && typeof target === 'object') {
+        let runtimeBranch = false;
+        for (const [condition, item] of Object.entries(target)) {
+          // The "types" condition cannot be selected by Node/Vite at runtime.
+          if (condition === 'types') continue;
+          runtimeBranch = true;
+          evaluate(item, wildcard);
+        }
+        if (!runtimeBranch) unverifiable = true;
+      } else {
+        unverifiable = true;
+      }
+    }
+    evaluate(mapping.target, mapping.wildcard);
+    return { paths, unverifiable };
+  }
+  return walk(spec);
 }
 function loadBoundaryConfig(parent) {
   const file = path.join(parent, 'architecture.config.json');
@@ -1435,6 +1524,11 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
       return;
     }
     const source = category(physicalFile, physicalRoot);
+    if (/\.(?:styl|stylus)$/i.test(logicalFile)) {
+      errors.push('unverified-vite-stylus-graph: ' + source.relative +
+        '; Stylus imports require an audited resolved preprocessing graph');
+      return;
+    }
     let css;
     try {
       css = fs.readFileSync(logicalFile, 'utf8');
@@ -1626,6 +1720,44 @@ function check(srcDir) {
         errors.push(`unverified-package-stylesheet: ${source.relative} -> ${dep.spec}`);
         if (pureCode && !isTest) errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
         continue;
+      }
+      if (dep.runtime && !relativeSpec && !rootAbsolute && !viteAlias) {
+        const mapping = runtimePackageTargets(filesystemSpec, file);
+        if (mapping) {
+          const resolvedRuntime = [];
+          let unverifiable = mapping.unverifiable || mapping.paths.length === 0;
+          for (const candidate of mapping.paths) {
+            // In Vite TS projects, a package ./name.js target can correspond
+            // to ./name.ts before emit. A .d.ts-only target is not executable.
+            const target = fs.existsSync(candidate) && fs.statSync(candidate).isFile()
+              ? candidate : resolveLocalSource(candidate, options);
+            if (!target || /\.d\.[cm]?ts$/i.test(target)) {
+              unverifiable = true;
+              continue;
+            }
+            let physical;
+            try { physical = fs.realpathSync(target); }
+            catch { unverifiable = true; continue; }
+            if (!isWithinRoot(physical, physicalRoot) ||
+                !known.has(path.resolve(target))) {
+              unverifiable = true;
+              continue;
+            }
+            const dest = category(physical, physicalRoot);
+            checkOwnedDependency(source, dest, policy, errors,
+              { asset: false, isTest });
+            resolvedRuntime.push(path.resolve(target));
+          }
+          if (unverifiable) {
+            errors.push('unverified-package-runtime-mapping: ' +
+              source.relative + ' -> ' + dep.spec);
+          }
+          // The TypeScript graph is checked below too; record additional
+          // runtime edges so a valid mapped import cannot conceal a cycle.
+          for (const target of resolvedRuntime) {
+            edges.get(file).push({ target, runtime: true });
+          }
+        }
       }
       const localAsset = Boolean((staticAsset || dep.fromUrl || filesystemSpec !== dep.spec) &&
         (relativeSpec || projectAlias));

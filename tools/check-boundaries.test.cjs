@@ -2894,3 +2894,170 @@ test('erased type-only external package import does not become a CSS runtime dep
     } }),
     'app/start.ts': 'import type { Theme } from "ui-kit/theme"; export type View = Theme;',
   }, result => assert.deepEqual(result.errors, [])));
+
+
+test('package #imports JS runtime target enforces private infrastructure ownership', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      imports: { '#private': './src/modules/orders/infrastructure/unsafe.js' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+      paths: { '#private': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'modules/orders/infrastructure/unsafe.js': 'export const safe = 2;',
+    'app/start.ts': 'import { safe } from "#private"; export const result = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /deep-module-import: app\/start\.ts -> modules\/orders\/infrastructure\/unsafe\.js/)));
+
+test('package self-export JS runtime target enforces owner rather than declarations', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      exports: { './private': { types: './src/shared/lib/safe.d.ts',
+        default: './src/modules/orders/infrastructure/unsafe.js' } } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'shared/lib/safe.d.ts': 'export declare const safe: number;',
+    'modules/orders/infrastructure/unsafe.js': 'export const safe = 2;',
+    'app/start.ts': 'import { safe } from "fixture/private"; export const result = safe;',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/)));
+
+test('chained and wildcard #imports still check runtime JS ownership', () => {
+  for (const spec of ['#chained', '#private/name']) {
+    withFixture({
+      '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+        imports: { '#chained': '#private/name',
+          '#private/*': './src/modules/orders/infrastructure/*.js' } }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+        paths: { '#chained': ['src/shared/lib/safe.ts'],
+          '#private/*': ['src/shared/lib/safe.ts'] },
+      } }),
+      'shared/lib/safe.ts': 'export const safe = 1;',
+      'modules/orders/infrastructure/name.js': 'export const safe = 2;',
+      'app/start.ts': 'import { safe } from "' + spec + '"; export const result = safe;',
+    }, result => assert.match(result.errors.join(' '), /deep-module-import/, spec));
+  }
+});
+
+test('safe runtime JS package mapping remains permitted', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      imports: { '#safe': './src/shared/lib/safe.js' },
+      exports: { './safe': { types: './src/shared/lib/safe.ts',
+        default: './src/shared/lib/safe.js' } } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+      paths: { '#safe': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "#safe"; export { safe as value } from "fixture/safe";',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('external, unresolved and cyclic package mapping targets fail closed', () => {
+  for (const target of ['ui-kit', '#unknown', '#loop']) {
+    withFixture({
+      '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+        imports: { '#alias': target, '#loop': '#loop' } }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+        paths: { '#alias': ['src/shared/lib/safe.ts'] },
+      } }),
+      'shared/lib/safe.ts': 'export const safe = 1;',
+      'app/start.ts': 'import { safe } from "#alias"; export const result = safe;',
+    }, result => assert.match(result.errors.join(' '),
+      /unverified-package-runtime-mapping/, target));
+  }
+});
+
+test('erased type-only alias is not a runtime JS dependency', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      imports: { '#private': './src/modules/orders/infrastructure/unsafe.js' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+      paths: { '#private': ['src/shared/lib/safe.ts'] },
+      verbatimModuleSyntax: true,
+    } }),
+    'shared/lib/safe.ts': 'export type Safe = { ok: true };',
+    'modules/orders/infrastructure/unsafe.js': 'export const unsafe = 1;',
+    'app/start.ts': 'import type { Safe } from "#private"; export type App = Safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('Stylus stylesheet HTML entrypoints fail closed instead of hiding transitive imports', () => {
+  for (const extension of ['styl', 'stylus']) {
+    withFixture({
+      '../index.html': '<!doctype html><html><head><link rel="stylesheet" href="/src/shared/ui/theme.' +
+        extension + '"></head><body></body></html>',
+      ['shared/ui/theme.' + extension]: '@import "../../modules/orders/ui/private.' + extension + '"',
+      ['modules/orders/ui/private.' + extension]: '.private\n  color red',
+      'app/start.ts': 'export const start = true;',
+    }, result => assert.match(result.errors.join(' '),
+      /unverified-vite-stylus-graph/, extension));
+  }
+});
+
+test('Stylus side-effect imports fail closed but local CSS remains permitted', () => {
+  withFixture({
+    'shared/ui/theme.styl': '.safe\n  color blue',
+    'shared/ui/start.ts': 'import "./theme.styl"; export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-stylus-graph/));
+  withFixture({
+    'shared/ui/theme.css': '.safe { color: blue }',
+    'shared/ui/start.ts': 'import "./theme.css"; export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('unrelated installed ordinary JavaScript package remains permitted', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module' }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({ name: 'ui-kit', version: '1.0.0',
+      main: './index.js' }),
+    '../node_modules/ui-kit/index.js': 'exports.safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const result = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+
+test('runtime-only mapped JavaScript edges still contribute to cycle detection', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      imports: { '#b': './src/modules/orders/ui/b.js' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+      paths: { '#b': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const b = 0;',
+    'modules/orders/ui/a.ts': 'import { b } from "#b"; export const a = b;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+test('conditional runtime package paths cannot hide a forbidden browser-only dependency', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      imports: { '#private': {
+        types: './src/shared/lib/safe.d.ts',
+        browser: './src/modules/orders/infrastructure/private.js',
+        default: './src/shared/lib/safe.js',
+      } } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'shared/lib/safe.d.ts': 'export declare const safe: number;',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'modules/orders/infrastructure/private.js': 'export const safe = 2;',
+    'app/start.ts': 'import { safe } from "#private"; export const result = safe;',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/)));
+
+test('runtime package mappings outside src are never considered owned sources', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      imports: { '#private': './vendor/hidden.js' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+      paths: { '#private': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../vendor/hidden.js': 'export const safe = 2;',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "#private"; export const result = safe;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-runtime-mapping/)));

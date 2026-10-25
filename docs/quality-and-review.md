@@ -134,3 +134,9 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Runtime package import maps are checked independently of TypeScript-only alias resolution, including `#name?raw`, chained `#imports`, third-party CSS export redirects and same-package self-exports.
 - [ ] Fully erased type imports do not generate CSS runtime diagnostics; inline type-only named bindings preserved as runtime empty imports still receive dependency checks.
 - [ ] Source CSS scans distinguish complete `url()`, `image-set()` and `load-css()` function identifiers from longer custom function names, including hyphenated and non-ASCII prefixes.
+
+### Executable package maps and Stylus fail-closed assurance
+
+- [ ] Runtime `#imports` and self-name JavaScript `exports` targets are checked independently of the TypeScript-resolved file, including conditional targets, wildcard patterns, runtime cycles, and source-root containment.
+- [ ] Ordinary same-owner `.js`-to-`.ts` mappings, erased `import type`, and unrelated installed JavaScript packages continue to work; unknown or unresolvable redirects must not receive a false pass.
+- [ ] Stylus `.styl`/`.stylus` files fail closed until their transitive dependency semantics have real build-graph verification, including HTML entrypoints and script side-effect imports.

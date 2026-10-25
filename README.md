@@ -204,3 +204,7 @@ A bare runtime import can resolve to a CSS/Sass/Less/Stylus file through package
 An otherwise unresolved bare *runtime* import now gets `unverified-package-import` (outside test files), rather than being silently classified as harmless. A genuinely installed JS package with matching type resolution remains supported; neighboring CSS exports do not taint an unrelated JS entry. Local, declared TypeScript and Vite aliases keep the existing owned-source checks. Package stylesheet support needs independently verified Vite and transitive CSS graph handling, not an extensionless-name exception.
 
 This is bounded remediation following `frey-skills/iterative-self-review`. Complete npm-backed tests, Vite conformance, security audits and browser checks remain required before promoting the draft PR.
+
+### Runtime package-map and Stylus verification limits
+
+Package `#imports` and self-name `exports` can select JavaScript targets different from TypeScript `paths` aliases and `types` declarations. The architecture checker now checks owned runtime targets and graph edges separately, rejecting unknown or mismatched package redirects rather than reporting a false safe result. Stylus `.styl` and `.stylus` source assets are rejected until their transitive imports can be verified by an actual supported preprocessor and Vite graph. These static guards are not substitutes for a pinned install, complete test suite, actual production builds, security audits or browser/accessibility testing.
