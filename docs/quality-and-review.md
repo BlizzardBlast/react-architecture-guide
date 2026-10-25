@@ -182,3 +182,5 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Missing-JS TypeScript fallbacks and extensionless directory indexes remain usable; unverifiable package-directory entries fail closed.
 - [ ] Less `@plugin` fails closed, but inert comments and strings that contain the spelling do not.
 - [ ] HTML raw-text `script`, `pre`, `style` and `textarea` elements with literal `<!--` do not hide later active Markdown links.
+
+- [ ] Less `@plugin` detection distinguishes executable directives from unquoted URL paths, function contents, CSS strings, and Less variable names without accepting real plugin statements.

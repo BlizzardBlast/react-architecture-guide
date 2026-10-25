@@ -276,3 +276,10 @@ Executable local source imports now resolve actual Vite runtime files rather tha
 Less `@plugin` directives fail closed until preprocessing JavaScript dependencies can be audited. Markdown raw-text HTML now takes precedence over inline HTML comment syntax, preventing an embedded `<!--` from hiding active links after the raw-text block. Both changes have direct positive and negative regression cases.
 
 **CR-P1-011 remains BLOCKED:** The npm registry is unreachable in the present environment. Authentic root/orders/React lockfiles, pinned installs, full suites, audits, Vite builds and browser/accessibility verification remain unavailable. Keep PR #1 draft and unmerged until the actual gates pass.
+
+ 
+### CR-P2-029 — Less plugin directive detection must exclude URL values
+
+The Less plugin guard now scans at-rule positions outside function parentheses, comments, and CSS strings. Unquoted asset URLs containing an `@plugin` path segment and Less variables named `@plugin` are not treated as executable plugin declarations; actual `@plugin` directives still fail closed. Added direct scanner tests for local/remote/data URLs, variables, nested functions, live directives, and integration fixtures for valid local assets and actual plugins.
+
+**CR-P1-011 remains blocked:** registry access is unavailable, so authentic lockfiles, pinned clean installs, the complete architecture/React/orders suites, audits and browser verification remain required before merging.

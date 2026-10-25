@@ -155,3 +155,45 @@ test('Less comments and strings containing @plugin remain inert', () => {
   assert.deepEqual(scan(source, { filename: 'style.less' }),
     { references: [], errors: [] });
 });
+
+test('unquoted local and remote URL paths containing @plugin are assets, not Less plugins', () => {
+  const input = '.card { background: url(./icons/@plugin.svg);' +
+    ' border-image: url(https://cdn.example.test/@plugin/image.png); }';
+  const result = scan(input, { filename: 'card.less' });
+  assert.deepEqual(result, {
+    references: [
+      { spec: './icons/@plugin.svg', kind: 'url' },
+      { spec: 'https://cdn.example.test/@plugin/image.png', kind: 'url' },
+    ],
+    errors: [],
+  });
+});
+
+test('only real Less plugin at-rules are blocked, even after other statements', () => {
+  for (const source of [
+    '@plugin "./unsafe.js";',
+    '@import "./base.less";\n @plugin (mode="x") "./unsafe.js";',
+    '.container { color: red; @PLUGIN "./unsafe.js"; }',
+    '// ignored comment\n@plugin @computed;',
+  ]) {
+    assert.match(scan(source, { filename: 'card.less' }).errors.join(' '),
+      /unsupported-less-plugin/, source);
+  }
+});
+
+test('Less variable names and function/data URL contents do not impersonate plugin directives', () => {
+  const source = '@plugin: "just a variable";\n' +
+    '.card { content: "@plugin \\"not-executable\\"";' +
+    ' background: url(data:image/svg+xml;utf8,@plugin);' +
+    ' mask-image: image-set(url(./icons/@plugin.png) 1x); }';
+  const result = scan(source, { filename: 'card.less' });
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.references.map(ref => ref.spec), [
+    'data:image/svg+xml;utf8,@plugin', './icons/@plugin.png',
+  ]);
+});
+
+test('longer Less identifiers are not treated as executable @plugin at-rules', () => {
+  const result = scan('@plugin-theme: red; @plugin-other: blue;', { filename: 'x.less' });
+  assert.deepEqual(result, { references: [], errors: [] });
+});

@@ -4013,3 +4013,18 @@ test('Less executable plugin statements fail closed in owned source', () =>
     'modules/orders/infrastructure/plugin.js': 'module.exports = {};',
     'app/start.ts': 'export const ready = true;',
   }, result => assert.match(result.errors.join(' '), /unsupported-less-plugin/)));
+
+test('asset URLs containing @plugin are not misclassified as executable Less directives', () =>
+  withFixture({
+    'shared/ui/theme.less': '.card { background: url(./@plugin.svg); }',
+    'shared/ui/@plugin.svg': '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('Less plugin syntax remains forbidden next to otherwise valid asset URLs', () =>
+  withFixture({
+    'shared/ui/theme.less': '.card { background: url(./@plugin.svg); }\n' +
+      '@plugin "../infrastructure/private.js";',
+    'shared/ui/@plugin.svg': '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-less-plugin/)));

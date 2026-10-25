@@ -104,8 +104,22 @@ function scanCssDependencies(css, { filename = 'style.css' } = {}) {
   // Less @plugin executes JS during preprocessing; an unverified executable
   // plugin can import files that this stylesheet dependency scanner never sees.
   if (/\.less$/i.test(filename)) {
-    for (const m of mask.matchAll(/@plugin(?![A-Za-z0-9_\u0080-\uFFFF-])/gi)) {
-      errors.push('unsupported-less-plugin: executable Less @plugin at offset ' + m.index);
+    // A Less plugin is an at-rule, not every occurrence of the characters
+    // "@plugin". Track function parentheses so semicolons and @ signs inside
+    // unquoted url() values cannot impersonate a directive. Strings and
+    // comments are already blanked in mask.
+    let parentheses = 0;
+    let previousToken = '';
+    for (let offset = 0; offset < mask.length; offset++) {
+      const c = mask[offset];
+      if (c === '@' && parentheses === 0 &&
+          (previousToken === '' || /[;{}]/.test(previousToken)) &&
+          /^@plugin(?=[\s(])/i.test(mask.slice(offset, offset + 8))) {
+        errors.push('unsupported-less-plugin: executable Less @plugin at offset ' + offset);
+      }
+      if (c === '(') parentheses++;
+      else if (c === ')') parentheses = Math.max(0, parentheses - 1);
+      if (parentheses === 0 && !/\s/.test(c)) previousToken = c;
     }
   }
   const importedUrls = new Set();
