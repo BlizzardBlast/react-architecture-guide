@@ -155,7 +155,7 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] An explicitly audited, matching Vite `resolve.alias` overrides the installed package; unrelated installed packages and `paths: { "*": ["*"] }` fallback resolutions do not generate false collisions.
 - [ ] Single-segment and arbitrary multi-segment `baseUrl` imports use actual resolved first-party ownership, not a list of directory-name prefixes; installed CSS/JS/scoped/subpath packages still fail closed when they would shadow owned source.
 - [ ] BaseUrl-backed `?raw` or `?url` imports of owned source fail `pure-layer-static-asset` in domain/model/application or pure shared code and stay available in UI; concrete owned baseUrl CSS/images likewise remain assets.
-- [ ] Normal non-colliding baseUrl source imports, type-only source imports, and ordinary external package fallbacks keep passing; source-root escapes cannot be certified by bare spelling.
+- [ ] Normal baseUrl and TypeScript-path aliases remain owned source for architectural checks, but executable bare imports must also have a verified Vite alias or runtime package mapping; fully erased type imports and ordinary external package fallbacks remain valid. Source-root escapes cannot be certified by bare spelling.
 - [ ] Inferred owned baseUrl imports must not override Node `#imports` or package self-exports, including query-qualified `?raw`/`?url` mapped data imports.
 - [ ] Fully erased type-only imports remain non-executable and do not generate package runtime diagnostics.
 
@@ -165,3 +165,12 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Deliberate aliases into `node_modules`, outside-source paths, and owned-source/package collisions must not gain a false pass because an unrelated installed package shares a name.
 - [ ] Raw/URL/worker query classifiers use Vite's exact token boundaries: `?raw=true`, `?url=1`, and `?worker=1` must not imitate genuine Vite flags. Unknown syntax fails closed, preserves executable code edges, and cannot bypass public barrels.
 - [ ] Verified `?raw`/`?url` data loads, `?worker`/`?sharedworker` entries, and `?inline`/`?no-inline` JS/TS and asset controls keep their respective runtime/asset semantics.
+
+### Vite runtime alias and extensionless data-import assurance
+
+- [ ] An extensionless `./config?raw`/`?url` resolves the same source file as Vite, including normal source extensions and `.json`; genuinely missing files and outside-source symlinks still fail closed.
+- [ ] Pure layers reject extensionless transformed source with `pure-layer-static-asset`, while UI code can load supported relative/verified Vite-alias data imports without false `missing-static-asset` errors.
+- [ ] Extensionless worker queries retain executable runtime-cycle edges, including through verified Vite aliases.
+- [ ] Extensionless `?inline` and `?no-inline` imports targeting owned JS/TS keep executable cycle edges and do not generate false missing-static-asset errors.
+- [ ] Runtime imports using TypeScript-only `baseUrl` or `paths` aliases without an audited Vite runtime mapping fail `unverified-vite-runtime-alias`; erased type imports are exempt and installed external packages are classified independently.
+- [ ] Preserve ownership and package-shadowing diagnostics even if runtime alias validation also fails; do not exempt executable imports simply because TypeScript found an owned file.

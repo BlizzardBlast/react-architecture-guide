@@ -1798,6 +1798,17 @@ function check(srcDir) {
       const projectAlias = rootAbsolute || Boolean(viteAlias) ||
         (possibleAlias && !externalFallback);
       const barePackage = !relativeSpec && !projectAlias;
+      // TypeScript paths/baseUrl do not rewrite an emitted bare import.
+      // Vite's default resolver does not automatically honor them: require
+      // an audited Vite alias or executable Node package mapping instead.
+      // Erased import type has no runtime resolution requirement.
+      if (dep.runtime && projectAlias && !relativeSpec && !rootAbsolute &&
+          !viteAlias && !packageMapOwnsRuntime &&
+          !hasInstalledPackageCandidate(filesystemSpec, file) &&
+          (ownedTsSource || ownedBaseUrlAsset || pathPattern)) {
+        errors.push('unverified-vite-runtime-alias: ' +
+          source.relative + ' -> ' + dep.spec);
+      }
       const isTest = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file);
       const pureCode = isPureModule(source) ||
         (source.layer === 'shared' && isPureShared(source.relative));
@@ -1855,9 +1866,20 @@ function check(srcDir) {
       // A query that is not an actual data/worker loader cannot turn source
       // code into a static asset or bypass public-barrel ownership rules.
       // Unknown source queries still fail closed above, and retain code edges.
-      const executableSourceQuery = sourceExt.test(filesystemSpec) && !dataQuery &&
-        !workerQuery && !dep.fromUrl;
-      const localAsset = Boolean((staticAsset || dep.fromUrl ||
+      // ?inline/?no-inline are only asset modifiers. When a Vite/TS
+      // extensionless spelling resolves to owned source they do not change
+      // the import into an asset or suppress executable runtime cycles.
+      const inlineSourceTarget = inlineModifiersOnly && !assetPath(dep.spec)
+        ? (viteAlias || rootPath
+          ? resolveLocalSource(viteAlias || rootPath, options)
+          : ts.resolveModuleName(
+            filesystemSpec, file, options, ts.sys).resolvedModule?.resolvedFileName)
+        : null;
+      const executableSourceQuery = !dataQuery && !workerQuery && !dep.fromUrl &&
+        (sourceExt.test(filesystemSpec) || Boolean(inlineSourceTarget &&
+          sourceExt.test(inlineSourceTarget) &&
+          known.has(path.resolve(inlineSourceTarget))));
+      const localAsset = Boolean(((staticAsset && !executableSourceQuery) || dep.fromUrl ||
         (filesystemSpec !== dep.spec && !inlineModifiersOnly && !executableSourceQuery)) &&
         (relativeSpec || projectAlias));
       if (dep.runtime && !relativeSpec && !rootAbsolute && !viteAlias) {
@@ -1922,8 +1944,44 @@ function check(srcDir) {
           if (mapped.length) candidates.push(...mapped);
           else if (options.baseUrl) candidates.push(path.resolve(options.baseUrl, filesystemSpec));
         }
-        const candidate = candidates.find(candidate =>
+        let candidate = candidates.find(candidate =>
           fs.existsSync(candidate) && fs.statSync(candidate).isFile());
+        // Vite resolves extensionless ?raw/?url/worker imports using its source
+        // extension lookup before transforming the resolved file. A missing
+        // literal filename (e.g. ./config) is not proof ./config.ts is absent.
+        // Only accept actual first-party source files; never infer an asset
+        // target from an arbitrary installed declaration or vendor directory.
+        if (!candidate && (dataQuery || workerQuery) && !dep.fromUrl) {
+          // Vite's default extension lookup is ordered and also includes
+          // JSON; TypeScript resolution alone can choose a different file
+          // (or refuse JSON). Check concrete candidates in Vite order first.
+          const viteExtensions = ['.mjs', '.js', '.mts', '.ts', '.jsx', '.tsx', '.json'];
+          for (const base of candidates) {
+            for (const ext of viteExtensions) {
+              const expanded = base + ext;
+              if (fs.existsSync(expanded) && fs.statSync(expanded).isFile()) {
+                candidate = expanded;
+                break;
+              }
+            }
+            if (candidate) break;
+          }
+          // An import with a TS paths pattern may not have a direct
+          // filesystem candidate, and explicit JS filenames may point to
+          // TypeScript source in Vite. Restrict the fallback to known owned
+          // files, rather than trusting arbitrary node_modules paths.
+          if (!candidate) {
+            const resolvedSource = viteAlias || rootPath
+              ? resolveLocalSource(viteAlias || rootPath, options)
+              : ts.resolveModuleName(
+                filesystemSpec, file, options, ts.sys).resolvedModule?.resolvedFileName;
+            if (resolvedSource && sourceExt.test(resolvedSource) &&
+                known.has(path.resolve(resolvedSource)) &&
+                fs.existsSync(resolvedSource) && fs.statSync(resolvedSource).isFile()) {
+              candidate = resolvedSource;
+            }
+          }
+        }
         // Real paths matter: a symlink inside src may point outside the owned tree.
         resolved = candidate ? fs.realpathSync(candidate) : undefined;
         if (!resolved) {
@@ -2003,7 +2061,7 @@ function check(srcDir) {
       // Preserve Vite's asset/execution distinction for mapped #imports,
       // relative imports, and source files transformed through a query.
       if (!dataQuery && (!dep.fromUrl || dep.workerEntry) &&
-          (!localAsset || sourceExt.test(filesystemSpec))) {
+          (!localAsset || sourceExt.test(target))) {
         edges.get(file).push({ target, runtime: dep.runtime });
       }
     }

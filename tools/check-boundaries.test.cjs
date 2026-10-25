@@ -242,6 +242,8 @@ test('pure application may import a pure shared library', () => withFixture({
 test('tsconfig path-alias asset is allowed only when the target actually exists', () => {
   withFixture({
     '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@/*":["*"]}}}',
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { '@': 'src' } }),
     'main.tsx': 'import "@/style.css"; export const app = 1;',
     'style.css': 'body { margin: 0 }',
   }, result => assert.deepEqual(result.errors, []));
@@ -637,7 +639,7 @@ test('TypeScript hash-prefixed path aliases are not mistaken for URL fragments',
   '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"#util":["shared/lib/util.ts"]}}}',
   'shared/lib/util.ts': 'export const amount = 42;',
   'modules/orders/application/calculate.ts': 'import { amount } from "#util"; export const value = amount;',
-}, result => assert.deepEqual(result.errors, [])));
+}, result => assert.match(result.errors.join(' '), /unverified-vite-runtime-alias/)));
 
 test('raw source imports do not create spurious execution cycles', () => withFixture({
   'modules/orders/ui/a.ts': 'import text from "./b.ts?raw"; export const a = text;',
@@ -2505,6 +2507,8 @@ test('local stylesheets, audited aliases, and ordinary external JavaScript remai
     '../tsconfig.json': JSON.stringify({ compilerOptions: {
       baseUrl: 'src', paths: { '@ui/*': ['shared/ui/*'] },
     } }),
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@ui": fileURLToPath(new URL("./src/shared/ui", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { '@ui': 'src/shared/ui' } }),
     'app/start.ts': 'import "@ui/site.css"; export const start = true;',
     'shared/ui/site.css': '.site { color: blue }',
   }, result => assert.deepEqual(result.errors, []));
@@ -2521,6 +2525,8 @@ test('pure first-party baseUrl source imports do not require external-package ex
   withFixture({
     '../tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: 'src/shared/lib' } }),
     'shared/lib/math.ts': 'export const sum = (a: number, b: number) => a + b;',
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "math": fileURLToPath(new URL("./src/shared/lib/math.ts", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { 'math': 'src/shared/lib/math.ts' } }),
     'shared/lib/price.ts': 'import { sum } from "math"; export const price = sum(1, 2);',
   }, result => assert.deepEqual(result.errors, [])));
 
@@ -2635,12 +2641,16 @@ test('first-party baseUrl and mapped style aliases still follow owned-source rul
   withFixture({
     '../tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: 'src/shared/lib' } }),
     'shared/lib/math.ts': 'export const value = 1;',
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "math": fileURLToPath(new URL("./src/shared/lib/math.ts", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { 'math': 'src/shared/lib/math.ts' } }),
     'shared/lib/start.ts': 'import { value } from "math"; export const ready = value;',
   }, result => assert.deepEqual(result.errors, []));
   withFixture({
     '../tsconfig.json': JSON.stringify({ compilerOptions: {
       baseUrl: 'src', paths: { '@style/*': ['shared/ui/*'] },
     } }),
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@style": fileURLToPath(new URL("./src/shared/ui", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { '@style': 'src/shared/ui' } }),
     'app/start.ts': 'import "@style/theme.css"; export const ready = true;',
     'shared/ui/theme.css': '.theme { color: teal }',
   }, result => assert.deepEqual(result.errors, []));
@@ -3329,7 +3339,7 @@ test('non-colliding TS alias and ordinary installed library keep passing', () =>
     } }),
     'shared/lib/safe.ts': 'export const safe = 1;',
     'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
-  }, result => assert.deepEqual(result.errors, []));
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-runtime-alias/));
 
   withFixture({
     '../node_modules/ui-kit/package.json': JSON.stringify({
@@ -3684,14 +3694,14 @@ test('nested arbitrary baseUrl aliases still see scoped and subpath package coll
     /unverified-package-stylesheet/, specifier));
 });
 
-test('non-colliding arbitrary baseUrl source stays owned and accepted', () =>
+test('non-colliding arbitrary baseUrl source still needs a runtime alias', () =>
   withFixture({
     '../tsconfig.json': JSON.stringify({ compilerOptions: {
       module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
     } }),
     'helpers.ts': 'export const safe = 1;',
     'app/start.ts': 'import { safe } from "helpers"; export const value = safe;',
-  }, result => assert.deepEqual(result.errors, [])));
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-runtime-alias/)));
 
 test('arbitrary baseUrl source still enforces cross-layer ownership', () =>
   withFixture({
@@ -3718,6 +3728,8 @@ test('arbitrary baseUrl raw source imports remain valid in UI', () =>
     '../tsconfig.json': JSON.stringify({ compilerOptions: {
       module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src/shared/lib',
     } }),
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "config": fileURLToPath(new URL("./src/shared/lib/config.ts", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { 'config': 'src/shared/lib/config.ts' } }),
     'shared/lib/config.ts': 'export const secret = 1;',
     'shared/ui/view.ts': 'import config from "config?raw"; export const value = config;',
   }, result => assert.deepEqual(result.errors, [])));
@@ -3737,7 +3749,7 @@ test('arbitrary baseUrl CSS assets remain pure-layer restricted but supported in
     } }),
     'shared/ui/theme.css': '.theme { color: blue }',
     'shared/ui/view.ts': 'import "theme.css?inline"; export const value = 1;',
-  }, result => assert.deepEqual(result.errors, []));
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-runtime-alias/));
 });
 
 test('arbitrary baseUrl CSS assets cannot be shadowed by installed CSS packages', () =>
@@ -3813,3 +3825,166 @@ test('baseUrl inference does not override self-package URL data mappings', () =>
     assert.doesNotMatch(result.errors.join(' '), /missing-static-asset|runtime-cycle/);
     assert.deepEqual(result.errors, []);
   }));
+
+
+test('extensionless relative Vite raw and URL imports resolve source modules', () => {
+  for (const suffix of ['?raw', '?url']) withFixture({
+    'modules/orders/ui/data.ts': 'export const data = "serialized";',
+    'modules/orders/ui/view.ts': 'import value from "./data' + suffix + '"; export const rendered = value;',
+  }, result => assert.deepEqual(result.errors, [], suffix));
+});
+
+test('extensionless source data imports still fail pure-layer static-asset restrictions', () => {
+  for (const spec of ['./data?raw', './data?url']) withFixture({
+    'modules/orders/domain/data.ts': 'export const data = 1;',
+    'modules/orders/domain/consumer.ts': 'import value from "' + spec + '"; export const result = value;',
+  }, result => {
+    assert.match(result.errors.join(' '), /pure-layer-static-asset/, spec);
+    assert.doesNotMatch(result.errors.join(' '), /missing-static-asset/, spec);
+  });
+});
+
+test('extensionless raw imports keep Vite source-extension precedence and JSON support', () => {
+  withFixture({
+    'shared/ui/data.js': 'export default "js";',
+    'shared/ui/data.ts': 'export default "ts";',
+    'shared/ui/view.ts': 'import text from "./data?raw"; export const result = text;',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    'shared/ui/data.json': '{"ok":true}',
+    'shared/ui/view.ts': 'import text from "./data?raw"; export const result = text;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('extensionless Vite raw imports still report genuinely missing sources', () =>
+  withFixture({
+    'shared/ui/view.ts': 'import text from "./absent?raw"; export const result = text;',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/)));
+
+test('extensionless worker queries contribute executable runtime cycle edges', () =>
+  withFixture({
+    'modules/orders/ui/a.ts': 'import Worker from "./b?worker"; export const a = Worker;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+test('audited Vite prefix alias resolves extensionless raw source modules', () =>
+  withFixture({
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; ' +
+      'export default { resolve: { alias: { "@raw": fileURLToPath(new URL("./src/shared/ui", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({
+      viteAliases: { '@raw': 'src/shared/ui' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: 'src', paths: { '@raw/*': ['shared/ui/*'] },
+    } }),
+    'shared/ui/data.ts': 'export const message = 1;',
+    'shared/ui/view.ts': 'import text from "@raw/data?raw"; export const result = text;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('audited Vite alias for baseUrl source permits executable and raw imports', () =>
+  withFixture({
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; ' +
+      'export default { resolve: { alias: { "helpers": fileURLToPath(new URL("./src/helpers.ts", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({
+      viteAliases: { helpers: 'src/helpers.ts' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    'helpers.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "helpers"; import text from "helpers?raw"; export const value = safe + text.length;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('TypeScript-only baseUrl and paths runtime imports fail closed without Vite mapping', () => {
+  for (const [compilerOptions, path, spec] of [
+    [{ baseUrl: 'src' }, 'helpers.ts', 'helpers'],
+    [{ baseUrl: 'src', paths: { '@safe/*': ['shared/lib/*'] } },
+      'shared/lib/helpers.ts', '@safe/helpers'],
+  ]) withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions }),
+    [path]: 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "' + spec + '"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-runtime-alias/, spec));
+});
+
+test('TypeScript-only extensionless raw import does not pass Vite runtime verification', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: 'src/shared/ui' } }),
+    'shared/ui/config.ts': 'export const data = 1;',
+    'shared/ui/view.ts': 'import content from "config?raw"; export const value = content;',
+  }, result => {
+    assert.match(result.errors.join(' '), /unverified-vite-runtime-alias/);
+    assert.doesNotMatch(result.errors.join(' '), /missing-static-asset/);
+  }));
+
+test('Vite aliases do not exempt extensionless raw assets from ownership checks', () =>
+  withFixture({
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; ' +
+      'export default { resolve: { alias: { "@private": fileURLToPath(new URL("./src/modules/orders/ui", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({
+      viteAliases: { '@private': 'src/modules/orders/ui' },
+    }),
+    'modules/orders/ui/data.ts': 'export const data = 1;',
+    'shared/ui/view.ts': 'import data from "@private/data?raw"; export const result = data;',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('verified Vite aliases cannot conceal missing extensionless asset targets', () =>
+  withFixture({
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; ' +
+      'export default { resolve: { alias: { "@data": fileURLToPath(new URL("./src/shared/ui", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({
+      viteAliases: { '@data': 'src/shared/ui' },
+    }),
+    'shared/ui/view.ts': 'import data from "@data/missing?url"; export const result = data;',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/)));
+
+test('erased baseUrl and paths type imports need no Vite runtime alias', () => {
+  for (const compilerOptions of [
+    { baseUrl: 'src/shared/lib' },
+    { baseUrl: 'src', paths: { '@helpers': ['shared/lib/helpers.ts'] } },
+  ]) withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions }),
+    'shared/lib/helpers.ts': 'export type Helper = { name: string };',
+    'shared/lib/consumer.ts': 'import type { Helper } from "' +
+      (compilerOptions.paths ? '@helpers' : 'helpers') + '"; export type Result = Helper;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+
+test('extensionless inline modifiers still load executable TypeScript source', () => {
+  for (const suffix of ['?inline', '?no-inline']) withFixture({
+    'modules/orders/ui/a.ts': 'import { b } from "./b' + suffix + '"; export const a = b;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => {
+    assert.match(result.errors.join(' '), /runtime-cycle/, suffix);
+    assert.doesNotMatch(result.errors.join(' '), /missing-static-asset/, suffix);
+  });
+  withFixture({
+    'shared/lib/math.ts': 'export const value = 1;',
+    'shared/lib/consumer.ts': 'import { value } from "./math?inline"; export const answer = value;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+
+test('extensionless raw imports cannot traverse source-file symlinks outside root', t => {
+  const fixture = setup({
+    '../external.ts': 'export const value = 1;',
+    'shared/ui/view.ts': 'import value from "./data?raw"; export const result = value;',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, '..', 'external.ts'),
+        path.join(fixture.root, 'shared/ui/data.ts'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) {
+        return t.skip('OS disallows file symlinks');
+      }
+      throw error;
+    }
+    const errors = check(fixture.root).errors.join(' ');
+    assert.match(errors, /outside-source-symlink/);
+    assert.match(errors, /outside-source-import/);
+  } finally {
+    fixture.cleanup();
+  }
+});
