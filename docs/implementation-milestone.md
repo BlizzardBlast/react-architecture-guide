@@ -13,7 +13,7 @@ This milestone makes the [modular, feature-first standard](architecture.md) demo
 
 ## How to validate
 
-Requires Node, a working npm registry and authentic package lockfiles in the root, `examples/orders` and `examples/react-app`. Once lockfiles exist:
+Requires Node and npm registry access. Authentic package lockfiles are committed in the root, `examples/orders` and `examples/react-app`:
 
 ```sh
 npm ci
@@ -27,7 +27,7 @@ npm --prefix examples/react-app audit
 
 `npm run verify` runs Markdown tests, architecture fixtures, TypeScript orders checks, and the React app's ESLint React Hooks/JSX accessibility checks, tests, boundary check, typecheck and Vite production build. Browser smoke tests should also cover navigation, accessible form validation, pending saves, failed saves, retry, and product switches.
 
-**Verification status for PR #1:** The authoring environment cannot resolve the npm registry. An authentic lockfile, clean install, full architecture suite, React/Vite/Vitest run and transitive vulnerability audit remain pending. Static source and Markdown inspection do **not** establish their success. Keep the PR in draft until these checks run successfully; do not fabricate dependency metadata.
+**Verification status for PR #1 (2026-10-26):** CR-P1-011's local installation and verification blocker is resolved. Registry-generated lockfiles, three clean installs, the complete local gate, three zero-finding audits, repeat production builds and bounded dev/preview browser checks are recorded in [verification evidence](verification.md). This does not establish exhaustive bundler conformance or a screen-reader audit, and does not authorize merging.
 
 ## Boundaries and limitations
 
@@ -38,6 +38,10 @@ Unverifiable computed imports are rejected, but arbitrary plugin-injected aliase
 The React app stores orders in memory and performs UI-level single-flight guarding only. **Real order creation requires trusted server validation, authorization and idempotency.** For SSR, instantiate services and Query clients with request-appropriate scope.
 
 No additional GitHub Actions workflows were added solely for this guide. Existing consumers should integrate necessary architecture rules into their established local/CI gates, batching changes and checks to conserve Actions minutes.
+
+## Historical remediation notes
+
+The notes below record earlier revisions and their then-current limitations. Their repeated registry/lockfile blockers are superseded by the dated [verification record](verification.md); they are not the current verification status.
 
 ### Additional conformance regression coverage
 

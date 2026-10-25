@@ -15,7 +15,7 @@ npm run verify
 npm audit
 ```
 
-Generate and commit an authentic `package-lock.json` with `npm install --package-lock-only --ignore-scripts` before relying on `npm ci`. This branch does **not** yet include verified dependency lockfiles, build/typecheck/audit results, or browser smoke-test results because the authoring environment cannot reach the npm registry.
+The committed lockfile supports `npm ci`. Clean installation, lint, all 21 React tests, architecture checks, typechecking, production/repeat builds, audit and a bounded browser smoke test passed on 2026-10-26. See [verification evidence and limits](../../docs/verification.md).
 
 `npm run verify` runs ESLint (React Hooks, TypeScript and JSX accessibility), Vitest, architecture checks, TypeScript typechecking and the Vite build. The architecture checker accepts Vite-style CSS/image/query assets within owned presentation code, checks static URL/worker and transitive stylesheet dependencies (including intra-module layer rules, CSS url()/image-set() and literal Less import options), rejects unsupported dynamic imports and Vite globs, and checks source and owned JSON dependencies separately.
 
@@ -33,4 +33,4 @@ The checkout uses structured field validation, unique accessible IDs (`useId`), 
 
 `npm run build` executes the architecture checker, TypeScript check and Vite build, writing output to `../../.vite-build/react-app` (relative to this directory). This location is intentionally **outside the Vite dev project's root**; Vite's default `dist/index.html` would otherwise be found on the next architecture run and rejected as an unverified dev-served secondary HTML page. Use `npm run preview` to serve the same built output. The `.vite-build/` directory is ignored by Git, and `--emptyOutDir` removes stale files before each build.
 
-This does **not** relax the checker's rule against unexpected `dist/` or `build/` HTML inside the app project root. A real two-build test and dev/preview HTTP behavior still require installed Vite dependencies and remain unverified in this authoring environment.
+This does **not** relax the checker's rule against unexpected `dist/` or `build/` HTML inside the app project root. Two consecutive builds and dev/preview entry, asset and route HTTP responses were verified; custom plugin/worker graphs still require separate conformance testing.

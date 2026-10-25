@@ -1,6 +1,6 @@
 # Contributing
 
-This project contains architectural guidance and one small executable example, not an application framework.
+This project contains architectural guidance and small executable examples, not an application framework.
 
 1. Start with a concrete problem, proposed decision, and trade-offs.
 2. Update the canonical document, relevant ADR, the example when appropriate, and `AGENTS.md` when agent rules change.
@@ -9,10 +9,15 @@ This project contains architectural guidance and one small executable example, n
 5. Validate locally:
 
 ~~~bash
-python3 scripts/validate_docs.py
-cd examples/orders
-npm install
-npm test
+npm ci
+npm --prefix examples/orders ci
+npm --prefix examples/react-app ci
+npm run verify
+npm audit
+npm --prefix examples/orders audit
+npm --prefix examples/react-app audit
 ~~~
+
+The legacy `python3 scripts/validate_docs.py` command delegates to the same tested Node Markdown validator used by `npm run test:docs`.
 
 6. Batch changes and review fixes before pushing. Don't add redundant GitHub Actions workflows or remove necessary quality gates to conserve minutes.

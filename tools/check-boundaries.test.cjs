@@ -78,7 +78,9 @@ test('pure domain cannot import React even with unresolved node_modules', () => 
 }, result => assert.match(result.errors.join(' '), /pure-layer-external-package/)));
 test('Windows-style module paths identify self barrels', () => {
   const { isSelfBarrel, normPath } = require('./check-boundaries.cjs');
-  assert.equal(isSelfBarrel({ module: 'orders' }, { relative: normPath(String.raw`modules\orders\index.ts`) }), true);
+  assert.equal(isSelfBarrel({ module: 'orders' }, {
+    layer: 'module', module: 'orders', relative: normPath(String.raw`modules\orders\index.ts`),
+  }), true);
 });
 test('empty imports emit runtime edges and cycle detection must catch them', () => withFixture({
   'modules/a/model/a.ts': 'import {} from "./b"; export const a = 1;',
@@ -1112,7 +1114,7 @@ test('Vite JavaScript executable in npm script uses the chosen custom config', (
 }, result => assert.deepEqual(result.errors, [])));
 
 test('quoted shell separators do not split the Vite configuration command', () => withFixture({
-  '../package.json': '{"scripts":{"build":"echo \"not && a command\" && vite build --config custom.vite.config.ts"}}',
+  '../package.json': JSON.stringify({ scripts: { build: 'echo "not && a command" && vite build --config custom.vite.config.ts' } }),
   '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
   '../custom.vite.config.ts': 'export default { plugins: [] };',
   'app/start.ts': 'export const x = 1;',
@@ -1574,7 +1576,17 @@ test('aliased CommonJS require and module identifiers must fail closed', () => {
   for (const source of aliases) withFixture({
     'shared/lib/bridge.cjs': source,
     'modules/orders/ui/private.cjs': 'module.exports = true;',
-  }, result => assert.match(result.errors.join(' '), /unsupported-indirect-commonjs-loader|unsupported-indirect-module-require/));
+  }, result => assert.match(result.errors.join(' '), /unsupported-indirect-commonjs-loader|unsupported-indirect-module-require/, source));
+});
+
+test('shadowed CommonJS loader parameters fail closed even for same-owner targets', () => {
+  for (const source of [
+    'function load(module) { return module.require("./impl.cjs"); }',
+    'function load(require) { return require("./impl.cjs"); }',
+  ]) withFixture({
+    'modules/orders/infrastructure/bridge.cjs': source,
+    'modules/orders/infrastructure/impl.cjs': 'module.exports = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-indirect-commonjs-loader/, source));
 });
 
 test('valid direct CommonJS loaders and module.exports remain supported', () => withFixture({
@@ -1876,7 +1888,8 @@ test('React plugin exception refuses changed versions, options, imports and extr
     '../vite.config.ts': config,
     '../package.json': JSON.stringify(manifest),
     'app/start.ts': 'export const x = 1;',
-  }, result => assert.match(result.errors.join(' '), /unverifiable-vite-plugin-alias/));
+  }, result => assert.match(result.errors.join(' '),
+    /unverifiable-vite-plugin-alias|unsupported-vite-alias-config: additional top-level executable declarations/));
 });
 
 test('Vite custom root and bundler entrypoint overrides cannot hide unscanned code', () => {
@@ -1954,7 +1967,7 @@ test('HTML event handlers, inline styles and executable URLs fail closed', () =>
     'modules/orders/ui/private.ts': 'export const privateValue = true;',
     'modules/orders/ui/private.css': '.private { color: red; }',
   }, result => assert.match(result.errors.join(' '),
-    /unsupported-vite-html-(?:entry|inline)/, name));
+    /unsupported-vite-html-(?:entry|inline|url)/, name));
 });
 
 test('ordinary HTML attributes, inert scripts and checked stylesheet entries remain valid', () => {

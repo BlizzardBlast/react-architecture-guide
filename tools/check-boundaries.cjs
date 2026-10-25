@@ -116,7 +116,7 @@ function isPrimitiveType(type) {
   return Boolean(type && [ts.SyntaxKind.StringKeyword, ts.SyntaxKind.NumberKeyword,
     ts.SyntaxKind.BooleanKeyword, ts.SyntaxKind.BigIntKeyword].includes(type.kind));
 }
-function hasSafeLocalBinding(identifier) {
+function primitiveLocalBinding(identifier) {
   for (let parent = identifier.parent; parent; parent = parent.parent) {
     if (ts.isFunctionLike(parent)) {
       const matchingParameter = parent.parameters.find(parameter =>
@@ -138,7 +138,8 @@ function hasSafeLocalBinding(identifier) {
       }
     }
   }
-  return false;
+  // No local binding: direct calls may refer to Node's built-in loader.
+  return undefined;
 }
 function imports(node, list, options) {
   // Vite transforms statically analyzable new URL(...) references into bundled
@@ -207,8 +208,9 @@ function imports(node, list, options) {
           (literalString(parent.argumentExpression) === 'require' &&
             ts.isCallExpression(parent.parent) && parent.parent.expression === parent)))
     );
-    if (!isPropertyName && !directRequire && !directModuleMember &&
-        !hasSafeLocalBinding(node)) {
+    const localBinding = primitiveLocalBinding(node);
+    if (!isPropertyName && (localBinding === false ||
+        !directRequire && !directModuleMember && !localBinding)) {
       list.push({ unsupported: 'indirect-commonjs-loader', line: node.getStart() });
     }
   }
@@ -2081,7 +2083,7 @@ function check(srcDir) {
     function visit(v, trail) {
       if (visiting.has(v)) {
         const offset = trail.indexOf(v);
-        const cycle = trail.slice(offset).map(f => path.relative(root, f)).join(' -> ');
+        const cycle = trail.slice(offset).map(f => normPath(path.relative(root, f))).join(' -> ');
         if (!seen.has(cycle)) { seen.add(cycle); result.push(cycle); }
         return;
       }

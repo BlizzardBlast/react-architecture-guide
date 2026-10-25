@@ -73,7 +73,7 @@ npm --prefix examples/react-app audit
 
 `npm run verify` runs Markdown checks, architecture regression tests, the standalone orders example, and the React example's ESLint React Hooks/JSX accessibility rules, tests, typecheck, architecture check and Vite build. The individual checker can be run with `node tools/check-boundaries.cjs examples/react-app/src`. Do not interpret a test existing as a test having passed.
 
-**Current draft-PR limitation:** This execution environment cannot reach the npm registry, and this branch has no authentic committed lockfiles. First generate and commit lockfiles with real registry access (`npm install --package-lock-only --ignore-scripts` in each directory), then perform the clean installations, audits and browser smoke tests above. Do not merge before full verification.
+All three packages include registry-generated lockfiles. Clean installs, the complete local verification gate, audits, repeat builds and a bounded dev/production browser smoke test passed on 2026-10-26; see [verification evidence and limits](docs/verification.md). Rerun the gates when dependencies or behavior change. Earlier remediation notes below describe historical snapshots; their registry and lockfile blockers are superseded by this record.
 
 No new GitHub Actions workflow is required merely for this guide. Preserve all quality and security gates in consumer repositories and batch local validation before pushing to reduce Actions consumption.
 

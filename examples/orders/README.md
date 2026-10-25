@@ -23,7 +23,7 @@ The shared analytics interface intentionally knows **nothing about Order**. Only
 ## Run locally
 
 ~~~bash
-npm install
+npm ci
 npm test
 ~~~
 
