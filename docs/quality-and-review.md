@@ -174,3 +174,11 @@ Review changes and findings together, validate locally, and push once per cohere
 - [ ] Extensionless `?inline` and `?no-inline` imports targeting owned JS/TS keep executable cycle edges and do not generate false missing-static-asset errors.
 - [ ] Runtime imports using TypeScript-only `baseUrl` or `paths` aliases without an audited Vite runtime mapping fail `unverified-vite-runtime-alias`; erased type imports are exempt and installed external packages are classified independently.
 - [ ] Preserve ownership and package-shadowing diagnostics even if runtime alias validation also fails; do not exempt executable imports simply because TypeScript found an owned file.
+
+
+### Runtime resolution and raw-content regression checks
+
+- [ ] Executable local imports follow physical Vite filename and extension precedence, including both `.js` and `.ts` candidates, true runtime cycles and safe type-only substitutes.
+- [ ] Missing-JS TypeScript fallbacks and extensionless directory indexes remain usable; unverifiable package-directory entries fail closed.
+- [ ] Less `@plugin` fails closed, but inert comments and strings that contain the spelling do not.
+- [ ] HTML raw-text `script`, `pre`, `style` and `textarea` elements with literal `<!--` do not hide later active Markdown links.

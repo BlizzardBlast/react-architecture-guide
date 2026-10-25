@@ -350,6 +350,18 @@ function inspectMarkdown(relative, contents, root) {
       continue;
     }
     inIndentedCode = false;
+    // CommonMark raw-text HTML takes precedence over inline HTML comments:
+    // <!-- within <script>/<pre>/<style>/<textarea> cannot mask later links.
+    if (!inComment) {
+      const rawOpener = /^ {0,3}<(script|pre|style|textarea)(?=[\s>])/i.exec(text);
+      if (rawOpener) {
+        const close = new RegExp('</' + rawOpener[1] + '[\\s>]', 'i');
+        if (!close.test(text)) htmlBlock = { depth, close };
+        codeSpanTicks = 0;
+        previousBlank = false;
+        continue;
+      }
+    }
     // A block fence takes precedence over inline HTML-comment syntax in its
     // info string. Existing HTML comments still mask fence-like lines.
     const marker = !inComment && fenceMarker.exec(text);

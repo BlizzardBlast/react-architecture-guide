@@ -267,3 +267,12 @@ TypeScript path/baseUrl mappings are not Vite runtime aliases. A first-party res
 **CR-P1-011 remains blocked:** The current environment cannot resolve `registry.npmjs.org` (`EAI_AGAIN`) or clone from GitHub directly. Authentic lockfiles, pinned `npm ci` installations, the full architecture/orders/React suites, npm audits, repeated production Vite builds, preview and browser accessibility verification are still required before merge. Keep the PR draft.
 
 The scoped recheck additionally preserves executable source behavior for extensionless `?inline`/`?no-inline` imports targeting owned JS/TS files, rather than misclassifying them as missing static assets.
+
+
+### CR-P1-026 / CR-P1-027 / CR-P2-028 — scoped remediation
+
+Executable local source imports now resolve actual Vite runtime files rather than TypeScript's type-resolution substitutes. Targeted fixture tests cover JS/TS collisions, runtime cycles and missing-JS TypeScript fallback; standalone resolver tests cover filenames and extension order. Unverifiable directory-package entries fail closed.
+
+Less `@plugin` directives fail closed until preprocessing JavaScript dependencies can be audited. Markdown raw-text HTML now takes precedence over inline HTML comment syntax, preventing an embedded `<!--` from hiding active links after the raw-text block. Both changes have direct positive and negative regression cases.
+
+**CR-P1-011 remains BLOCKED:** The npm registry is unreachable in the present environment. Authentic root/orders/React lockfiles, pinned installs, full suites, audits, Vite builds and browser/accessibility verification remain unavailable. Keep PR #1 draft and unmerged until the actual gates pass.

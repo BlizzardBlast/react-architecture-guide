@@ -547,3 +547,16 @@ test('real reference definitions following completed multiline spans remain usab
   "Before `code\nstill code`\n\n[foo <!--]: README.md\n[foo <!--]\n[Broken](missing.md)",
   root => assert.deepEqual(checkAll(root).issues, ['README.md:6: missing local link: missing.md']),
 ));
+
+test('raw HTML with <!-- before closing tag must not hide following links', () => {
+  for (const tag of ['script', 'pre', 'style', 'textarea']) fixture(
+    '<' + tag + '><!--\nraw text\n</' + tag + '>\n[Broken](missing.md)',
+    root => assert.deepEqual(checkAll(root).issues,
+      ['README.md:4: missing local link: missing.md']), tag);
+});
+test('comment-looking fences in raw HTML remain inactive while later link is active', () =>
+  fixture(
+    '<script><!--\n~~~md\n[Hidden](missing1.md)\n</script>\n[Broken](missing2.md)',
+    root => assert.deepEqual(checkAll(root).issues,
+      ['README.md:5: missing local link: missing2.md']),
+  ));

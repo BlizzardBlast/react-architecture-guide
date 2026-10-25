@@ -3988,3 +3988,28 @@ test('extensionless raw imports cannot traverse source-file symlinks outside roo
     fixture.cleanup();
   }
 });
+
+test('runtime graph follows existing JS when a TypeScript-preferred TS also exists', () => {
+  for (const spec of ['./b', './b.js']) withFixture({
+    'modules/orders/ui/a.ts': 'import { b } from "' + spec + '"; export const a = b;',
+    'modules/orders/ui/b.ts': 'export const b = 1;',
+    'modules/orders/ui/b.js': 'import { a } from "./a"; export const b = a;',
+  }, result => assert.match(result.errors.join(' '), /runtime-cycle/, spec));
+});
+test('cycle in TS substitute does not turn safe executed JS into a runtime cycle', () =>
+  withFixture({
+    'modules/orders/ui/a.ts': 'import { b } from "./b.js"; export const a = b;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    'modules/orders/ui/b.js': 'export const b = 1;',
+  }, result => assert.doesNotMatch(result.errors.join(' '), /runtime-cycle/)));
+test('Vite local resolution still supports missing-JS TypeScript fallback', () =>
+  withFixture({
+    'modules/orders/ui/a.ts': 'import { b } from "./b.js"; export const a = b;',
+    'modules/orders/ui/b.ts': 'export const b = 1;',
+  }, result => assert.deepEqual(result.errors, [])));
+test('Less executable plugin statements fail closed in owned source', () =>
+  withFixture({
+    'shared/ui/theme.less': '@plugin "../../modules/orders/infrastructure/plugin.js";',
+    'modules/orders/infrastructure/plugin.js': 'module.exports = {};',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-less-plugin/)));

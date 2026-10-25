@@ -139,3 +139,19 @@ test('Sass load-css and at-rule names require complete identifiers', () => {
     { filename: 'theme.scss' }).references.map(x => x.spec),
     ['./safe.css', './tokens.scss']);
 });
+
+test('Less @plugin fails closed with literal and computed options', () => {
+  for (const source of [
+    '@plugin "../../modules/orders/infrastructure/private.js";',
+    '@plugin (mode="unsafe") "./private.js";',
+    '@PLUGIN @computed;',
+  ]) assert.match(scan(source, { filename: 'style.less' }).errors.join(' '),
+    /unsupported-less-plugin/, source);
+});
+test('Less comments and strings containing @plugin remain inert', () => {
+  const source = '/* @plugin "ignored.js"; */\n' +
+    '// @plugin "ignored.js";\n' +
+    '.x::before { content: "@plugin ignored.js"; }';
+  assert.deepEqual(scan(source, { filename: 'style.less' }),
+    { references: [], errors: [] });
+});

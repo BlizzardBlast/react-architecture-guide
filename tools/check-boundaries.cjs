@@ -31,6 +31,7 @@ function loadTypeScript(projectDir = process.argv[2]) {
 const ts = loadTypeScript();
 const { scanCssDependencies } = require('./css-dependencies.cjs');
 const { scanHtml } = require('./html-dependencies.cjs');
+const { resolveViteLocalModule } = require('./vite-runtime-resolution.cjs');
 // The dot is required: filenames such as "assets" are not source files.
 const sourceExt = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const assetExt = /\.(?:css|scss|sass|less|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|mp4|webm|json)$/i;
@@ -1870,8 +1871,9 @@ function check(srcDir) {
       // extensionless spelling resolves to owned source they do not change
       // the import into an asset or suppress executable runtime cycles.
       const inlineSourceTarget = inlineModifiersOnly && !assetPath(dep.spec)
-        ? (viteAlias || rootPath
-          ? resolveLocalSource(viteAlias || rootPath, options)
+        ? (relativeSpec || viteAlias || rootPath
+          ? resolveViteLocalModule(viteAlias || rootPath ||
+            path.resolve(path.dirname(file), filesystemSpec))
           : ts.resolveModuleName(
             filesystemSpec, file, options, ts.sys).resolvedModule?.resolvedFileName)
         : null;
@@ -1890,8 +1892,7 @@ function check(srcDir) {
           for (const candidate of mapping.paths) {
             // In Vite TS projects, a package ./name.js target can correspond
             // to ./name.ts before emit. A .d.ts-only target is not executable.
-            const target = fs.existsSync(candidate) && fs.statSync(candidate).isFile()
-              ? candidate : resolveLocalSource(candidate, options);
+            const target = resolveViteLocalModule(candidate);
             if (!target || /\.d\.[cm]?ts$/i.test(target)) {
               unverifiable = true;
               continue;
@@ -1971,8 +1972,9 @@ function check(srcDir) {
           // TypeScript source in Vite. Restrict the fallback to known owned
           // files, rather than trusting arbitrary node_modules paths.
           if (!candidate) {
-            const resolvedSource = viteAlias || rootPath
-              ? resolveLocalSource(viteAlias || rootPath, options)
+            const resolvedSource = relativeSpec || viteAlias || rootPath
+              ? resolveViteLocalModule(viteAlias || rootPath ||
+                path.resolve(path.dirname(file), filesystemSpec))
               : ts.resolveModuleName(
                 filesystemSpec, file, options, ts.sys).resolvedModule?.resolvedFileName;
             if (resolvedSource && sourceExt.test(resolvedSource) &&
@@ -2000,8 +2002,9 @@ function check(srcDir) {
           errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
         }
       } else {
-        if (viteAlias || rootPath) {
-          resolved = resolveLocalSource(viteAlias || rootPath, options);
+        if (relativeSpec || viteAlias || rootPath) {
+          const local = viteAlias || rootPath || path.resolve(path.dirname(file), filesystemSpec);
+          resolved = dep.runtime ? resolveViteLocalModule(local) : resolveLocalSource(local, options);
         } else {
           const resolvedModule = ts.resolveModuleName(
             filesystemSpec, file, options, ts.sys).resolvedModule;

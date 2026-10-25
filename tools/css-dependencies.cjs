@@ -101,6 +101,13 @@ function scanCssDependencies(css, { filename = 'style.css' } = {}) {
     if (/[()"'\\]/.test(value)) return null;
     return { value, end: close + 1 };
   };
+  // Less @plugin executes JS during preprocessing; an unverified executable
+  // plugin can import files that this stylesheet dependency scanner never sees.
+  if (/\.less$/i.test(filename)) {
+    for (const m of mask.matchAll(/@plugin(?![A-Za-z0-9_\u0080-\uFFFF-])/gi)) {
+      errors.push('unsupported-less-plugin: executable Less @plugin at offset ' + m.index);
+    }
+  }
   const importedUrls = new Set();
   for (const m of mask.matchAll(/@(import|use|forward)(?![A-Za-z0-9_\u0080-\uFFFF-])/gi)) {
     let cursor = m.index + m[0].length;
