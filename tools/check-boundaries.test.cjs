@@ -158,6 +158,62 @@ test('ordinary CSS filenames retain physical ownership through symlinks', t => {
   } finally { fixture.cleanup(); }
 });
 
+test('TypeScript paths cannot certify a different CSS runtime dependency', () => withFixture({
+  '../tsconfig.json': JSON.stringify({ compilerOptions: {
+    baseUrl: '.', paths: { theme: ['src/shared/ui/safe.css'] },
+  } }),
+  '../node_modules/theme/package.json': '{"name":"theme","exports":"./theme.css"}',
+  '../node_modules/theme/theme.css': '@import "../../src/modules/orders/ui/private.css";',
+  'shared/ui/component.ts': 'export const view = true;',
+  'shared/ui/style.css': '@import "theme";',
+  'shared/ui/safe.css': '.safe{}',
+  'modules/orders/ui/private.css': '.private{}',
+}, result => assert.match(result.errors.join(' '), /missing-static-asset/)));
+
+test('plain CSS cannot certify a package import through Sass or Less decoys', () => {
+  for (const [specifier, decoy] of [
+    ['theme', 'theme.scss'], ['theme', 'theme.sass'], ['theme', 'theme.less'],
+    ['theme', '_theme.css'], ['theme.css', '_theme.css'],
+  ]) withFixture({
+    'shared/ui/component.ts': 'export const view = true;',
+    'shared/ui/style.css': '@import "' + specifier + '";',
+    ['shared/ui/' + decoy]: '.safe{}',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/, decoy));
+});
+
+test('format-specific extensionless stylesheets and Sass partials still resolve', () => {
+  for (const [format, target] of [['css', 'tokens.css'], ['less', 'tokens.less'], ['scss', '_tokens.scss']]) {
+    withFixture({
+      'shared/ui/component.ts': 'export const view = true;',
+      ['shared/ui/style.' + format]: '@import "tokens";',
+      ['shared/ui/' + target]: '.safe{}',
+    }, result => assert.deepEqual(result.errors, [], format));
+  }
+});
+
+test('ordinary CSS filenames ignore unrelated TypeScript paths', () => withFixture({
+  '../tsconfig.json': JSON.stringify({ compilerOptions: {
+    baseUrl: '.', paths: { 'icon.svg': ['src/modules/orders/ui/private.svg'] },
+  } }),
+  'shared/ui/component.ts': 'export const view = true;',
+  'shared/ui/style.css': '.view{background:url(icon.svg)}',
+  'shared/ui/icon.svg': '<svg/>',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('verified Vite CSS aliases take precedence over TypeScript and relative decoys', () => withFixture({
+  '../tsconfig.json': JSON.stringify({ compilerOptions: {
+    baseUrl: '.', paths: { theme: ['src/modules/orders/ui/private.css'] },
+  } }),
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { theme: fileURLToPath(new URL("./src/shared/ui/safe.css", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"theme":"src/shared/ui/safe.css"}}',
+  'shared/ui/component.ts': 'export const view = true;',
+  'shared/ui/style.css': '@import "theme";',
+  'shared/ui/theme': '@import "../../modules/orders/ui/private.css";',
+  'shared/ui/safe.css': '.safe{}',
+  'modules/orders/ui/private.css': '.private{}',
+}, result => assert.deepEqual(result.errors, [])));
+
 test('production code cannot depend on test-exempt source through runtime or type imports', () => {
   for (const [file, statement] of [
     ['rules.test.ts', 'import { rule } from "./rules.test"; export const value = rule;'],
@@ -1101,13 +1157,13 @@ test('more specific path mappings win over generic mappings for source assets', 
   'shared/ui/orders/ui/private.svg': '<svg/>',
   'modules/orders/ui/private.svg': '<svg/>',
 }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
-test('stylesheets honor the same most-specific paths mapping', () => withFixture({
+test('TypeScript paths do not certify stylesheet runtime targets', () => withFixture({
   '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@*":["shared/ui/*"],"@orders/*":["modules/orders/*"]}}}',
   'shared/ui/widget.ts': 'import "./widget.css"; export const widget = 1;',
   'shared/ui/widget.css': '.widget { background: url("@orders/ui/private.svg") }',
   'shared/ui/orders/ui/private.svg': '<svg/>',
   'modules/orders/ui/private.svg': '<svg/>',
-}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+}, result => assert.match(result.errors.join(' '), /missing-static-asset/)));
 
 test('fixture setup preserves unbound Vite helpers without rewriting config', () => {
   const config = 'export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)) } } };';

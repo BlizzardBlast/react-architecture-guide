@@ -27,11 +27,9 @@ function inspectMarkdown(relative, contents, root) {
       /^ {0,3}<![A-Z]/.test(text) ||
       /^ {0,3}(?:<!--|<\?|<!\[CDATA\[|<(?:script|pre|style|textarea)(?=[\s>]))/i.test(text);
   }
-  // Code spans can cross lines *within one paragraph*. Track matching
-  // backtick-run lengths so <!-- inside a multiline span stays literal.
-  // A run with no closer is ordinary text, not a code-span opener.
+  // Inline constructs can cross lines only within one paragraph.
   let codeSpanTicks = 0;
-  function hasCodeSpanCloser(text, from, size, lineIndex) {
+  function* paragraphRemainder(text, from, lineIndex) {
     const start = blocks[lineIndex];
     for (let row = lineIndex; row < lines.length; row++) {
       const block = blocks[row];
@@ -41,12 +39,15 @@ function inspectMarkdown(relative, contents, root) {
         (/^[-+*]$/.test(block.item) || parseInt(block.item, 10) === 1));
       const candidate = row === lineIndex ? text.slice(from) :
         block.item && !newItem ? block.item + ' ' + block.content : block.content;
-      // CommonMark block constructs interrupt a paragraph before inline
-      // backtick matching. A backtick inside a block HTML comment is *not*
-      // a closer for the preceding paragraph's code span.
+      // Block constructs interrupt a paragraph before inline matching.
       if (row !== lineIndex && (atxHeading.test(start.content) ||
           interruptsParagraph(candidate) || newItem ||
-          block.depth > blocks[row - 1].depth)) return false;
+          block.depth > blocks[row - 1].depth)) return;
+      yield candidate;
+    }
+  }
+  function hasCodeSpanCloser(text, from, size, lineIndex) {
+    for (const candidate of paragraphRemainder(text, from, lineIndex)) {
       for (const match of candidate.matchAll(/`+/g)) {
         if (match[0].length === size) return true;
       }
@@ -323,9 +324,15 @@ function inspectMarkdown(relative, contents, root) {
       const detect = maskLinkMetadata(visible);
       let open = detect.indexOf('<!--');
       while (open !== -1) {
-        let slashCount = 0;
-        for (let j = open - 1; j >= 0 && visible[j] === '\\'; j--) slashCount++;
-        if (slashCount % 2 === 0) break;
+        // Block comments may span paragraphs; inline comments need a closer
+        // inside their paragraph or their opener is ordinary Markdown text.
+        let closed = /^ {0,3}$/.test(line.slice(0, cursor + open));
+        if (!isEscaped(visible, open) && !closed) {
+          for (const rest of paragraphRemainder(line, cursor + open + 4, currentLineIndex)) {
+            if (rest.includes('-->')) { closed = true; break; }
+          }
+        }
+        if (!isEscaped(visible, open) && closed) break;
         open = detect.indexOf('<!--', open + 4);
       }
       if (open === -1) {

@@ -113,6 +113,10 @@ These AST rules cover documented syntax, not arbitrary plugin transformations or
 
 Stylesheets are also architectural dependency sources. The checker scans `src/**/*.css`, `*.scss`, `*.sass`, and `*.less`, including stylesheets that are referenced by other stylesheets. Literal `@import`, Sass `@use`/`@forward`, CSS `url()`, and literal quoted `image-set()` image choices are checked against **the same shared/sibling and intra-module layer-direction policy as JavaScript/TypeScript**, plus the scanned source root. Vite aliases are honored for these references; stylesheets cannot disguise a private business asset as shared code.
 
+TypeScript `paths` and `baseUrl` do not configure Vite's stylesheet resolver and cannot certify a stylesheet target. Use a matching, verified Vite alias for such names; otherwise local names resolve beside the importing stylesheet. An unresolved package stylesheet is rejected rather than validated against a TypeScript-only decoy.
+
+Extensionless lookups follow the stylesheet format: CSS tries `.css`, Less tries `.less`/`.css`, and Sass tries `.scss`/`.sass`/`.css` with partial filenames. Plain CSS never uses a Sass/Less file or underscore partial to certify a package import.
+
 Nonliteral expressions (such as `url(var(--asset))`), multi-target Sass imports, computed `meta.load-css()` calls, and unverified local/package paths produce explicit diagnostics instead of being silently accepted. The scanner recognizes Less/SCSS/Sass `//` comments without treating unquoted URL schemes as comments. Literal Less import options such as `@import (reference, optional) "./tokens.less"` and `@import (inline) "./base.css"` are supported in `.less` files; unsupported options fail closed. A missing `(optional)` target is allowed, but an existing optional target must still respect the same boundaries. Sass/Less interpolation such as `url("#{$name}/asset.svg")` is rejected as unverifiable, not mistaken for a safe fragment. Literal `image-set()` choices are conservatively validated, although the bundler may handle individual string choices differently. Data URLs, fragments, remote URLs and built-in `sass:` modules are not local source dependencies. This is a **conservative static scanner**, not a full CSS/Sass/Less/PostCSS compiler. Custom transformations or unusual preprocessor resolution must be verified against the actual build output separately.
 
 Run the stylesheet scanner's own tests through root `npm run test:architecture`, which includes `tools/css-dependencies.test.cjs`. See [Less import options](https://lesscss.org/features/#import-options) for supported syntax. As always, use a real Vite build to validate bundler behavior.
@@ -127,7 +131,7 @@ Run `node tools/check-boundaries.cjs examples/react-app/src` from the repository
 
 ### Resolver integrity and alias trust
 
-The architecture checker checks **physical destinations**, not just recognizable import prefixes. Bare `baseUrl` imports resolving to local files outside the validated `src/` tree are rejected. For TypeScript `paths` imports of styles and assets, the most-specific path pattern wins; mirror any bundler-specific resolution (including Vite aliases) with a real build and conformance tests.
+The architecture checker checks **physical destinations**, not just recognizable import prefixes. Bare `baseUrl` imports resolving to local files outside the validated `src/` tree are rejected. For source imports resolved through TypeScript `paths`, the most-specific path pattern wins; stylesheet references instead require Vite-compatible resolution as described above. Verify bundler-specific resolution with a real build and conformance tests.
 
 To use the supported Vite expression `fileURLToPath(new URL('./src/...', import.meta.url))`, **import `fileURLToPath` directly from `node:url`**, and do not shadow either that function or the global `URL` constructor. The checker does not evaluate arbitrary Vite JavaScript or plugin aliases, so such configurations need independent bundler-level validation.
 
@@ -166,6 +170,8 @@ The checker isolates each supported shell command within npm scripts when identi
 The Markdown link validator masks inline code before interpreting HTML-comment markers, ignores links in fenced blocks inside ordinary list/blockquote containers, and reports unmatched fenced blocks consistently. It remains a conservative lightweight validator, not a general CommonMark rendering engine; advanced or plugin-specific Markdown syntax requires review.
 
 Reference definitions must begin a Markdown block; they cannot interrupt an existing paragraph, including one containing an inline HTML comment. Reference discovery and link visibility share this eligibility, so inactive definition-looking text cannot certify later links. Separate a forward reference from a following definition with a blank line.
+
+Line-leading HTML comment blocks can span blank lines. Inline comments require a closing delimiter within the same paragraph; otherwise their opener remains ordinary text and cannot conceal links in later blocks.
 
 ### Vite executable, root and option verification
 

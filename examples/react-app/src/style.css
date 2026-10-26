@@ -8,4 +8,4 @@ li { margin: .6rem 0; }
 input,button { font: inherit; padding: .35rem .5rem; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .7; }
-:focus-visible { outline: 3px solid cornflowerblue; outline-offset: 2px; }
+:focus-visible { outline: 3px solid royalblue; outline-offset: 2px; }

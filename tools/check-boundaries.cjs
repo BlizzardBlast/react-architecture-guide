@@ -1576,7 +1576,7 @@ function checkOwnedDependency(source, dest, policy, errors, { asset = false, isT
   if (stylesheet && pureCode && !isTest) errors.push(`pure-layer-static-asset: ${desc}`);
 }
 
-function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
+function scanOwnedStylesheets(root, physicalRoot, policy, errors) {
   function scanDir(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       // Do not silently omit imported stylesheets under nested generated-
@@ -1660,28 +1660,28 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
       if (alias) candidates.push(alias);
       else if (spec.startsWith('.')) candidates.push(path.resolve(path.dirname(logicalFile), spec));
       else if (spec.startsWith('/src/')) candidates.push(path.resolve(projectDir, '.' + spec));
-      else {
-        candidates.push(...resolveMappedAssetCandidates(spec, options, projectDir));
-        if (!candidates.length && !spec.startsWith('/') && !/^[a-z][a-z\d+.-]*:/i.test(spec)) {
-          candidates.push(path.resolve(path.dirname(logicalFile), spec));
-        }
+      else if (!spec.startsWith('/') && !/^[a-z][a-z\d+.-]*:/i.test(spec)) {
+        candidates.push(path.resolve(path.dirname(logicalFile), spec));
       }
       if (!candidates.length) {
         errors.push('unverified-css-dependency: ' + source.relative + ' -> ' + ref.spec);
         continue;
       }
       const expanded = [];
+      const sass = /\.(?:scss|sass)$/i.test(physicalFile);
+      const extensions = sass ? ['.scss', '.sass', '.css'] :
+        /\.less$/i.test(physicalFile) ? ['.less', '.css'] : ['.css'];
       for (const candidate of candidates) {
         expanded.push(candidate);
         if (!assetUrl) {
           const extname = path.extname(candidate);
-          if (extname) {
+          if (extname && sass) {
             // Sass partials can be referenced using their public filename.
             expanded.push(path.join(path.dirname(candidate), '_' + path.basename(candidate)));
-          } else {
-            for (const ext of ['.css', '.scss', '.sass', '.less']) {
+          } else if (!extname) {
+            for (const ext of extensions) {
               expanded.push(candidate + ext);
-              expanded.push(path.join(path.dirname(candidate), '_' + path.basename(candidate) + ext));
+              if (sass) expanded.push(path.join(path.dirname(candidate), '_' + path.basename(candidate) + ext));
             }
           }
         }
@@ -1722,7 +1722,7 @@ function check(srcDir) {
   const known = new Set(files);
   const edges = new Map(files.map(f => [f, []]));
   const moduleLayouts = new Map();
-  scanOwnedStylesheets(root, physicalRoot, policy, options, errors);
+  scanOwnedStylesheets(root, physicalRoot, policy, errors);
   for (const file of files) {
     const logical = category(file, root);
     let physicalFile;

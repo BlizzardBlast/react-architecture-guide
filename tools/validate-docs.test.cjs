@@ -712,3 +712,27 @@ test('a multiline reference title does not consume the next definition', () => f
   '[first]: README.md\n  "<!--"\n[foo <!--]: README.md\n[foo <!--]\n[Broken](missing.md)', root =>
     assert.deepEqual(checkAll(root).issues, ['README.md:5: missing local link: missing.md']),
 ));
+
+test('inline HTML comments cannot cross a paragraph boundary', () => {
+  for (const boundary of ['\n\n', '\n# Heading\n', '\n---\n', '\n- item\n', '\n> quote\n']) fixture(
+    'Before <!--' + boundary + '[Broken](missing.md)\n-->', root => {
+      const issues = checkAll(root).issues;
+      assert.equal(issues.length, 1, boundary);
+      assert.match(issues[0], /missing local link: missing\.md/);
+    });
+});
+
+test('block HTML comments retain blank lines and paragraph-looking contents', () => fixture(
+  '<!--\n\n# Hidden\n[Hidden](missing.md)\n-->\n[Broken](missing2.md)', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:6: missing local link: missing2.md']),
+));
+
+test('inline HTML comments close within their paragraph and retain trailing links', () => fixture(
+  'Before <!--\n[Hidden](missing.md) --> [Broken](missing2.md)', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:2: missing local link: missing2.md']),
+));
+
+test('unclosed inline HTML-looking text leaves subsequent links active', () => fixture(
+  'Before <!-- [Broken](missing.md)', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:1: missing local link: missing.md']),
+));
