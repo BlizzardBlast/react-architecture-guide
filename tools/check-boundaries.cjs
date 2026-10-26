@@ -153,7 +153,20 @@ function primitiveLocalBinding(identifier) {
   // No local binding: direct calls may refer to Node's built-in loader.
   return undefined;
 }
-function imports(node, list, options) {
+function imports(node, list, options, inJSDoc = false) {
+  if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+    const spec = literalString(node.argument.literal);
+    if (spec) list.push({ spec, runtime: false, line: node.getStart() });
+  }
+  if (ts.isJSDocImportTag(node)) {
+    const spec = literalString(node.moduleSpecifier);
+    if (spec) list.push({ spec, runtime: false, line: node.getStart() });
+  }
+  // Documentation contains type edges, never executable loader references.
+  if (inJSDoc) {
+    ts.forEachChild(node, child => imports(child, list, options, true));
+    return;
+  }
   // Vite transforms statically analyzable new URL(...) references into bundled
   // assets or worker entrypoints; they need the same ownership validation.
   if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) &&
@@ -179,10 +192,6 @@ function imports(node, list, options) {
   if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
     const spec = literalString(node.moduleReference.expression);
     if (spec) list.push({ spec, runtime: !node.isTypeOnly, line: node.getStart() });
-  }
-  if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
-    const spec = literalString(node.argument.literal);
-    if (spec) list.push({ spec, runtime: false, line: node.getStart() });
   }
   if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
     const spec = literalString(node.moduleSpecifier);
@@ -305,6 +314,7 @@ function imports(node, list, options) {
       list.push({ unsupported: 'node-create-require', line: node.getStart() });
     }
   }
+  for (const doc of node.jsDoc || []) imports(doc, list, options, true);
   ts.forEachChild(node, child => imports(child, list, options));
 }
 function configFor(dir) {
@@ -1609,6 +1619,7 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
     const scanned = scanCssDependencies(css, { filename: logicalFile });
     for (const issue of scanned.errors) errors.push(issue + ': ' + source.relative);
     for (const ref of scanned.references) {
+      const assetUrl = ref.kind === 'url' || ref.kind === 'image-set';
       let spec = fileSpecifier(ref.spec);
       if (!spec) continue;
       // An @import/@use/@forward introduces a dependency-bearing stylesheet;
@@ -1638,7 +1649,7 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
         errors.push('unsupported-css-dependency: unresolved hash reference ' + source.relative + ' -> ' + ref.spec);
         continue;
       }
-      if (ref.kind === 'url') {
+      if (assetUrl) {
         const decoded = decodeAssetUrl(ref.spec, errors, source.relative);
         if (decoded === null) continue;
         spec = fileSpecifier(decoded);
@@ -1651,6 +1662,9 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
       else if (spec.startsWith('/src/')) candidates.push(path.resolve(projectDir, '.' + spec));
       else {
         candidates.push(...resolveMappedAssetCandidates(spec, options, projectDir));
+        if (!candidates.length && !spec.startsWith('/') && !/^[a-z][a-z\d+.-]*:/i.test(spec)) {
+          candidates.push(path.resolve(path.dirname(logicalFile), spec));
+        }
       }
       if (!candidates.length) {
         errors.push('unverified-css-dependency: ' + source.relative + ' -> ' + ref.spec);
@@ -1659,7 +1673,7 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
       const expanded = [];
       for (const candidate of candidates) {
         expanded.push(candidate);
-        if (ref.kind !== 'url') {
+        if (!assetUrl) {
           const extname = path.extname(candidate);
           if (extname) {
             // Sass partials can be referenced using their public filename.

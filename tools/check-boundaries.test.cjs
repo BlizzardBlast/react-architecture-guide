@@ -62,6 +62,102 @@ test('inline import types enforce cross-module cycles without runtime edges', ()
   });
 });
 
+test('JSDoc import expressions and import tags obey source ownership', () => {
+  for (const extension of ['js', 'jsx', 'mjs', 'cjs']) {
+    for (const comment of [
+      '/** @type {import("../../modules/orders/domain/order").Order} */',
+      '/** @import { Order } from "../../modules/orders/domain/order" */',
+      '/** @typedef {typeof import("../../modules/orders/domain/order")} OrderModule */',
+    ]) withFixture({ ...base, ['shared/ui/reference.' + extension]: comment + '\nexport const ref = null;' },
+      result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  }
+});
+
+test('JSDoc imports retain type-only cycle semantics and pure-package checks', () => {
+  for (const importTag of [false, true]) {
+    const source = (target, name) => (importTag
+      ? '/** @import {' + name + '} from "' + target + '" */'
+      : '/** @typedef {import("' + target + '").' + name + '} Ref */') + '\nexport const value = 1;';
+    withFixture({
+      '../architecture.config.json': '{"allowCrossModule":{"orders":["payments"],"payments":["orders"]}}',
+      'modules/orders/index.js': source('../payments', 'P'),
+      'modules/payments/index.js': source('../orders', 'O'),
+    }, result => assert.match(result.errors.join(' '), /cross-module-cycle/));
+    withFixture({
+      'modules/orders/model/a.js': source('./b', 'B'),
+      'modules/orders/model/b.js': source('./a', 'A'),
+    }, result => {
+      assert.deepEqual(result.errors, []);
+      assert.match(result.warnings.join(' '), /source-level-cycle/);
+    });
+  }
+  withFixture({
+    'modules/orders/model/order.js': '/** @type {import("react").ReactNode} */\nexport const view = null;',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-external-package/));
+});
+
+test('JSDoc names and examples are documentation rather than executable loaders', () => withFixture({
+  'shared/lib/labels.js': '/** @typedef {{module: string, require: string}} Labels\n * @example import("../../modules/orders/domain/order")\n */\nexport const label = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('quoted image-set URL encodings enforce actual ownership and valid filenames', () => {
+  for (const imageSet of ['image-set', '-webkit-image-set']) {
+    const encoded = '%2e%2e/%2e%2e/modules/orders/ui/private.svg';
+    withFixture({
+      'shared/ui/component.ts': 'export const view = true;',
+      'shared/ui/style.css': '.x{background:' + imageSet + '("./' + encoded + '" 1x)}',
+      ['shared/ui/' + encoded]: '<svg/>',
+      'modules/orders/ui/private.svg': '<svg/>',
+    }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+    withFixture({
+      'shared/ui/component.ts': 'export const view = true;',
+      'shared/ui/style.css': '.x{background:' + imageSet + '("./a%20b.svg" 1x)}',
+      'shared/ui/a b.svg': '<svg/>',
+    }, result => assert.deepEqual(result.errors, []));
+    for (const encoded of ['bad%.svg', '%00.svg', '%252e%252e.svg']) withFixture({
+      'shared/ui/component.ts': 'export const view = true;',
+      'shared/ui/style.css': '.x{background:' + imageSet + '("./' + encoded + '" 1x)}',
+    }, result => assert.match(result.errors.join(' '), /unverified-asset-url/));
+  }
+});
+
+test('ordinary relative CSS filenames resolve beside the importing stylesheet', () => withFixture({
+  'shared/ui/component.ts': 'export const view = true;',
+  'shared/ui/style.css': '@import "theme.css"; .x{background:url(icons/icon.svg);mask:image-set("icons/icon.svg" 1x)}',
+  'shared/ui/theme.css': '.theme{}',
+  'shared/ui/icons/icon.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('ordinary relative CSS references still reject missing files and pure-layer assets', () => {
+  withFixture({
+    'shared/ui/component.ts': 'export const view = true;',
+    'shared/ui/style.css': '.x{background:url(missing.svg)}',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+  withFixture({
+    'modules/orders/model/order.ts': 'export const order = 1;',
+    'modules/orders/model/style.css': '.x{background:url(icon.svg)}',
+    'modules/orders/model/icon.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+});
+
+test('ordinary CSS filenames retain physical ownership through symlinks', t => {
+  const fixture = setup({
+    'shared/ui/component.ts': 'export const view = true;',
+    'shared/ui/style.css': '.x{background:url(icon.svg)}',
+    'modules/orders/ui/private.svg': '<svg/>',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, 'modules/orders/ui/private.svg'),
+        path.join(fixture.root, 'shared/ui/icon.svg'), 'file');
+    } catch (error) {
+      if (error.code === 'EPERM') return t.skip('symlink privilege unavailable');
+      throw error;
+    }
+    assert.match(check(fixture.root).errors.join(' '), /shared-must-be-independent/);
+  } finally { fixture.cleanup(); }
+});
+
 test('production code cannot depend on test-exempt source through runtime or type imports', () => {
   for (const [file, statement] of [
     ['rules.test.ts', 'import { rule } from "./rules.test"; export const value = rule;'],

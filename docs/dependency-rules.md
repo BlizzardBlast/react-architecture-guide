@@ -11,7 +11,7 @@ Folder names express ownership; **import direction and contracts** make that own
 5. Modules never import routes or app composition. Routes don't import app setup.
 6. Runtime cycles fail. Cycles spanning modules fail even if entirely type-only; purely internal type-only cycles are warnings for structural review.
 
-Inline TypeScript types such as `import("./order").Order` and `typeof import("./order")` obey the same ownership rules, including in declaration files. They add source dependencies without executable cycle edges. Production files and HTML entrypoints cannot import `.test.*` or `.spec.*` source, even through type-only imports or package mappings; test-only dependency exemptions must remain confined to tests.
+Inline TypeScript types such as `import("./order").Order` and `typeof import("./order")` obey the same ownership rules, including in declaration files. JavaScript JSDoc import expressions and `@import` tags are also type-only dependencies; ordinary documentation names and examples do not become executable edges. These dependencies participate in source-level cycle checks without executable cycle edges. Production files and HTML entrypoints cannot import `.test.*` or `.spec.*` source, even through type-only imports or package mappings; test-only dependency exemptions must remain confined to tests.
 
 ## Simple modules
 
@@ -39,6 +39,8 @@ Inline TypeScript types such as `import("./order").Order` and `typeof import("./
 CSS, SVG, fonts and images may be imported by presentation and app composition code, provided they exist and do not cross ownership boundaries. Pure domain/model/application/shared utilities cannot import presentation assets. JSON **can** be owned, pure configuration/data: it is allowed only when its location and import path respect the same module ownership and layer rules as source modules.
 
 HTML resource paths and decorative CSS `url()`/`image-set()` paths are URL-decoded before ownership checks, matching Vite's asset handling. Encoded spaces, Unicode and ordinary path characters are supported. Malformed escapes, encoded controls/backslashes and residual reserved or double encodings fail closed as `unverified-asset-url`, because development and build resolution may differ. CSS `@import` specifiers retain literal filename resolution. At-rule names inside URL payloads are ordinary filename text.
+
+Ordinary local CSS filenames such as `url(icon.svg)` and `@import "theme.css"` resolve beside the importing stylesheet, without requiring a `./` prefix. Verified Vite aliases retain precedence, and resolved files still undergo physical ownership, layer and source-root checks.
 
 Imports resolving outside the validated `src/` tree are reported as outside-source references rather than automatically trusted. A multi-package monorepo must validate its other package roots separately or adapt the checker with reviewed configuration; a successful single-root check does not validate all workspaces.
 
@@ -162,6 +164,8 @@ The architecture checker only accepts one **static** CommonJS `module.exports = 
 The checker isolates each supported shell command within npm scripts when identifying Vite's own `--config` option; flags belonging to ESLint or another command are not Vite configuration selections. Scripts with multiple conflicting Vite invocations or ambiguous configuration flags fail closed. This limited shell analysis is not a complete interpreter for arbitrary shell functions, runtime wrappers, or externally supplied CLI overrides; inspect your actual build scripts and verify Vite's effective configuration before relying on an architecture-check result.
 
 The Markdown link validator masks inline code before interpreting HTML-comment markers, ignores links in fenced blocks inside ordinary list/blockquote containers, and reports unmatched fenced blocks consistently. It remains a conservative lightweight validator, not a general CommonMark rendering engine; advanced or plugin-specific Markdown syntax requires review.
+
+Reference definitions must begin a Markdown block; they cannot interrupt an existing paragraph, including one containing an inline HTML comment. Reference discovery and link visibility share this eligibility, so inactive definition-looking text cannot certify later links. Separate a forward reference from a following definition with a blank line.
 
 ### Vite executable, root and option verification
 

@@ -50,11 +50,11 @@ test('angle-bracket destinations may contain spaces', () => fixture(
   },
 ));
 test('references to missing local files fail even for reference-style links', () => fixture(
-  '[Guide][ref]\n[ref]: docs/missing.md\n', root =>
+  '[Guide][ref]\n\n[ref]: docs/missing.md\n', root =>
     assert.match(checkAll(root).issues.join(' '), /missing local link/),
 ));
 test('forward reference links are accepted when the target exists', () => fixture(
-  '[Guide][ref]\n[ref]: guide.md\n', root => {
+  '[Guide][ref]\n\n[ref]: guide.md\n', root => {
     fs.writeFileSync(path.join(root, 'guide.md'), '# Guide');
     assert.deepEqual(checkAll(root).issues, []);
   },
@@ -675,4 +675,40 @@ test('leaving a quote fence restores references while retaining its missing-clos
       'README.md:1: unclosed ~~~ code fence',
       'README.md:5: missing local link: missing.md',
     ]),
+));
+
+test('inline HTML comments cannot contribute phantom reference definitions', () => {
+  for (const prefix of ['lead <!--', '> lead <!--', '- lead <!--']) {
+    const continuation = prefix.startsWith('>') ? '> ' : prefix.startsWith('-') ? '  ' : '';
+    fixture(prefix + '\n' + continuation + '[foo <!--]: README.md\n' + continuation + '-->' +
+      '\n\n[foo <!--]\n[Inactive](missing.md)\n-->\n[Broken](missing2.md)', root =>
+      assert.deepEqual(checkAll(root).issues, ['README.md:8: missing local link: missing2.md']));
+  }
+});
+
+test('an inactive definition cannot certify the reference-looking comment that contains it', () => fixture(
+  '[foo <!--]\n[foo <!--]: README.md\n[Inactive](missing.md)\n-->\n[Broken](missing2.md)', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:5: missing local link: missing2.md']),
+));
+
+test('inline code and link metadata cannot impersonate comment openers during reference discovery', () => {
+  for (const prefix of ['lead `<!--`', 'lead [safe](README.md "<!--")', 'lead \\<!--']) fixture(
+    prefix + '\n\n[foo <!--]: README.md\n\n[foo <!--]\n[Broken](missing.md)', root =>
+      assert.deepEqual(checkAll(root).issues, ['README.md:6: missing local link: missing.md']));
+});
+
+test('reference definitions after block boundaries retain forward-reference support', () => {
+  for (const boundary of ['# Heading', '---', '- item\n', '> quote\n', '~~~\ncode\n~~~']) fixture(
+    '[foo <!--]\n[Broken](missing.md)\n\n' + boundary + '\n[foo <!--]: README.md', root =>
+      assert.deepEqual(checkAll(root).issues, ['README.md:2: missing local link: missing.md']));
+});
+
+test('ordinary paragraphs cannot supply reference definitions', () => fixture(
+  '[Guide][ref]\n[ref]: README.md', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:1: missing reference definition: ref']),
+));
+
+test('a multiline reference title does not consume the next definition', () => fixture(
+  '[first]: README.md\n  "<!--"\n[foo <!--]: README.md\n[foo <!--]\n[Broken](missing.md)', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:5: missing local link: missing.md']),
 ));

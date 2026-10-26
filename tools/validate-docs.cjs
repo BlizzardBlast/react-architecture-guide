@@ -133,12 +133,16 @@ function inspectMarkdown(relative, contents, root) {
   // Definitions may follow their uses. An unreferenced '[text <!--]' is not
   // a link and must NOT mask an actual HTML comment opener.
   const knownReferences = new Set();
+  const referenceDefinitions = new Set();
+  const referenceTitleOpener = /^ {0,3}\[[^\]\n]+\]:[ \t]*(?:<(?:\\.|[^>])*>|\S+)[ \t]*$/;
+  const referenceTitleLine = /^(?: {0,4}|\t)(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\((?:\\.|[^)])*\))[ \t]*$/;
   // A reference definition inside fenced/indented code or a raw HTML comment
   // is not a definition. Pre-index only plausible *active block* lines; the
   // inline pass below retains its own destination checks.
   let referenceFence = null, referenceComment = false;
   let referenceHtml = null;
   let referenceIndent = false, referencePreviousBlank = true;
+  let referenceParagraph = false, referenceTitle = null;
   // Definitions inside multiline inline code spans cannot become references.
   // Reuse the same closer/paragraph-interruption rules as the inline pass.
   let referenceTicks = 0;
@@ -165,13 +169,18 @@ function inspectMarkdown(relative, contents, root) {
     return chars.join('');
   }
   for (let row = 0; row < lines.length; row++) {
-    const { content: line, depth, inList } = blocks[row];
+    const { content: line, depth, inList, item } = blocks[row];
+    const newItem = item && (blocks[row - 1]?.inList || line.trim() &&
+      (/^[-+*]$/.test(item) || parseInt(item, 10) === 1));
+    if (newItem || row && depth > blocks[row - 1].depth) referenceParagraph = false;
     const marker = fenceMarker.exec(line);
     if (referenceFence && line.trim() &&
         (referenceFence.list && !inList || referenceFence.depth && referenceFence.depth !== depth)) {
       referenceFence = null;
+      referenceParagraph = false;
     }
     if (referenceFence) {
+      referenceParagraph = false;
       if (marker && marker[1][0] === referenceFence.char &&
           marker[1].length >= referenceFence.length && /^\s*$/.test(marker[2])) {
         referenceFence = null;
@@ -180,10 +189,12 @@ function inspectMarkdown(relative, contents, root) {
     }
     if (referenceHtml && referenceHtml.depth !== depth) referenceHtml = null;
     if (referenceComment) {
+      referenceParagraph = false;
       if (line.includes('-->')) referenceComment = false;
       continue;
     }
     if (referenceHtml) {
+      referenceParagraph = false;
       if (referenceHtml.close) {
         if (referenceHtml.close.test(line)) referenceHtml = null;
         continue;
@@ -192,6 +203,7 @@ function inspectMarkdown(relative, contents, root) {
       referenceHtml = null;
     }
     if (marker) {
+      referenceParagraph = false;
       referenceTicks = 0;
       referenceFence = { char: marker[1][0], length: marker[1].length, depth, list: inList };
       referencePreviousBlank = false;
@@ -199,14 +211,25 @@ function inspectMarkdown(relative, contents, root) {
     }
     if (/^(?: {4}|\t)/.test(line) &&
         (referencePreviousBlank || referenceIndent)) {
+      referenceParagraph = false;
       referenceIndent = true;
       referencePreviousBlank = false;
       continue;
     }
     referenceIndent = false;
-    if (!line.trim()) { referenceTicks = 0; referencePreviousBlank = true; continue; }
+    if (!line.trim()) {
+      referenceTicks = 0;
+      referenceParagraph = false;
+      referenceTitle = null;
+      referencePreviousBlank = true;
+      continue;
+    }
     referencePreviousBlank = false;
+    const title = referenceTitle === depth && referenceTitleLine.test(line);
+    referenceTitle = null;
+    if (title) continue;
     if (/^ {0,3}<!--/.test(line)) {
+      referenceParagraph = false;
       referenceTicks = 0;
       referenceComment = !line.includes('-->');
       continue;
@@ -215,27 +238,32 @@ function inspectMarkdown(relative, contents, root) {
     // raw-text elements close at an end tag, other HTML blocks at blank.
     const rawText = /^ {0,3}<(script|pre|style|textarea)(?=[\s>])/i.exec(line);
     if (rawText) {
+      referenceParagraph = false;
       const close = new RegExp('</' + rawText[1] + '[\\s>]', 'i');
       if (!close.test(line)) referenceHtml = { close, depth };
       continue;
     }
     if (blockTags.test(line) ||
         /^ {0,3}<\/?[A-Za-z][^>]*>\s*$/.test(line)) {
+      referenceParagraph = false;
       referenceHtml = { close: null, depth };
       continue;
     }
     const visible = referenceVisible(line, row);
-    const start = /^ {0,3}\[/.exec(visible);
-    if (!start) continue;
-    const end = closingBracket(visible, start[0].length - 1);
+    // Definitions cannot interrupt a paragraph, including an inline comment
+    // opened by its text. Keep this eligibility for both visibility passes.
+    const start = !referenceParagraph && /^ {0,3}\[/.exec(visible);
+    const end = start ? closingBracket(visible, start[0].length - 1) : -1;
     if (end !== -1 && visible[end + 1] === ':' &&
         /^\s*(?:<[^>]+>|\S+)/.test(visible.slice(end + 2))) {
       knownReferences.add(normalizeReference(visible.slice(start[0].length, end)));
-    }
+      referenceDefinitions.add(row);
+      referenceTitle = referenceTitleOpener.test(visible) ? depth : null;
+    } else referenceParagraph = !interruptsParagraph(line);
   }
   function maskLinkMetadata(line) {
     const start = /^ {0,3}\[/.exec(line);
-    if (start) {
+    if (start && referenceDefinitions.has(currentLineIndex)) {
       const end = closingBracket(line, start[0].length - 1);
       if (end !== -1 && line[end + 1] === ':' &&
           /^\s*(?:<[^>]+>|\S+)/.test(line.slice(end + 2))) {
@@ -323,8 +351,7 @@ function inspectMarkdown(relative, contents, root) {
     // A link reference title may occupy the next (possibly indented) line.
     // Consume it as link metadata before indented-code and HTML-comment
     // scanning; a literal <!-- inside its quotes cannot hide later links.
-    const title = pendingReferenceTitle?.depth === depth &&
-      /^(?: {0,4}|\t)(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\((?:\\.|[^)])*\))[ \t]*$/.test(text);
+    const title = pendingReferenceTitle?.depth === depth && referenceTitleLine.test(text);
     pendingReferenceTitle = null;
     if (title) {
       inIndentedCode = false;
@@ -429,7 +456,7 @@ function inspectMarkdown(relative, contents, root) {
     // Only the immediately following line can be a reference title.
     // Restrict the opening line to a link label and destination without
     // a same-line title, matching the supported static reference grammar.
-    if (/^ {0,3}\[[^\]\n]+\]:[ \t]*(?:<(?:\\.|[^>])*>|\S+)[ \t]*$/.test(line)) {
+    if (referenceDefinitions.has(i) && referenceTitleOpener.test(line)) {
       pendingReferenceTitle = { depth };
     }
     previousBlank = false;
@@ -456,6 +483,7 @@ function inspectMarkdown(relative, contents, root) {
   };
   const definitions = /^ {0,3}\[((?:\\.|[^\]])+)\]:\s*(?:<((?:\\.|[^>])*)>|(\S+))/;
   for (const row of active) {
+    if (!referenceDefinitions.has(row.number - 1)) continue;
     const match = definitions.exec(row.text);
     if (!match) continue;
     const target = match[2] === undefined ? match[3] : match[2];
@@ -465,7 +493,7 @@ function inspectMarkdown(relative, contents, root) {
   // Balanced inline destinations include nested parentheses and spaces in <...>.
   // Full and collapsed reference links use definitions collected ahead of time.
   for (const row of active) {
-    if (definitions.test(row.text)) continue;
+    if (referenceDefinitions.has(row.number - 1) && definitions.test(row.text)) continue;
     const line = row.text;
     for (let i = 0; i < line.length; i++) {
       if (line[i] !== '[' || isEscaped(line, i)) continue;
