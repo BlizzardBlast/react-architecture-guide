@@ -36,6 +36,18 @@ const { resolveViteLocalModule } = require('./vite-runtime-resolution.cjs');
 const sourceExt = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const assetExt = /\.(?:css|scss|sass|less|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|mp4|webm|json)$/i;
 const styleExt = /\.(?:css|scss|sass|less|styl|stylus)$/i;
+function isTestFile(filename) { return /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(filename); }
+function decodeAssetUrl(spec, errors, source) {
+  try {
+    const decoded = decodeURI(spec);
+    // Reserved or double-encoded paths can differ between build and dev serving.
+    if (/[\u0000-\u001f\\]|%[0-9a-f]{2}/i.test(decoded)) throw new URIError();
+    return decoded;
+  } catch {
+    errors.push(`unverified-asset-url: ${source} -> ${spec}`);
+    return null;
+  }
+}
 function fileSpecifier(spec) {
   // Vite query directives are compilation modes, not filesystem path components.
   // Preserve Node/TypeScript '#imports' specifiers: the leading # is a name,
@@ -167,6 +179,10 @@ function imports(node, list, options) {
   if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
     const spec = literalString(node.moduleReference.expression);
     if (spec) list.push({ spec, runtime: !node.isTypeOnly, line: node.getStart() });
+  }
+  if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+    const spec = literalString(node.argument.literal);
+    if (spec) list.push({ spec, runtime: false, line: node.getStart() });
   }
   if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
     const spec = literalString(node.moduleSpecifier);
@@ -1437,7 +1453,9 @@ function verifyViteHtmlEntrypoints(projectDir, sourceRoot, policy, errors, state
   const publicRoot = path.join(projectDir, 'public');
   const { errors: parseErrors, references } = scanHtml(fs.readFileSync(htmlFile, 'utf8'));
   errors.push(...parseErrors.map(message => message + ': index.html'));
-  for (const { spec, kind } of references) {
+  for (const { spec: rawSpec, kind } of references) {
+    const spec = decodeAssetUrl(rawSpec, errors, 'index.html');
+    if (spec === null) continue;
     const projectCandidate = path.resolve(projectDir, spec.startsWith('/') ? '.' + spec : spec);
     const publicCandidate = path.resolve(publicRoot, spec.startsWith('/') ? '.' + spec : spec);
     const local = fs.existsSync(projectCandidate) &&
@@ -1476,6 +1494,7 @@ function verifyViteHtmlEntrypoints(projectDir, sourceRoot, policy, errors, state
 // Only the resolution mechanism and runtime cycle semantics differ.
 function checkOwnedDependency(source, dest, policy, errors, { asset = false, isTest = false, stylesheet = false } = {}) {
   const desc = `${source.relative} -> ${dest.relative}`;
+  if (!isTest && isTestFile(dest.relative)) errors.push(`production-imports-test: ${desc}`);
   const pureCode = isPureModule(source) ||
     (source.layer === 'shared' && isPureShared(source.relative));
       if (source.layer === 'shared' && dest.layer !== 'shared') errors.push(`shared-must-be-independent: ${desc}`);
@@ -1590,7 +1609,7 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
     const scanned = scanCssDependencies(css, { filename: logicalFile });
     for (const issue of scanned.errors) errors.push(issue + ': ' + source.relative);
     for (const ref of scanned.references) {
-      const spec = fileSpecifier(ref.spec);
+      let spec = fileSpecifier(ref.spec);
       if (!spec) continue;
       // An @import/@use/@forward introduces a dependency-bearing stylesheet;
       // unlike decorative url() or image-set media, an unverified remote/data
@@ -1618,6 +1637,11 @@ function scanOwnedStylesheets(root, physicalRoot, policy, options, errors) {
         if (ref.kind === 'url' && /^#[\w-]+$/.test(spec)) continue;
         errors.push('unsupported-css-dependency: unresolved hash reference ' + source.relative + ' -> ' + ref.spec);
         continue;
+      }
+      if (ref.kind === 'url') {
+        const decoded = decodeAssetUrl(ref.spec, errors, source.relative);
+        if (decoded === null) continue;
+        spec = fileSpecifier(decoded);
       }
       const projectDir = path.dirname(root);
       const alias = resolveViteAlias(spec, policy.viteAliases, projectDir);
@@ -1812,7 +1836,7 @@ function check(srcDir) {
         errors.push('unverified-vite-runtime-alias: ' +
           source.relative + ' -> ' + dep.spec);
       }
-      const isTest = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file);
+      const isTest = isTestFile(source.relative);
       const pureCode = isPureModule(source) ||
         (source.layer === 'shared' && isPureShared(source.relative));
       const staticAsset = assetPath(dep.spec) ||

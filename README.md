@@ -59,7 +59,7 @@ For complex business workflows, **replace**, rather than combine blindly, the si
 
 ## Local verification
 
-Requires a compatible Node installation and genuine npm dependencies in all three package directories:
+Requires Node 22.13+ within Node 22, or Node 24+, and genuine npm dependencies in all three package directories:
 
 ```sh
 npm ci

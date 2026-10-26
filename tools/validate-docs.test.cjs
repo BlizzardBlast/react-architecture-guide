@@ -560,3 +560,119 @@ test('comment-looking fences in raw HTML remain inactive while later link is act
     root => assert.deepEqual(checkAll(root).issues,
       ['README.md:5: missing local link: missing2.md']),
   ));
+
+test('escaped literal backticks cannot hide an active link in a second masking pass', () => {
+  const tick = String.fromCharCode(96);
+  for (const count of [1, 3]) fixture(
+    '\\'.repeat(count) + tick + ' [Broken](missing.md) ' + '\\'.repeat(count) + tick,
+    root => assert.deepEqual(checkAll(root).issues,
+      ['README.md:1: missing local link: missing.md']),
+  );
+});
+
+test('an even number of backslashes still allows a real code span', () => {
+  const tick = String.fromCharCode(96);
+  fixture('\\\\' + tick + ' [Inactive](missing.md) ' + tick, root =>
+    assert.deepEqual(checkAll(root).issues, []));
+});
+
+test('a code-span closer cannot cross paragraph or explicit container boundaries', () => {
+  const tick = String.fromCharCode(96);
+  for (const block of [
+    '# [Broken](missing.md)', '###### [Broken](missing.md)',
+    '---\n[Broken](missing.md)', '* * *\n[Broken](missing.md)',
+    '___\n[Broken](missing.md)', '===\n[Broken](missing.md)',
+    '- [Broken](missing.md)', '1. [Broken](missing.md)',
+    '> [Broken](missing.md)', '> > [Broken](missing.md)',
+  ]) fixture('Before ' + tick + 'x\n' + block + '\ny' + tick, root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1, block);
+    assert.match(issues[0], /missing local link: missing\.md/, block);
+  });
+});
+
+test('a heading code span cannot close in the following paragraph', () => {
+  const tick = String.fromCharCode(96);
+  fixture('# Before ' + tick + 'x\n[Broken](missing.md)\ny' + tick, root =>
+    assert.deepEqual(checkAll(root).issues,
+      ['README.md:2: missing local link: missing.md']));
+  fixture('# Before ' + tick + '[Inactive](missing.md)' + tick, root =>
+    assert.deepEqual(checkAll(root).issues, []));
+});
+
+test('a sibling list item cannot close the previous item code span', () => {
+  const tick = String.fromCharCode(96);
+  fixture('- Before ' + tick + 'x\n- [Broken](missing.md)\n  y' + tick, root =>
+    assert.deepEqual(checkAll(root).issues,
+      ['README.md:2: missing local link: missing.md']));
+});
+
+test('ordinary and contained multiline spans retain their literal links and comment text', () => {
+  const tick = String.fromCharCode(96);
+  for (const span of [
+    'Before ' + tick + 'code\n[Inactive](missing.md) inside <!--\nend' + tick,
+    '> Before ' + tick + 'code\n> [Inactive](missing.md) inside <!--\n> end' + tick,
+    '- Before ' + tick + 'code\n  [Inactive](missing.md) inside <!--\n  end' + tick,
+    '> Before ' + tick + 'code\n[Inactive](missing.md) inside <!--\nend' + tick,
+    '- Before ' + tick + 'code\n[Inactive](missing.md) inside <!--\nend' + tick,
+  ]) fixture(span + '\n\n[Broken](missing2.md)', root =>
+    assert.deepEqual(checkAll(root).issues,
+      ['README.md:5: missing local link: missing2.md']));
+});
+
+test('noninterrupting ordered and empty list-like text remains inside a paragraph code span', () => {
+  const tick = String.fromCharCode(96);
+  for (const continuation of ['2. [Inactive](missing.md)', '+', '*']) fixture(
+    'Before ' + tick + 'code\n' + continuation + '\n[Inactive](missing.md) end' + tick,
+    root => assert.deepEqual(checkAll(root).issues, []),
+  );
+});
+
+test('list-contained reference definitions protect active reference labels from comment detection', () => {
+  for (const definition of [
+    '- [foo <!--]: README.md', '1. [foo <!--]: README.md',
+    '> - [foo <!--]: README.md', '- parent\n  - [foo <!--]: README.md',
+  ]) fixture(definition + '\n\n[foo <!--]\n[Broken](missing.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1, definition);
+    assert.match(issues[0], /missing local link: missing\.md/, definition);
+  });
+});
+
+test('forward references can use a later list-contained definition', () => fixture(
+  '[foo <!--]\n[Broken](missing.md)\n\n- [foo <!--]: README.md', root =>
+    assert.deepEqual(checkAll(root).issues,
+      ['README.md:2: missing local link: missing.md']),
+));
+
+test('definitions in list-contained fences cannot activate reference-looking comment labels', () => {
+  for (const block of [
+    '- ~~~md\n  [foo <!--]: README.md\n  ~~~',
+    '> - ~~~md\n>   [foo <!--]: README.md\n>   ~~~',
+    '- parent\n  - ~~~md\n    [foo <!--]: README.md\n    ~~~',
+  ]) fixture(block + '\n\n[foo <!--]\n[Inactive](missing.md)\n-->\n[Broken](missing2.md)', root => {
+    const issues = checkAll(root).issues;
+    assert.equal(issues.length, 1, block);
+    assert.match(issues[0], /missing local link: missing2\.md/, block);
+  });
+});
+
+test('quote-looking text inside an ordinary fence cannot create reference definitions', () => fixture(
+  '~~~md\n> [foo <!--]: README.md\n~~~\n\n[foo <!--]\n[Inactive](missing.md)\n-->\n[Broken](missing2.md)', root =>
+    assert.deepEqual(checkAll(root).issues,
+      ['README.md:8: missing local link: missing2.md']),
+));
+
+test('leaving a list fence restores reference-definition discovery', () => fixture(
+  '- ~~~md\n  literal\n[foo <!--]: README.md\n[foo <!--]\n[Broken](missing.md)', root =>
+    assert.deepEqual(checkAll(root).issues,
+      ['README.md:5: missing local link: missing.md']),
+));
+
+test('leaving a quote fence restores references while retaining its missing-closer diagnostic', () => fixture(
+  '> ~~~md\n> literal\n[foo <!--]: README.md\n[foo <!--]\n[Broken](missing.md)', root =>
+    assert.deepEqual(checkAll(root).issues, [
+      'README.md:1: unclosed ~~~ code fence',
+      'README.md:5: missing local link: missing.md',
+    ]),
+));

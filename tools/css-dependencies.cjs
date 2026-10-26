@@ -131,7 +131,12 @@ function scanCssDependencies(css, { filename = 'style.css' } = {}) {
     }
   }
   const importedUrls = new Set();
-  for (const m of mask.matchAll(/@(import|use|forward)(?![A-Za-z0-9_\u0080-\uFFFF-])/gi)) {
+  let parentheses = 0;
+  for (const m of mask.matchAll(/[()]|@(import|use|forward)(?![A-Za-z0-9_\u0080-\uFFFF-])/gi)) {
+    if (m[0] === '(') { parentheses++; continue; }
+    if (m[0] === ')') { parentheses = Math.max(0, parentheses - 1); continue; }
+    // At-rule names inside function arguments, including unquoted URLs, are data.
+    if (parentheses) continue;
     let cursor = m.index + m[0].length;
     while (/\s/.test(clean[cursor] || '') && cursor < clean.length) cursor++;
     const directive = m[1].toLowerCase();

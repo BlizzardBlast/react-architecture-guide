@@ -6,13 +6,14 @@ This educational client-only Vite application illustrates the [architecture guid
 
 ## Running and verification
 
-Requires Node >=22.12 and npm registry access:
+Requires Node 22.13+ within Node 22, or Node 24+, and npm registry access. From `examples/react-app`, install the root checker dependencies as well as the example:
 
 ```sh
+npm --prefix ../.. ci
 npm ci
-npm run dev
 npm run verify
 npm audit
+npm run dev
 ```
 
 The committed lockfile supports `npm ci`. Clean installation, lint, all 21 React tests, architecture checks, typechecking, production/repeat builds, audit and a bounded browser smoke test passed on 2026-10-26. See [verification evidence and limits](../../docs/verification.md).

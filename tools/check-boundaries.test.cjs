@@ -9,6 +9,10 @@ function setup(entries) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'react-arch-'));
   for (const [name, contents] of Object.entries(entries)) {
     const file = path.join(home, 'src', name);
+    if (!path.resolve(file).startsWith(home + path.sep)) {
+      fs.rmSync(home, { force: true, recursive: true });
+      throw new Error('Fixture path escapes its temporary project: ' + name);
+    }
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, contents);
   }
@@ -27,6 +31,139 @@ const base = {
   'modules/orders/index.ts': 'export { form } from "./ui/form";',
   'routes/orders.ts': 'import { form } from "../modules/orders"; export const page = form;',
 };
+
+test('fixture paths cannot escape their unique temporary project', () => {
+  assert.throws(() => setup({ '../../outside.ts': 'never written' }), /Fixture path escapes/);
+});
+
+test('inline import types and typeof imports obey ownership in source and declarations', () => {
+  for (const extension of ['ts', 'd.ts']) {
+    for (const expression of [
+      'import("../../modules/orders/domain/order").Order',
+      'typeof import("../../modules/orders/domain/order")',
+    ]) withFixture({ ...base, ['shared/ui/reference.' + extension]: 'export type Ref = ' + expression + ';' },
+      result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  }
+});
+
+test('inline import types enforce cross-module cycles without runtime edges', () => {
+  withFixture({
+    '../architecture.config.json': '{"allowCrossModule":{"orders":["payments"],"payments":["orders"]}}',
+    'modules/orders/index.ts': 'export type O = { p?: import("../payments").P };',
+    'modules/payments/index.ts': 'export type P = { o?: import("../orders").O };',
+  }, result => assert.match(result.errors.join(' '), /cross-module-cycle/));
+  for (const verbatimModuleSyntax of [false, true]) withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { verbatimModuleSyntax, module: 'ESNext' } }),
+    'modules/orders/model/a.ts': 'export type A = { b?: import("./b").B };',
+    'modules/orders/model/b.ts': 'export type B = { a?: typeof import("./a") };',
+  }, result => {
+    assert.deepEqual(result.errors, []);
+    assert.match(result.warnings.join(' '), /source-level-cycle/);
+  });
+});
+
+test('production code cannot depend on test-exempt source through runtime or type imports', () => {
+  for (const [file, statement] of [
+    ['rules.test.ts', 'import { rule } from "./rules.test"; export const value = rule;'],
+    ['rules.spec.mjs', 'import { rule } from "./rules.spec.mjs"; export const value = rule;'],
+    ['rules.test.ts', 'export type Ref = typeof import("./rules.test");'],
+    ['rules.test.ts', 'import type { rule } from "./rules.test"; export type Ref = typeof rule;'],
+  ]) withFixture({
+    'modules/orders/domain/order.ts': statement,
+    ['modules/orders/domain/' + file]: 'import { useEffect } from "react"; export const rule = useEffect;',
+  }, result => assert.match(result.errors.join(' '), /production-imports-test/));
+});
+
+test('real tests retain development dependencies and ordinary owned imports', () => withFixture({
+  'modules/orders/domain/order.ts': 'export const order = 1;',
+  'modules/orders/domain/helper.test.ts': 'export const helper = 2;',
+  'modules/orders/domain/order.spec.ts': 'import { useEffect } from "react"; import { order } from "./order"; import { helper } from "./helper.test"; export const values = [useEffect, order, helper];',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('production imports cannot disguise test files behind symlinks', t => {
+  const fixture = setup({
+    'modules/orders/domain/rules.test.ts': 'export const rule = 1;',
+    'modules/orders/domain/consumer.ts': 'import { rule } from "./rules"; export const value = rule;',
+  });
+  try {
+    const domain = path.join(fixture.root, 'modules/orders/domain');
+    try {
+      fs.symlinkSync(path.join(domain, 'rules.test.ts'), path.join(domain, 'rules.ts'), 'file');
+    } catch (error) {
+      if (error.code === 'EPERM') return t.skip('symlink privilege unavailable');
+      throw error;
+    }
+    const errors = check(fixture.root).errors;
+    assert.match(errors.join(' '), /production-imports-test/);
+  } finally { fixture.cleanup(); }
+});
+
+test('HTML and package-map edges cannot introduce test source into production', () => {
+  withFixture({
+    '../index.html': '<script type="module" src="/src/app/start.test.ts"></script>',
+    'app/start.test.ts': 'export const started = true;',
+  }, result => assert.match(result.errors.join(' '), /production-imports-test/));
+  withFixture({
+    '../package.json': JSON.stringify({ type: 'module', imports: { '#rules': './src/modules/orders/domain/rules.test.ts' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { module: 'NodeNext', moduleResolution: 'NodeNext' } }),
+    'modules/orders/domain/order.ts': 'import { rule } from "#rules"; export const value = rule;',
+    'modules/orders/domain/rules.test.ts': 'export const rule = 1;',
+  }, result => assert.match(result.errors.join(' '), /production-imports-test/));
+});
+
+test('encoded CSS and HTML paths resolve actual ownership rather than encoded decoys', () => {
+  const encoded = '%2e%2e/%2e%2e/modules/orders/ui/private.svg';
+  for (const html of [false, true]) withFixture({
+    '../index.html': html ? '<img src="/src/shared/ui/' + encoded + '">' : '',
+    'shared/ui/component.ts': 'export const component = true;',
+    'shared/ui/style.css': html ? '.x{}' : '.x{background:url(./' + encoded + ')}',
+    ['shared/ui/' + encoded]: '<svg/>',
+    'modules/orders/ui/private.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), html ? /deep-module-import/ : /shared-must-be-independent/));
+});
+
+test('owned URL assets decode spaces, Unicode and ordinary letters', () => {
+  for (const [encoded, filename] of [['a%20b.svg', 'a b.svg'], ['%E9%9B%AA.svg', '雪.svg'], ['%61.svg', 'a.svg']]) {
+    withFixture({
+      '../index.html': '<img src="/src/shared/ui/' + encoded + '">',
+      'shared/ui/component.ts': 'export const component = true;',
+      'shared/ui/style.css': '.x{background:url(./' + encoded + ')}',
+      ['shared/ui/' + filename]: '<svg/>',
+    }, result => assert.deepEqual(result.errors, []));
+  }
+});
+
+test('ambiguous or malformed URL encodings fail closed without throwing', () => {
+  for (const encoded of ['bad%.svg', '%00.svg', '%0a.svg', '%5c.svg', '%2f.svg', '%23.svg', '%252e%252e.svg']) {
+    for (const html of [false, true]) withFixture({
+      '../index.html': html ? '<img src="/src/shared/ui/' + encoded + '">' : '',
+      'shared/ui/component.ts': 'export const component = true;',
+      'shared/ui/style.css': html ? '.x{}' : '.x{background:url(./' + encoded + ')}',
+    }, result => assert.match(result.errors.join(' '), /unverified-asset-url/, encoded));
+  }
+});
+
+test('CSS import specifiers retain literal encoded filenames', () => {
+  for (const specifier of ['"./%61.css"', 'url(./%61.css)']) withFixture({
+    'shared/ui/component.ts': 'export const component = true;',
+    'shared/ui/style.css': '@import ' + specifier + ';',
+    'shared/ui/%61.css': '.owned{}',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('at-rule names in owned asset URLs remain legal while actual dependencies are checked', () => {
+  for (const directive of ['import', 'use', 'forward']) withFixture({
+    'shared/ui/component.ts': 'export const component = true;',
+    'shared/ui/style.css': '.x{background:url(./icons/@' + directive + '.svg)}',
+    ['shared/ui/icons/@' + directive + '.svg']: '<svg/>',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    'shared/ui/component.ts': 'export const component = true;',
+    'shared/ui/style.css': '.x{background:url(./icons/@import.svg)} @import "../../modules/orders/ui/private.css";',
+    'shared/ui/icons/@import.svg': '<svg/>',
+    'modules/orders/ui/private.css': '.private{}',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
 
 test('valid layered dependency flow and public API pass', () => withFixture(base, result => {
   assert.deepEqual(result.errors, []);
@@ -993,7 +1130,6 @@ test('scripts with different Vite configuration choices fail closed', () => with
 test('custom Vite config paths cannot escape the project or use unsupported extensions', () => {
   withFixture({
     '../architecture.config.json': '{"viteConfig":"../external.config.ts"}',
-    '../../external.config.ts': 'export default { plugins: [] };',
     'app/start.ts': 'export const x = 1;',
   }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
   withFixture({

@@ -18,20 +18,35 @@ function inspectMarkdown(relative, contents, root) {
   const active = [];
   const blockTags = /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|meta|nav|noframes|ol|optgroup|option|output|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[\s/>])/i;
   const fenceMarker = /^ {0,3}([\x60]{3,}|~{3,})(.*)$/;
+  const atxHeading = /^ {0,3}#{1,6}(?:[ \t]+|$)/;
+  function interruptsParagraph(text) {
+    return !text.trim() || atxHeading.test(text) ||
+      /^ {0,3}(?:=+|-+)[ \t]*$/.test(text) ||
+      /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})$/.test(text) ||
+      fenceMarker.test(text) || blockTags.test(text) ||
+      /^ {0,3}<![A-Z]/.test(text) ||
+      /^ {0,3}(?:<!--|<\?|<!\[CDATA\[|<(?:script|pre|style|textarea)(?=[\s>]))/i.test(text);
+  }
   // Code spans can cross lines *within one paragraph*. Track matching
   // backtick-run lengths so <!-- inside a multiline span stays literal.
   // A run with no closer is ordinary text, not a code-span opener.
   let codeSpanTicks = 0;
   function hasCodeSpanCloser(text, from, size, lineIndex) {
+    const start = blocks[lineIndex];
     for (let row = lineIndex; row < lines.length; row++) {
-      const candidate = row === lineIndex ? text.slice(from) : lines[row];
+      const block = blocks[row];
+      // An ordered list starts at 1 when interrupting a paragraph; empty
+      // items cannot interrupt it. Existing lists may have other siblings.
+      const newItem = block.item && (start.inList || block.content.trim() &&
+        (/^[-+*]$/.test(block.item) || parseInt(block.item, 10) === 1));
+      const candidate = row === lineIndex ? text.slice(from) :
+        block.item && !newItem ? block.item + ' ' + block.content : block.content;
       // CommonMark block constructs interrupt a paragraph before inline
       // backtick matching. A backtick inside a block HTML comment is *not*
       // a closer for the preceding paragraph's code span.
-      if (row !== lineIndex && (!candidate.trim() ||
-          /^ {0,3}(?:`{3,}|~{3,}|<!--)/.test(candidate) ||
-          blockTags.test(candidate) ||
-          /^ {0,3}<(?:script|pre|style|textarea)(?=[\s>])/i.test(candidate))) return false;
+      if (row !== lineIndex && (atxHeading.test(start.content) ||
+          interruptsParagraph(candidate) || newItem ||
+          block.depth > blocks[row - 1].depth)) return false;
       for (const match of candidate.matchAll(/`+/g)) {
         if (match[0].length === size) return true;
       }
@@ -66,10 +81,10 @@ function inspectMarkdown(relative, contents, root) {
   // beginning with a fence owns its indented following lines.
   function unwrapList(text, depth) {
     if (depth !== listDepth) { listIndent = 0; listDepth = depth; }
-    const marker = /^ {0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$)/.exec(text);
+    const marker = /^ {0,3}([-+*]|\d{1,9}[.)])(?:[ \t]+|$)/.exec(text);
     if (marker) {
       listIndent = marker[0].length;
-      return { content: text.slice(listIndent), inList: true };
+      return { content: text.slice(listIndent), inList: true, item: marker[1] };
     }
     if (listIndent && text.startsWith(' '.repeat(listIndent))) {
       return { content: text.slice(listIndent), inList: true };
@@ -77,6 +92,12 @@ function inspectMarkdown(relative, contents, root) {
     if (text.trim()) listIndent = 0;
     return { content: text, inList: false };
   }
+  // Both visibility passes and code-span lookahead use the same containers.
+  const blocks = lines.map(raw => {
+    const prefix = /^ {0,3}(?:>[ \t]?)+/.exec(raw)?.[0] || '';
+    const depth = (prefix.match(/>/g) || []).length;
+    return { ...unwrapList(raw.slice(prefix.length), depth), depth };
+  });
   // CommonMark link destinations and optional quoted titles are inline data:
   // an HTML-looking "<!--" inside a URL/title must not start a comment.
   // Return a SAME-LENGTH detection mask; retain original text for link checks.
@@ -144,9 +165,12 @@ function inspectMarkdown(relative, contents, root) {
     return chars.join('');
   }
   for (let row = 0; row < lines.length; row++) {
-    const sourceLine = lines[row];
-    const line = sourceLine.replace(/^ {0,3}(?:>[ \t]?)+/, '');
+    const { content: line, depth, inList } = blocks[row];
     const marker = fenceMarker.exec(line);
+    if (referenceFence && line.trim() &&
+        (referenceFence.list && !inList || referenceFence.depth && referenceFence.depth !== depth)) {
+      referenceFence = null;
+    }
     if (referenceFence) {
       if (marker && marker[1][0] === referenceFence.char &&
           marker[1].length >= referenceFence.length && /^\s*$/.test(marker[2])) {
@@ -154,6 +178,7 @@ function inspectMarkdown(relative, contents, root) {
       }
       continue;
     }
+    if (referenceHtml && referenceHtml.depth !== depth) referenceHtml = null;
     if (referenceComment) {
       if (line.includes('-->')) referenceComment = false;
       continue;
@@ -168,7 +193,7 @@ function inspectMarkdown(relative, contents, root) {
     }
     if (marker) {
       referenceTicks = 0;
-      referenceFence = { char: marker[1][0], length: marker[1].length };
+      referenceFence = { char: marker[1][0], length: marker[1].length, depth, list: inList };
       referencePreviousBlank = false;
       continue;
     }
@@ -191,12 +216,12 @@ function inspectMarkdown(relative, contents, root) {
     const rawText = /^ {0,3}<(script|pre|style|textarea)(?=[\s>])/i.exec(line);
     if (rawText) {
       const close = new RegExp('</' + rawText[1] + '[\\s>]', 'i');
-      if (!close.test(line)) referenceHtml = { close };
+      if (!close.test(line)) referenceHtml = { close, depth };
       continue;
     }
     if (blockTags.test(line) ||
         /^ {0,3}<\/?[A-Za-z][^>]*>\s*$/.test(line)) {
-      referenceHtml = { close: null };
+      referenceHtml = { close: null, depth };
       continue;
     }
     const visible = referenceVisible(line, row);
@@ -292,12 +317,8 @@ function inspectMarkdown(relative, contents, root) {
   let currentLineIndex = 0;
   for (let i = 0; i < lines.length; i++) {
     currentLineIndex = i;
-    const raw = lines[i];
-    // Strip blockquote containers only for block classification. Ordinary
-    // blockquoted links are still inspected once the container is removed.
-    const prefix = /^ {0,3}(?:>[ \t]?)+/.exec(raw)?.[0] || '';
-    const depth = (prefix.match(/>/g) || []).length;
-    const list = unwrapList(raw.slice(prefix.length), depth);
+    const list = blocks[i];
+    const { depth } = list;
     const text = list.content;
     // A link reference title may occupy the next (possibly indented) line.
     // Consume it as link metadata before indented-code and HTML-comment
@@ -445,7 +466,7 @@ function inspectMarkdown(relative, contents, root) {
   // Full and collapsed reference links use definitions collected ahead of time.
   for (const row of active) {
     if (definitions.test(row.text)) continue;
-    const line = row.text.replace(/(`+)([\s\S]*?)\1/g, match => ' '.repeat(match.length));
+    const line = row.text;
     for (let i = 0; i < line.length; i++) {
       if (line[i] !== '[' || isEscaped(line, i)) continue;
       // Use the SAME escaped/nested bracket grammar used by the HTML comment

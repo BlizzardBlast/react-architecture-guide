@@ -11,6 +11,8 @@ Folder names express ownership; **import direction and contracts** make that own
 5. Modules never import routes or app composition. Routes don't import app setup.
 6. Runtime cycles fail. Cycles spanning modules fail even if entirely type-only; purely internal type-only cycles are warnings for structural review.
 
+Inline TypeScript types such as `import("./order").Order` and `typeof import("./order")` obey the same ownership rules, including in declaration files. They add source dependencies without executable cycle edges. Production files and HTML entrypoints cannot import `.test.*` or `.spec.*` source, even through type-only imports or package mappings; test-only dependency exemptions must remain confined to tests.
+
 ## Simple modules
 
 | Importing layer | Allowed dependencies | Not allowed |
@@ -35,6 +37,8 @@ Folder names express ownership; **import direction and contracts** make that own
 ## JSON and static assets
 
 CSS, SVG, fonts and images may be imported by presentation and app composition code, provided they exist and do not cross ownership boundaries. Pure domain/model/application/shared utilities cannot import presentation assets. JSON **can** be owned, pure configuration/data: it is allowed only when its location and import path respect the same module ownership and layer rules as source modules.
+
+HTML resource paths and decorative CSS `url()`/`image-set()` paths are URL-decoded before ownership checks, matching Vite's asset handling. Encoded spaces, Unicode and ordinary path characters are supported. Malformed escapes, encoded controls/backslashes and residual reserved or double encodings fail closed as `unverified-asset-url`, because development and build resolution may differ. CSS `@import` specifiers retain literal filename resolution. At-rule names inside URL payloads are ordinary filename text.
 
 Imports resolving outside the validated `src/` tree are reported as outside-source references rather than automatically trusted. A multi-package monorepo must validate its other package roots separately or adapt the checker with reviewed configuration; a successful single-root check does not validate all workspaces.
 

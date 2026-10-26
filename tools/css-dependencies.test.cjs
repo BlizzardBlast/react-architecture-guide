@@ -16,6 +16,45 @@ test('does not interpret comments or strings as directives', () => {
   assert.deepEqual(scan('/* @import "../../private.css" */ .a:before { content: "@import private"; }'),
     { references: [], errors: [] });
 });
+test('unquoted URL paths containing at-rule names remain asset references', () => {
+  for (const extension of ['css', 'less', 'scss', 'sass']) {
+    const result = scan('.card { background: url(./@import.svg);' +
+      ' mask: url(https://cdn.example.test/@use.svg);' +
+      ' border-image: image-set(url(./@forward.svg) 1x); }',
+    { filename: 'card.' + extension });
+    assert.deepEqual(result, {
+      references: [
+        { spec: './@import.svg', kind: 'url' },
+        { spec: 'https://cdn.example.test/@use.svg', kind: 'url' },
+        { spec: './@forward.svg', kind: 'url' },
+      ], errors: [],
+    }, extension);
+  }
+});
+test('at-rule text inside nested functions does not hide subsequent directives', () => {
+  const result = scan('/* ( @import "ignored.css"; */' +
+    '.card { content: "( @forward ignored";' +
+    ' background: image-set(url(./@import.svg) 1x); }' +
+    '@import url(./@use.css); @use "./tokens.scss"; @forward "./theme.scss";',
+  { filename: 'card.scss' });
+  assert.deepEqual(result, {
+    references: [
+      { spec: './@use.css', kind: 'import' },
+      { spec: './tokens.scss', kind: 'use' },
+      { spec: './theme.scss', kind: 'forward' },
+      { spec: './@import.svg', kind: 'url' },
+    ], errors: [],
+  });
+});
+test('dynamic at-rules still fail closed after URL paths containing at-rule names', () => {
+  for (const directive of ['import', 'use', 'forward']) {
+    const result = scan('.card { background: url(./@' + directive + '.svg); }' +
+      '@' + directive + ' computed;', { filename: 'card.scss' });
+    assert.deepEqual(result.references, [{ spec: './@' + directive + '.svg', kind: 'url' }]);
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0], /unsupported-css-dependency/);
+  }
+});
 test('supports Sass use and forward', () => {
   assert.deepEqual(scan('@use "@theme/base.scss"; @forward "../tokens.scss";').references, [
     { spec: '@theme/base.scss', kind: 'use' }, { spec: '../tokens.scss', kind: 'forward' },
