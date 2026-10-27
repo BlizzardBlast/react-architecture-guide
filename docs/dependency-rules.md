@@ -154,6 +154,8 @@ Pure `domain/`, `model/`, and `application/` code can depend only on the allowed
 
 Ordinary, owned JSON data may be consumed by pure modules. A Vite suffix such as `?raw`, `?url`, `?worker` or a plugin-specific query changes the import mode, so a `.json` or `.ts` filename alone does not make the resulting value pure. Pure modules reject these query-modified local assets, as well as static `new URL(..., import.meta.url)` asset handles. Presentation code may still use supported Vite asset modes subject to source ownership checks.
 
+For an aliased asset import, the pure-layer check classifies the resolved physical target, not the extension in the import spelling. An alias from a JSON-looking request to a stylesheet therefore remains a presentation dependency.
+
 Architecture test fixtures must store their exact declared contents. Valid Vite URL helper fixtures explicitly import `fileURLToPath` from `node:url`; fixture setup must never supply missing imports on their behalf.
 
 ### Nonstandard and CommonJS Vite configurations

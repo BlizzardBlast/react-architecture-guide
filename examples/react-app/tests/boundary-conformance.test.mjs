@@ -6,7 +6,7 @@ import path from 'node:path';
 import { build } from 'vite';
 import { check } from '../../../tools/check-boundaries.cjs';
 
-async function assertConformance(entries, aliases, expectedPrivate, name) {
+async function assertConformance(entries, aliases, expectedPrivate, name, expectedError = /shared-must-be-independent|deep-module-import/, expectedMarker = null) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'react-vite-boundary-'));
   try {
     const absoluteAliases = Object.fromEntries(Object.entries(aliases)
@@ -36,13 +36,33 @@ async function assertConformance(entries, aliases, expectedPrivate, name) {
     const privateEmitted = built.output.some(item =>
       String(item.type === 'asset' ? item.source : item.code).includes('PRIVATE_TARGET'));
     assert.equal(privateEmitted, expectedPrivate, name + ': Vite target');
-    if (expectedPrivate) assert.match(checked.errors.join(' '), /shared-must-be-independent|deep-module-import/, name);
+    if (expectedMarker) assert(built.output.some(item =>
+      String(item.type === 'asset' ? item.source : item.code).includes(expectedMarker)), name + ': expected output');
+    if (expectedPrivate) assert.match(checked.errors.join(' '), expectedError, name);
     else assert.deepEqual(checked.errors, [], name);
   } finally {
     assert(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep));
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
+
+test('pure asset imports use the Vite-resolved target type', async () => {
+  for (const [target, contents, expectedError, marker] of [
+    ['style.module.css', '.PRIVATE_TARGET { color: red }', true, 'PRIVATE_TARGET'],
+    ['actual.json', '{"label":"SAFE_JSON"}', false, 'SAFE_JSON'],
+    ['actual.ts', 'export default "SAFE_SOURCE";', false, 'SAFE_SOURCE'],
+  ]) {
+    await assertConformance({
+      'index.html': '<script type="module" src="/src/app/main.ts"></script>',
+      'src/app/main.ts': 'import { value } from "../modules/orders"; console.log(value);',
+      'src/modules/orders/index.ts': 'export { value } from "./model/order";',
+      'src/modules/orders/model/order.ts': 'import value from "./config.json"; export { value };',
+      'src/modules/orders/model/config.json': '{"label":"DECOY"}',
+      ['src/modules/orders/model/' + target]: contents,
+    }, { './config.json': 'src/modules/orders/model/' + target }, expectedError,
+    target, /pure-layer-static-asset/, marker);
+  }
+});
 
 test('source asset alias ownership agrees with Vite build output', async () => {
   for (const [name, find, request, url, expectedPrivate] of [

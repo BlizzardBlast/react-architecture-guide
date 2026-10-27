@@ -37,7 +37,7 @@ Unverifiable computed imports are rejected, but arbitrary plugin-injected aliase
 
 The React app stores orders in memory and performs UI-level single-flight guarding only. **Real order creation requires trusted server validation, authorization and idempotency.** For SSR, instantiate services and Query clients with request-appropriate scope.
 
-No additional GitHub Actions workflows were added solely for this guide. Existing consumers should integrate necessary architecture rules into their established local/CI gates, batching changes and checks to conserve Actions minutes.
+The repository's batched GitHub Actions workflow runs verification and dependency audits for ready pull requests. Consumers should integrate the necessary architecture rules into their own local and CI gates.
 
 ## Historical remediation notes
 
@@ -281,7 +281,7 @@ Less `@plugin` directives fail closed until preprocessing JavaScript dependencie
 
 **CR-P1-011 remains BLOCKED:** The npm registry is unreachable in the present environment. Authentic root/orders/React lockfiles, pinned installs, full suites, audits, Vite builds and browser/accessibility verification remain unavailable. Keep PR #1 draft and unmerged until the actual gates pass.
 
- 
+
 ### CR-P2-029 — Less plugin directive detection must exclude URL values
 
 The Less plugin guard now scans at-rule positions outside function parentheses, comments, and CSS strings. Unquoted asset URLs containing an `@plugin` path segment and Less variables named `@plugin` are not treated as executable plugin declarations; actual `@plugin` directives still fail closed. Added direct scanner tests for local/remote/data URLs, variables, nested functions, live directives, and integration fixtures for valid local assets and actual plugins.

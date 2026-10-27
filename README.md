@@ -77,7 +77,7 @@ npm --prefix examples/react-app audit
 
 All three packages include registry-generated lockfiles. Clean installs, the complete local verification gate, audits, repeat builds and a bounded dev/production browser smoke test passed on 2026-10-26; see [verification evidence and limits](docs/verification.md). Rerun the gates when dependencies or behavior change. Earlier remediation notes below describe historical snapshots; their registry and lockfile blockers are superseded by this record.
 
-No new GitHub Actions workflow is required merely for this guide. Preserve all quality and security gates in consumer repositories and batch local validation before pushing to reduce Actions consumption.
+The repository's batched GitHub Actions workflow runs verification and dependency audits for ready pull requests. Preserve quality and security gates in consumer repositories and batch local validation before pushing to reduce Actions consumption.
 
 ### Vite configuration verification
 
@@ -117,7 +117,7 @@ Executable Vite `plugins` can override the aliases seen in a static AST pass thr
 
 The root `npm run verify` now includes `npm run check:orders` to enforce architectural boundaries in `examples/orders/src`. The Markdown scanner now recognizes fences before processing HTML-looking info-string text, while preserving real HTML-comment precedence.
 
-**Release status remains DRAFT.** Authentic lockfiles, clean installs, complete dependency-backed test/build suites, npm audits, effective bundler alias verification and browser/accessibility smoke tests still require execution in an environment with npm registry access.
+At that review, registry access and dependency-backed verification were still blocked. See the current [verification evidence](docs/verification.md) for the subsequent results and remaining limits.
 
 ### Review #5636325323: plugin-created aliases, build scope and code-span references
 
@@ -127,7 +127,7 @@ Custom `root`, nonempty `build` configuration, `environments` and `builder` opti
 
 The Markdown reference pre-index pass now tracks multiline inline-code spans using the same closer/paragraph rules as active-line parsing, preventing apparent definitions *inside code* from masking real HTML comments or inventing missing-link failures. Regression fixtures cover false definitions and real definitions following code spans.
 
-This PR remains draft while authentic lockfiles, clean installs, full TypeScript/React/orders suites, vulnerability audits, Vite integration and browser/a11y checks are unavailable.
+At that review, the PR was draft while dependency-backed and browser checks were unavailable; the current evidence is recorded above.
 
 ### Review #5636476418: transform injection and inline HTML dependencies
 
@@ -135,7 +135,7 @@ The static Vite checker now fails closed for nonempty or computed `esbuild` and 
 
 The default `index.html` scanner now rejects executable inline event-handler attributes (e.g. `onload`, `onclick` and `onerror`), inline `<style>` and `style=` content, embedded `srcdoc`, executable or entity-obfuscated URLs, and inline import maps. Move application logic into importable, checked source modules and styles into checked CSS files linked from HTML or imported by source. Ordinary attributes, accessibility metadata, static module entrypoints and linked stylesheets remain supported. This is a deliberately constrained HTML subset, not a complete browser HTML parser. Actual Vite/browser testing is still required.
 
-The review findings were addressed together without relaxing source, quality or security gates. Keep the PR in draft until authentic registry-based lockfiles, complete clean installs, dependency audits, actual Vite builds and browser/a11y checks pass.
+The review findings were addressed together without relaxing source, quality or security gates. The checks outstanding at that point are tracked in the current verification evidence above.
 
 ### Review #5636660964: HTML5 parsing, public assets, resource ownership
 

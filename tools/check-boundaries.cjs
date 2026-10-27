@@ -2048,9 +2048,9 @@ function check(srcDir) {
         // when their underlying file has a .json or source extension.
         const querySuffix = dep.spec.slice(filesystemSpec.length);
         const plainJson = !querySuffix && !dep.fromUrl &&
-          filesystemSpec.toLowerCase().endsWith('.json');
+          resolved.toLowerCase().endsWith('.json');
         const plainSource = !querySuffix && !dep.fromUrl &&
-          sourceExt.test(filesystemSpec);
+          sourceExt.test(resolved);
         if (pureCode && !isTest && !plainJson && !plainSource) {
           errors.push(`pure-layer-static-asset: ${source.relative} -> ${dep.spec}`);
         }
