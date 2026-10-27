@@ -159,7 +159,7 @@ it('keeps the saved order successful when history refresh fails and retries', as
   expect(placeOrder).toHaveBeenCalledOnce();
 });
 
-it('clears successful checkout feedback when another product is selected', async () => {
+it('identifies the saved product until the customer edits a new order', async () => {
   const service: OrdersService = {
     scopeId: 'selection-switch',
     listOrders: async () => [],
@@ -171,18 +171,23 @@ it('clears successful checkout feedback when another product is selected', async
   const { rerender } = render(
     <QueryClientProvider client={client}><OrderCheckout service={service} selection={first} /></QueryClientProvider>,
   );
-  const form = screen.getByRole('button', { name: 'Place order' }).closest('form')!;
-  const successStatus = form.querySelector('[role="status"]');
+  const checkout = screen.getByRole('region', { name: 'Place an order' });
+  const successStatus = Array.from(checkout.querySelectorAll('[role="status"]'))
+    .find(element => !element.textContent);
   expect(successStatus).toBeInTheDocument();
   expect(successStatus).toBeEmptyDOMElement();
   await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
   await userEvent.click(screen.getByRole('button', { name: /place order/i }));
   expect(await screen.findByText('Order saved.')).toBe(successStatus);
+  expect(successStatus).toHaveTextContent('Green tea');
   rerender(
     <QueryClientProvider client={client}><OrderCheckout service={service} selection={second} /></QueryClientProvider>,
   );
-  expect(screen.queryByText('Order saved.')).not.toBeInTheDocument();
+  expect(screen.getByText('Order saved.')).toBe(successStatus);
+  expect(successStatus).toHaveTextContent('Green tea');
   expect(screen.getByText(/selected: coffee/i)).toBeInTheDocument();
+  await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'B');
+  expect(successStatus).toBeEmptyDOMElement();
 });
 it('clears field-level error when the user corrects the input', async () => {
   const placeOrder = vi.fn();
@@ -279,7 +284,8 @@ it('retains a pending save across a product-selection remount', async () => {
   expect(placeOrder).toHaveBeenCalledTimes(1);
   release();
   await waitFor(() => expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled());
-  expect(screen.queryByText('Order saved.')).not.toBeInTheDocument();
+  expect(await screen.findByText('Order saved.')).toHaveTextContent('Green tea');
+  expect(screen.getByText(/selected: coffee/i)).toBeInTheDocument();
 });
 
 it('releases the save guard and permits retry after a rejected save', async () => {
