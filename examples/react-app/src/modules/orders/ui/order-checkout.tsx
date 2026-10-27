@@ -25,6 +25,7 @@ interface SaveGuard {
 }
 
 export function OrderCheckout(props: Props) {
+  const titleId = useId();
   // This guard outlives the keyed form and its mutation observer: changing products
   // must not unlock another save while the first operation remains in flight.
   const inFlight = useRef(false);
@@ -49,11 +50,13 @@ export function OrderCheckout(props: Props) {
   // Remounting clears previous product's feedback, but not the pending save guard.
   const key = JSON.stringify([props.service.scopeId, props.selection?.productId ?? null, props.selection?.priceCents ?? null]);
   return (
-    <>
+    <section aria-labelledby={titleId}>
+      <h2 id={titleId}>Place an order</h2>
+      <p role="status">{props.selection ? `Selected: ` + props.selection.productName : 'Select a product first.'}</p>
       <CheckoutForm key={key} {...props} isSaving={isSaving} beginSave={beginSave}
         finishSave={finishSave} reportSaveError={reportSaveError} />
       {saveError && <p role="alert">{saveError}</p>}
-    </>
+    </section>
   );
 }
 
@@ -61,7 +64,6 @@ function CheckoutForm({ service, selection, isSaving, beginSave, finishSave, rep
   const [customerName, setCustomerName] = useState('');
   const [validationError, setValidationError] = useState<OrderValidationIssue | null>(null);
   const id = useId();
-  const titleId = `${id}-checkout-title`;
   const customerId = `${id}-customer`;
   const customerErrorId = `${id}-customer-error`;
   const orderKey = ['orders', 'local-demo', service.scopeId] as const;
@@ -96,10 +98,8 @@ function CheckoutForm({ service, selection, isSaving, beginSave, finishSave, rep
   }
 
   return (
-    <section aria-labelledby={titleId}>
-      <h2 id={titleId}>Place an order</h2>
+    <>
       <form onSubmit={onSubmit} noValidate>
-        <p>{selection ? `Selected: ` + selection.productName : 'Select a product first.'}</p>
         <label htmlFor={customerId}>Customer name</label>{' '}
         <input
           id={customerId}
@@ -121,7 +121,7 @@ function CheckoutForm({ service, selection, isSaving, beginSave, finishSave, rep
           {isSaving || mutation.isPending ? 'Saving…' : 'Place order'}
         </button>
         {validationError && <p id={customerNameError ? customerErrorId : undefined} role="alert">{validationError.message}</p>}
-        {mutation.isSuccess && <p role="status">Order saved.</p>}
+        <p role="status">{mutation.isSuccess ? 'Order saved.' : ''}</p>
       </form>
       <h3>Order history</h3>
       {history.isPending
@@ -131,6 +131,6 @@ function CheckoutForm({ service, selection, isSaving, beginSave, finishSave, rep
           : history.data.length === 0
             ? <p>No orders yet.</p>
             : <ul>{history.data.map(order => <li key={order.id}>{order.customerName} — {order.productId}</li>)}</ul>}
-    </section>
+    </>
   );
 }

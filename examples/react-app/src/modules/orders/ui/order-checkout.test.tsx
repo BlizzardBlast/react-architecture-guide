@@ -171,9 +171,13 @@ it('clears successful checkout feedback when another product is selected', async
   const { rerender } = render(
     <QueryClientProvider client={client}><OrderCheckout service={service} selection={first} /></QueryClientProvider>,
   );
+  const form = screen.getByRole('button', { name: 'Place order' }).closest('form')!;
+  const successStatus = form.querySelector('[role="status"]');
+  expect(successStatus).toBeInTheDocument();
+  expect(successStatus).toBeEmptyDOMElement();
   await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
   await userEvent.click(screen.getByRole('button', { name: /place order/i }));
-  expect(await screen.findByText('Order saved.')).toBeInTheDocument();
+  expect(await screen.findByText('Order saved.')).toBe(successStatus);
   rerender(
     <QueryClientProvider client={client}><OrderCheckout service={service} selection={second} /></QueryClientProvider>,
   );
