@@ -71,8 +71,10 @@ function CheckoutForm({ service, selection, isSaving, beginSave, finishSave, rep
     mutationFn: service.placeOrder,
     onSuccess: () => {
       setCustomerName('');
-      // A slow history refresh must not keep an already-saved order pending.
-      void queryClient.invalidateQueries({ queryKey: orderKey }).catch(() => {});
+      // Discard pre-save history, then refresh without delaying the saved state.
+      void queryClient.cancelQueries({ queryKey: orderKey, exact: true })
+        .then(() => queryClient.invalidateQueries({ queryKey: orderKey, exact: true }))
+        .catch(() => {});
     },
     onError: () => reportSaveError(saveFailureMessage, selection?.productName ?? 'product'),
     // Mutation reset does not cancel requests. Release the cross-form guard only

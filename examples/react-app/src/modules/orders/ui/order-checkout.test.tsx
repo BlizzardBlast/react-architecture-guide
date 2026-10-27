@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { OrderCheckout } from './order-checkout';
@@ -84,6 +84,39 @@ it('finishes saving while the order history refresh remains pending', async () =
   expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled();
   expect(placeOrder).toHaveBeenCalledOnce();
   releaseRefresh([]);
+});
+
+it('refreshes after saves even while older history requests are pending', async () => {
+  type Receipt = Awaited<ReturnType<OrdersService['placeOrder']>>;
+  let releaseInitial!: (orders: readonly Receipt[]) => void;
+  let releaseFirstRefresh!: (orders: readonly Receipt[]) => void;
+  const initial = new Promise<readonly Receipt[]>(resolve => { releaseInitial = resolve; });
+  const firstRefresh = new Promise<readonly Receipt[]>(resolve => { releaseFirstRefresh = resolve; });
+  const orders: Receipt[] = [];
+  const listOrders = vi.fn().mockReturnValueOnce(initial).mockReturnValueOnce(firstRefresh)
+    .mockImplementation(async () => [...orders]);
+  const placeOrder = vi.fn(async (draft: Parameters<OrdersService['placeOrder']>[0]) => {
+    const saved = { ...draft, id: 'saved-' + (orders.length + 1) };
+    orders.push(saved);
+    return saved;
+  });
+  renderCheckout({ scopeId: 'pending-history', listOrders, placeOrder });
+  await screen.findByText('Loading orders…');
+  const name = screen.getByRole('textbox', { name: /customer name/i });
+  await userEvent.type(name, 'Alice');
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  await screen.findByText('Order saved.');
+  await waitFor(() => expect(listOrders).toHaveBeenCalledTimes(2));
+  expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled();
+  await userEvent.type(name, 'Bob');
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  await waitFor(() => expect(listOrders).toHaveBeenCalledTimes(3));
+  expect(await screen.findByText('Alice — tea')).toBeInTheDocument();
+  expect(await screen.findByText('Bob — tea')).toBeInTheDocument();
+  await act(async () => { releaseInitial([]); releaseFirstRefresh([orders[0]!]); });
+  expect(screen.getByText('Alice — tea')).toBeInTheDocument();
+  expect(screen.getByText('Bob — tea')).toBeInTheDocument();
+  expect(placeOrder).toHaveBeenCalledTimes(2);
 });
 
 it('keeps the saved order successful when history refresh fails and retries', async () => {
