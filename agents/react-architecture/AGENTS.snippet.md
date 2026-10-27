@@ -12,6 +12,7 @@ https://github.com/BlizzardBlast/react-architecture-guide/blob/main/docs/depende
 - Pure model/domain code never imports UI or infrastructure; in complex modules UI never imports concrete adapters.
 - Use Clean Architecture layers **only** for nontrivial business logic, not simple CRUD.
 - Respect the project's actual router and React compiler versions.
+- For shared UI that handles substantial lists or bulk changes, document a realistic interaction workload and verify responsiveness and accessibility together; do not prescribe unconditional virtualization, memoization or CI timing thresholds.
 - Validate server responses at integration boundaries; enforce authorization server-side.
 - Run local architecture checks, typechecking, tests, and review in coherent batches before a push.
 - Preserve required security and CI checks; avoid unnecessary repeated GitHub Actions executions.

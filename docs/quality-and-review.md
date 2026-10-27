@@ -32,6 +32,16 @@ Use this checklist when reviewing a change to the guide or adopting its rules in
 - [ ] Untrusted server data is validated; authorization/idempotency is enforced by a trusted backend.
 - [ ] SSR services and query clients are scoped correctly; server-only data is not bundled into clients.
 
+## Interaction performance (for relevant high-cardinality or shared UI changes)
+
+- [ ] Shared components with material interaction risk have a stated supported workload and user-visible responsiveness expectation; do not invent a universal numeric budget.
+- [ ] Representative large-list, bulk-selection or repeated-input interactions are checked where applicable, including keyboard, focus and screen-reader semantics.
+- [ ] Performance claims distinguish browser main-thread work, elapsed interaction and field INP; comparisons include comparable environment/data scale and repeated observations.
+- [ ] Potential layout thrashing, quadratic traversal, unbounded DOM growth, rerender fan-out and bulk animations are examined only when the changed component/workload makes them plausible.
+- [ ] Memoization, virtualization and new benchmark CI gates are justified by evidence and preserve accessibility; record unexecuted measurements explicitly.
+
+See [the interaction performance contract](interaction-performance.md) for scope, examples and measurement limits.
+
 ## Required validation
 
 ```sh

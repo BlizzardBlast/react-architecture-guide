@@ -48,6 +48,7 @@ For complex business workflows, **replace**, rather than combine blindly, the si
 | Where new code belongs | [Placement guide](docs/placement-guide.md) |
 | SOLID in React | [SOLID guidance](docs/solid-in-react.md) |
 | Hooks, caching and React Compiler | [React practices](docs/react-practices.md) |
+| Shared UI responsiveness and interaction benchmarks | [Interaction performance contracts](docs/interaction-performance.md) |
 | Incremental adoption | [Adoption](docs/adoption.md) |
 | Quality and code review | [Review checklist](docs/quality-and-review.md) |
 | Reference sources | [References](docs/references.md) |

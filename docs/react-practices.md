@@ -20,6 +20,8 @@
 
 Optimize based on measurement. React Compiler can automatically memoize compatible code when correctly enabled, but behavior and compatibility depend on installed versions and configuration. Don't require blanket `useMemo`, `useCallback`, or `React.memo`; don't remove purposeful optimizations blindly.
 
+Treat costly shared UI interactions (such as large comboboxes and bulk-selection controls) as part of the shared component's performance contract. Define realistic workloads, maintain keyboard/screen-reader usability, and measure the interaction rather than inferring speed from bundle size. See [interaction performance contracts](interaction-performance.md).
+
 ## API and security boundaries
 
 - Parse untrusted responses at an integration boundary: a TypeScript cast does not validate JSON.
