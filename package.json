@@ -1,0 +1,20 @@
+{
+  "name": "react-architecture-guide-tooling",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Architecture boundary checker, regression tests, and CI verification for React reference examples",
+  "scripts": {
+    "test:architecture": "node --test tools/check-boundaries.test.cjs tools/css-dependencies.test.cjs tools/html-dependencies.test.cjs tools/vite-runtime-resolution.test.cjs",
+    "check:react": "node tools/check-boundaries.cjs examples/react-app/src",
+    "verify": "npm run test:docs && npm run test:architecture && npm run check:orders && npm --prefix examples/orders test && npm --prefix examples/react-app run verify",
+    "test:docs": "node --test tools/validate-docs.test.cjs && node tools/validate-docs.cjs",
+    "check:orders": "node tools/check-boundaries.cjs examples/orders/src"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "parse5": "8.0.1"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  }
+}

@@ -74,3 +74,27 @@ test("best-effort telemetry cannot fail a successful order", async () => {
   );
   assert.deepEqual(await placeOrder({ customerId: "c", totalCents: 50 }), { orderId: "saved" });
 });
+
+test("asynchronous analytics rejection is handled after an order is saved", async () => {
+  let rejectDelivery;
+  const delivery = new Promise((_resolve, reject) => { rejectDelivery = reject; });
+  const calls = [];
+  const analytics = createOrderAnalytics({ track(name, props) { calls.push({ name, props }); return delivery; } });
+  const placeOrder = createPlaceOrder({ async create() { return { orderId: "saved" }; } }, analytics);
+  assert.equal(analytics.orderPlaced({ orderId: "saved" }, { customerId: "c", totalCents: 50 }), delivery);
+  assert.deepEqual(await placeOrder({ customerId: "c", totalCents: 50 }), { orderId: "saved" });
+  assert.deepEqual(calls, Array(2).fill({ name: "order_placed", props: { orderId: "saved", totalCents: 50 } }));
+  rejectDelivery(new Error("telemetry offline"));
+  await new Promise(resolve => setTimeout(resolve, 0));
+});
+
+test("order notifications cannot fail a committed order", async () => {
+  for (const orderPlaced of [
+    () => { throw new Error("notification failed"); },
+    async () => { throw new Error("notification failed asynchronously"); },
+  ]) {
+    const placeOrder = createPlaceOrder({ async create() { return { orderId: "saved" }; } }, { orderPlaced });
+    assert.deepEqual(await placeOrder({ customerId: "c", totalCents: 50 }), { orderId: "saved" });
+  }
+  await new Promise(resolve => setTimeout(resolve, 0));
+});

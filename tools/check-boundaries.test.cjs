@@ -1,0 +1,4590 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { check } = require('./check-boundaries.cjs');
+
+function setup(entries) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'react-arch-'));
+  for (const [name, contents] of Object.entries(entries)) {
+    const file = path.join(home, 'src', name);
+    if (!path.resolve(file).startsWith(home + path.sep)) {
+      fs.rmSync(home, { force: true, recursive: true });
+      throw new Error('Fixture path escapes its temporary project: ' + name);
+    }
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, contents);
+  }
+  return { root: path.join(home, 'src'), cleanup: () => fs.rmSync(home, { force: true, recursive: true }) };
+}
+function withFixture(entries, fn) {
+  const f = setup(entries);
+  try { return fn(check(f.root)); } finally { f.cleanup(); }
+}
+function aliasConfig(find, target) {
+  return {
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { ' +
+      JSON.stringify(find) + ': fileURLToPath(new URL(' + JSON.stringify('./' + target) + ', import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { [find]: target } }),
+  };
+}
+const base = {
+  'shared/ui/button.ts': 'export const button = 1;',
+  'modules/orders/domain/order.ts': 'export type Order = { id: string };',
+  'modules/orders/application/place.ts': 'import type { Order } from "../domain/order"; export type Writer = (order: Order) => Promise<void>;',
+  'modules/orders/infrastructure/writer.ts': 'import type { Writer } from "../application/place"; export const writer: Writer = async () => {};',
+  'modules/orders/ui/form.ts': 'import type { Order } from "../domain/order"; export const form = (o: Order) => o.id;',
+  'modules/orders/index.ts': 'export { form } from "./ui/form";',
+  'routes/orders.ts': 'import { form } from "../modules/orders"; export const page = form;',
+};
+
+test('fixture paths cannot escape their unique temporary project', () => {
+  assert.throws(() => setup({ '../../outside.ts': 'never written' }), /Fixture path escapes/);
+});
+
+test('inline import types and typeof imports obey ownership in source and declarations', () => {
+  for (const extension of ['ts', 'd.ts']) {
+    for (const expression of [
+      'import("../../modules/orders/domain/order").Order',
+      'typeof import("../../modules/orders/domain/order")',
+    ]) withFixture({ ...base, ['shared/ui/reference.' + extension]: 'export type Ref = ' + expression + ';' },
+      result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  }
+});
+
+test('inline import types enforce cross-module cycles without runtime edges', () => {
+  withFixture({
+    '../architecture.config.json': '{"allowCrossModule":{"orders":["payments"],"payments":["orders"]}}',
+    'modules/orders/index.ts': 'export type O = { p?: import("../payments").P };',
+    'modules/payments/index.ts': 'export type P = { o?: import("../orders").O };',
+  }, result => assert.match(result.errors.join(' '), /cross-module-cycle/));
+  for (const verbatimModuleSyntax of [false, true]) withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { verbatimModuleSyntax, module: 'ESNext' } }),
+    'modules/orders/model/a.ts': 'export type A = { b?: import("./b").B };',
+    'modules/orders/model/b.ts': 'export type B = { a?: typeof import("./a") };',
+  }, result => {
+    assert.deepEqual(result.errors, []);
+    assert.match(result.warnings.join(' '), /source-level-cycle/);
+  });
+});
+
+test('JSDoc import expressions and import tags obey source ownership', () => {
+  for (const extension of ['js', 'jsx', 'mjs', 'cjs']) {
+    for (const comment of [
+      '/** @type {import("../../modules/orders/domain/order").Order} */',
+      '/** @import { Order } from "../../modules/orders/domain/order" */',
+      '/** @typedef {typeof import("../../modules/orders/domain/order")} OrderModule */',
+    ]) withFixture({ ...base, ['shared/ui/reference.' + extension]: comment + '\nexport const ref = null;' },
+      result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  }
+});
+
+test('JSDoc imports retain type-only cycle semantics and pure-package checks', () => {
+  for (const importTag of [false, true]) {
+    const source = (target, name) => (importTag
+      ? '/** @import {' + name + '} from "' + target + '" */'
+      : '/** @typedef {import("' + target + '").' + name + '} Ref */') + '\nexport const value = 1;';
+    withFixture({
+      '../architecture.config.json': '{"allowCrossModule":{"orders":["payments"],"payments":["orders"]}}',
+      'modules/orders/index.js': source('../payments', 'P'),
+      'modules/payments/index.js': source('../orders', 'O'),
+    }, result => assert.match(result.errors.join(' '), /cross-module-cycle/));
+    withFixture({
+      'modules/orders/model/a.js': source('./b', 'B'),
+      'modules/orders/model/b.js': source('./a', 'A'),
+    }, result => {
+      assert.deepEqual(result.errors, []);
+      assert.match(result.warnings.join(' '), /source-level-cycle/);
+    });
+  }
+  withFixture({
+    'modules/orders/model/order.js': '/** @type {import("react").ReactNode} */\nexport const view = null;',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-external-package/));
+});
+
+test('JSDoc names and examples are documentation rather than executable loaders', () => withFixture({
+  'shared/lib/labels.js': '/** @typedef {{module: string, require: string}} Labels\n * @example import("../../modules/orders/domain/order")\n */\nexport const label = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('quoted image-set URL encodings enforce actual ownership and valid filenames', () => {
+  for (const imageSet of ['image-set', '-webkit-image-set']) {
+    const encoded = '%2e%2e/%2e%2e/modules/orders/ui/private.svg';
+    withFixture({
+      'shared/ui/component.ts': 'export const view = true;',
+      'shared/ui/style.css': '.x{background:' + imageSet + '("./' + encoded + '" 1x)}',
+      ['shared/ui/' + encoded]: '<svg/>',
+      'modules/orders/ui/private.svg': '<svg/>',
+    }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+    withFixture({
+      'shared/ui/component.ts': 'export const view = true;',
+      'shared/ui/style.css': '.x{background:' + imageSet + '("./a%20b.svg" 1x)}',
+      'shared/ui/a b.svg': '<svg/>',
+    }, result => assert.deepEqual(result.errors, []));
+    for (const encoded of ['bad%.svg', '%00.svg', '%252e%252e.svg']) withFixture({
+      'shared/ui/component.ts': 'export const view = true;',
+      'shared/ui/style.css': '.x{background:' + imageSet + '("./' + encoded + '" 1x)}',
+    }, result => assert.match(result.errors.join(' '), /unverified-asset-url/));
+  }
+});
+
+test('ordinary relative CSS filenames resolve beside the importing stylesheet', () => withFixture({
+  'shared/ui/component.ts': 'export const view = true;',
+  'shared/ui/style.css': '@import "theme.css"; .x{background:url(icons/icon.svg);mask:image-set("icons/icon.svg" 1x)}',
+  'shared/ui/theme.css': '.theme{}',
+  'shared/ui/icons/icon.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('ordinary relative CSS references still reject missing files and pure-layer assets', () => {
+  withFixture({
+    'shared/ui/component.ts': 'export const view = true;',
+    'shared/ui/style.css': '.x{background:url(missing.svg)}',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+  withFixture({
+    'modules/orders/model/order.ts': 'export const order = 1;',
+    'modules/orders/model/style.css': '.x{background:url(icon.svg)}',
+    'modules/orders/model/icon.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+});
+
+test('ordinary CSS filenames retain physical ownership through symlinks', t => {
+  const fixture = setup({
+    'shared/ui/component.ts': 'export const view = true;',
+    'shared/ui/style.css': '.x{background:url(icon.svg)}',
+    'modules/orders/ui/private.svg': '<svg/>',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, 'modules/orders/ui/private.svg'),
+        path.join(fixture.root, 'shared/ui/icon.svg'), 'file');
+    } catch (error) {
+      if (error.code === 'EPERM') return t.skip('symlink privilege unavailable');
+      throw error;
+    }
+    assert.match(check(fixture.root).errors.join(' '), /shared-must-be-independent/);
+  } finally { fixture.cleanup(); }
+});
+
+test('TypeScript paths cannot certify a different CSS runtime dependency', () => withFixture({
+  '../tsconfig.json': JSON.stringify({ compilerOptions: {
+    baseUrl: '.', paths: { theme: ['src/shared/ui/safe.css'] },
+  } }),
+  '../node_modules/theme/package.json': '{"name":"theme","exports":"./theme.css"}',
+  '../node_modules/theme/theme.css': '@import "../../src/modules/orders/ui/private.css";',
+  'shared/ui/component.ts': 'export const view = true;',
+  'shared/ui/style.css': '@import "theme";',
+  'shared/ui/safe.css': '.safe{}',
+  'modules/orders/ui/private.css': '.private{}',
+}, result => assert.match(result.errors.join(' '), /missing-static-asset/)));
+
+test('plain CSS cannot certify a package import through Sass or Less decoys', () => {
+  for (const [specifier, decoy] of [
+    ['theme', 'theme.scss'], ['theme', 'theme.sass'], ['theme', 'theme.less'],
+    ['theme', '_theme.css'], ['theme.css', '_theme.css'],
+  ]) withFixture({
+    'shared/ui/component.ts': 'export const view = true;',
+    'shared/ui/style.css': '@import "' + specifier + '";',
+    ['shared/ui/' + decoy]: '.safe{}',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/, decoy));
+});
+
+test('format-specific extensionless stylesheets and Sass partials still resolve', () => {
+  for (const [format, target] of [['css', 'tokens.css'], ['less', 'tokens.less'], ['scss', '_tokens.scss']]) {
+    withFixture({
+      'shared/ui/component.ts': 'export const view = true;',
+      ['shared/ui/style.' + format]: '@import "tokens";',
+      ['shared/ui/' + target]: '.safe{}',
+    }, result => assert.deepEqual(result.errors, [], format));
+  }
+});
+
+test('ordinary CSS filenames ignore unrelated TypeScript paths', () => withFixture({
+  '../tsconfig.json': JSON.stringify({ compilerOptions: {
+    baseUrl: '.', paths: { 'icon.svg': ['src/modules/orders/ui/private.svg'] },
+  } }),
+  'shared/ui/component.ts': 'export const view = true;',
+  'shared/ui/style.css': '.view{background:url(icon.svg)}',
+  'shared/ui/icon.svg': '<svg/>',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('verified Vite CSS aliases take precedence over TypeScript and relative decoys', () => withFixture({
+  '../tsconfig.json': JSON.stringify({ compilerOptions: {
+    baseUrl: '.', paths: { theme: ['src/modules/orders/ui/private.css'] },
+  } }),
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { theme: fileURLToPath(new URL("./src/shared/ui/safe.css", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"theme":"src/shared/ui/safe.css"}}',
+  'shared/ui/component.ts': 'export const view = true;',
+  'shared/ui/style.css': '@import "theme";',
+  'shared/ui/theme': '@import "../../modules/orders/ui/private.css";',
+  'shared/ui/safe.css': '.safe{}',
+  'modules/orders/ui/private.css': '.private{}',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('production code cannot depend on test-exempt source through runtime or type imports', () => {
+  for (const [file, statement] of [
+    ['rules.test.ts', 'import { rule } from "./rules.test"; export const value = rule;'],
+    ['rules.spec.mjs', 'import { rule } from "./rules.spec.mjs"; export const value = rule;'],
+    ['rules.test.ts', 'export type Ref = typeof import("./rules.test");'],
+    ['rules.test.ts', 'import type { rule } from "./rules.test"; export type Ref = typeof rule;'],
+  ]) withFixture({
+    'modules/orders/domain/order.ts': statement,
+    ['modules/orders/domain/' + file]: 'import { useEffect } from "react"; export const rule = useEffect;',
+  }, result => assert.match(result.errors.join(' '), /production-imports-test/));
+});
+
+test('real tests retain development dependencies and ordinary owned imports', () => withFixture({
+  'modules/orders/domain/order.ts': 'export const order = 1;',
+  'modules/orders/domain/helper.test.ts': 'export const helper = 2;',
+  'modules/orders/domain/order.spec.ts': 'import { useEffect } from "react"; import { order } from "./order"; import { helper } from "./helper.test"; export const values = [useEffect, order, helper];',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('production imports cannot disguise test files behind symlinks', t => {
+  const fixture = setup({
+    'modules/orders/domain/rules.test.ts': 'export const rule = 1;',
+    'modules/orders/domain/consumer.ts': 'import { rule } from "./rules"; export const value = rule;',
+  });
+  try {
+    const domain = path.join(fixture.root, 'modules/orders/domain');
+    try {
+      fs.symlinkSync(path.join(domain, 'rules.test.ts'), path.join(domain, 'rules.ts'), 'file');
+    } catch (error) {
+      if (error.code === 'EPERM') return t.skip('symlink privilege unavailable');
+      throw error;
+    }
+    const errors = check(fixture.root).errors;
+    assert.match(errors.join(' '), /production-imports-test/);
+  } finally { fixture.cleanup(); }
+});
+
+test('HTML and package-map edges cannot introduce test source into production', () => {
+  withFixture({
+    '../index.html': '<script type="module" src="/src/app/start.test.ts"></script>',
+    'app/start.test.ts': 'export const started = true;',
+  }, result => assert.match(result.errors.join(' '), /production-imports-test/));
+  withFixture({
+    '../package.json': JSON.stringify({ type: 'module', imports: { '#rules': './src/modules/orders/domain/rules.test.ts' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { module: 'NodeNext', moduleResolution: 'NodeNext' } }),
+    'modules/orders/domain/order.ts': 'import { rule } from "#rules"; export const value = rule;',
+    'modules/orders/domain/rules.test.ts': 'export const rule = 1;',
+  }, result => assert.match(result.errors.join(' '), /production-imports-test/));
+});
+
+test('encoded CSS and HTML paths resolve actual ownership rather than encoded decoys', () => {
+  const encoded = '%2e%2e/%2e%2e/modules/orders/ui/private.svg';
+  for (const html of [false, true]) withFixture({
+    '../index.html': html ? '<img src="/src/shared/ui/' + encoded + '">' : '',
+    'shared/ui/component.ts': 'export const component = true;',
+    'shared/ui/style.css': html ? '.x{}' : '.x{background:url(./' + encoded + ')}',
+    ['shared/ui/' + encoded]: '<svg/>',
+    'modules/orders/ui/private.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), html ? /deep-module-import/ : /shared-must-be-independent/));
+});
+
+test('owned URL assets decode spaces, Unicode and ordinary letters', () => {
+  for (const [encoded, filename] of [['a%20b.svg', 'a b.svg'], ['%E9%9B%AA.svg', '雪.svg'], ['%61.svg', 'a.svg']]) {
+    withFixture({
+      '../index.html': '<img src="/src/shared/ui/' + encoded + '">',
+      'shared/ui/component.ts': 'export const component = true;',
+      'shared/ui/style.css': '.x{background:url(./' + encoded + ')}',
+      ['shared/ui/' + filename]: '<svg/>',
+    }, result => assert.deepEqual(result.errors, []));
+  }
+});
+
+test('ambiguous or malformed URL encodings fail closed without throwing', () => {
+  for (const encoded of ['bad%.svg', '%00.svg', '%0a.svg', '%5c.svg', '%2f.svg', '%23.svg', '%252e%252e.svg']) {
+    for (const html of [false, true]) withFixture({
+      '../index.html': html ? '<img src="/src/shared/ui/' + encoded + '">' : '',
+      'shared/ui/component.ts': 'export const component = true;',
+      'shared/ui/style.css': html ? '.x{}' : '.x{background:url(./' + encoded + ')}',
+    }, result => assert.match(result.errors.join(' '), /unverified-asset-url/, encoded));
+  }
+});
+
+test('CSS import specifiers retain literal encoded filenames', () => {
+  for (const specifier of ['"./%61.css"', 'url(./%61.css)']) withFixture({
+    'shared/ui/component.ts': 'export const component = true;',
+    'shared/ui/style.css': '@import ' + specifier + ';',
+    'shared/ui/%61.css': '.owned{}',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('at-rule names in owned asset URLs remain legal while actual dependencies are checked', () => {
+  for (const directive of ['import', 'use', 'forward']) withFixture({
+    'shared/ui/component.ts': 'export const component = true;',
+    'shared/ui/style.css': '.x{background:url(./icons/@' + directive + '.svg)}',
+    ['shared/ui/icons/@' + directive + '.svg']: '<svg/>',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    'shared/ui/component.ts': 'export const component = true;',
+    'shared/ui/style.css': '.x{background:url(./icons/@import.svg)} @import "../../modules/orders/ui/private.css";',
+    'shared/ui/icons/@import.svg': '<svg/>',
+    'modules/orders/ui/private.css': '.private{}',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('valid layered dependency flow and public API pass', () => withFixture(base, result => {
+  assert.deepEqual(result.errors, []);
+}));
+test('reject shared importing a domain type', () => withFixture({ ...base, 'shared/ui/button.ts': 'import type { Order } from "../../modules/orders/domain/order"; export const f = (v: Order) => v.id;' }, result => {
+  assert.match(result.errors.join(' '), /shared-must-be-independent/);
+}));
+test('reject direct cross-module import', () => withFixture({ ...base, 'modules/payments/application/pay.ts': 'import type { Order } from "../../orders/domain/order"; export type P = Order;' }, result => {
+  assert.match(result.errors.join(' '), /sibling-module-dependency/);
+}));
+test('reject deep route imports and UI-to-infrastructure dependency', () => withFixture({ ...base, 'routes/orders.ts': 'import { form } from "../modules/orders/ui/form"; export const page = form;', 'modules/orders/ui/form.ts': 'import { writer } from "../infrastructure/writer"; export const form = writer;' }, result => {
+  assert.match(result.errors.join(' '), /deep-module-import/);
+  assert.match(result.errors.join(' '), /ui-imports-infrastructure/);
+}));
+test('detect runtime cycles and type-only cycles separately', () => {
+  withFixture({ 'modules/a/model/a.ts': 'import { b } from "./b"; export const a = b;', 'modules/a/model/b.ts': 'import { a } from "./a"; export const b = a;' }, result => {
+    assert.match(result.errors.join(' '), /runtime-cycle/);
+  });
+  withFixture({ 'modules/a/model/a.ts': 'import type { B } from "./b"; export type A = { b?: B };', 'modules/a/model/b.ts': 'import type { A } from "./a"; export type B = { a?: A };' }, result => {
+    assert.equal(result.errors.length, 0);
+    assert.match(result.warnings.join(' '), /source-level-cycle/);
+  });
+});
+test('reject routes importing app and domain importing infra', () => withFixture({ ...base, 'app/setup.ts': 'export const setup = 1;', 'routes/orders.ts': 'import { setup } from "../app/setup"; export const page = setup;', 'modules/orders/domain/order.ts': 'import { writer } from "../infrastructure/writer"; export type Order = typeof writer;' }, result => {
+  assert.match(result.errors.join(' '), /routes-import-app/);
+  assert.match(result.errors.join(' '), /pure-domain-import/);
+}));
+test('reject self barrel and detect unresolved relative import', () => withFixture({ ...base, 'modules/orders/ui/form.ts': 'import { form } from "../index"; import { bad } from "./not-found"; export const f = form;' }, result => {
+  assert.match(result.errors.join(' '), /no-self-barrel/);
+  assert.match(result.errors.join(' '), /unresolved internal import/);
+}));
+
+test('detect re-exports and literal dynamic imports across boundaries', () => withFixture({ ...base,
+  'shared/ui/button.ts': 'export { form } from "../../modules/orders/ui/form";',
+  'routes/orders.ts': 'export const page = import("../modules/orders/domain/order");',
+}, result => {
+  assert.match(result.errors.join(' '), /shared-must-be-independent/);
+  assert.match(result.errors.join(' '), /deep-module-import/);
+}));
+test('reject domain imports from shared technical infrastructure', () => withFixture({ ...base,
+  'shared/api/client.ts': 'export const get = () => 1;',
+  'modules/orders/domain/order.ts': 'import { get } from "../../../shared/api/client"; export type Order = { id: ReturnType<typeof get> };',
+}, result => {
+  assert.match(result.errors.join(' '), /pure-layer-imports-technical-shared/);
+}));
+
+test('pure domain cannot import React even with unresolved node_modules', () => withFixture({
+  ...base, 'modules/orders/domain/order.ts': 'import { useEffect } from "react"; export const x = useEffect;',
+}, result => assert.match(result.errors.join(' '), /pure-layer-external-package/)));
+test('Windows-style module paths identify self barrels', () => {
+  const { isSelfBarrel, normPath } = require('./check-boundaries.cjs');
+  assert.equal(isSelfBarrel({ module: 'orders' }, {
+    layer: 'module', module: 'orders', relative: normPath(String.raw`modules\orders\index.ts`),
+  }), true);
+});
+test('empty imports emit runtime edges and cycle detection must catch them', () => withFixture({
+  'modules/a/model/a.ts': 'import {} from "./b"; export const a = 1;',
+  'modules/a/model/b.ts': 'import {} from "./a"; export const b = 2;',
+}, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+test('verbatimModuleSyntax retains inline type-only named imports', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"verbatimModuleSyntax":true,"module":"ESNext"}}',
+  'modules/a/model/a.ts': 'import { type B } from "./b"; export type A = {b?: B};',
+  'modules/a/model/b.ts': 'import { type A } from "./a"; export type B = {a?: A};',
+}, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+test('baseUrl paths do not bypass sibling and private-import checks', () => withFixture({
+  ...base,
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src"}}',
+  'modules/billing/ui/pay.ts': 'import { form } from "modules/orders/ui/form"; export const x = form;',
+}, result => {
+  assert.match(result.errors.join(' '), /sibling-module-dependency/);
+}));
+test('unresolved internal project aliases fail rather than silently skip', () => withFixture({
+  ...base, '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@/*":["*"]}}}',
+  'routes/orders.ts': 'import { missing } from "@/modules/orders/absent"; export const a = missing;',
+}, result => assert.match(result.errors.join(' '), /unresolved internal import/)));
+test('unknown relative import remains unresolved even if directory exists', () => withFixture({
+  ...base, 'modules/orders/ui/directory/index.ts': 'export const x = 1;',
+  'routes/orders.ts': 'import { x } from "../modules/orders/ui/directory/not-here"; export const f = x;',
+}, result => assert.match(result.errors.join(' '), /unresolved internal import/)));
+test('syntax errors in TSX are surfaced', () => withFixture({
+  'modules/orders/ui/bad.tsx': 'export const Bad = () => <div>',
+}, result => assert.match(result.errors.join(' '), /syntax-error/)));
+test('an explicitly reviewed one-way public API exception can be allowed', () => withFixture({
+  ...base, '../architecture.config.json': '{"allowCrossModule":{"payments":["orders"]}}',
+  'modules/payments/ui/pay.ts': 'import type { Order } from "../../orders/index"; export type P = Order;',
+  'modules/orders/index.ts': 'export type { Order } from "./domain/order";',
+}, result => assert.deepEqual(result.errors, [])));
+test('without the explicit exception, public sibling imports are denied', () => withFixture({
+  ...base,
+  'modules/payments/application/pay.ts': 'import type { Order } from "../../orders/index"; export type P = Order;',
+  'modules/orders/index.ts': 'export type { Order } from "./domain/order";',
+}, result => assert.match(result.errors.join(' '), /sibling-module-dependency/)));
+
+test('CLI exits nonzero for violations and zero for compliant input', () => {
+  const { spawnSync } = require('node:child_process');
+  const bad = setup({ 'shared/x.ts': 'import { order } from "../modules/orders/index"; export const x = order;', 'modules/orders/index.ts': 'export const order = 1;' });
+  const good = setup({ 'shared/x.ts': 'export const x = 1;' });
+  try {
+    const tool = path.join(__dirname, 'check-boundaries.cjs');
+    assert.equal(spawnSync(process.execPath, [tool, bad.root], { encoding: 'utf8' }).status, 1);
+    assert.equal(spawnSync(process.execPath, [tool, good.root], { encoding: 'utf8' }).status, 0);
+  } finally { bad.cleanup(); good.cleanup(); }
+});
+test('test-only imports are excluded from pure production package restrictions', () => withFixture({
+  'modules/orders/domain/order.ts': 'export const total = 1;',
+  'modules/orders/domain/order.test.ts': 'import { it } from "vitest"; import { total } from "./order"; it("works", () => total);',
+}, result => assert.deepEqual(result.errors, [])));
+test('paths wildcard cannot mask a forbidden external import', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"*":["*"]}}}',
+  'modules/orders/domain/order.ts': 'import { useEffect } from "react"; export const f = useEffect;',
+}, result => assert.match(result.errors.join(' '), /pure-layer-external-package|unresolved internal import/)));
+
+test('reject shared coupling to domain declaration files', () => withFixture({
+  'shared/ui/button.ts': 'import type { Order } from "../../modules/orders/order"; export type X = Order;',
+  'modules/orders/order.d.ts': 'export interface Order { id: string; }',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('scan .mjs and .cjs import edges rather than skipping files', () => withFixture({
+  'shared/unsafe.mjs': 'import { x } from "../modules/orders/index.mjs"; export const y = x;',
+  'modules/orders/index.mjs': 'export const x = 1;',
+  'shared/unsafe.cjs': 'const thing = require("../modules/orders/index.cjs"); module.exports = thing;',
+  'modules/orders/index.cjs': 'module.exports = { id: 1 };',
+}, result => {
+  assert.equal(result.count, 4);
+  assert.equal(result.errors.filter(e => /shared-must-be-independent/.test(e)).length, 2);
+}));
+
+test('detect import equals require references in TypeScript', () => withFixture({
+  'shared/ui/button.ts': 'import Order = require("../../modules/orders/index"); export const v = Order;',
+  'modules/orders/index.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('cross-module exceptions never permit domain or application imports', () => withFixture({
+  '../architecture.config.json': '{"allowCrossModule":{"payments":["orders"]}}',
+  'modules/orders/index.ts': 'export { component } from "./ui/component";',
+  'modules/orders/ui/component.ts': 'export const component = 1;',
+  'modules/payments/domain/total.ts': 'import { component } from "../../orders"; export const x = component;',
+  'modules/payments/application/pay.ts': 'import type { component } from "../../orders"; export type T = typeof component;',
+}, result => {
+  assert.equal(result.errors.filter(e => /cross-module-pure-layer/.test(e)).length, 2);
+}));
+
+test('reject approved type-only cycles that span modules', () => withFixture({
+  '../architecture.config.json': '{"allowCrossModule":{"orders":["payments"],"payments":["orders"]}}',
+  'modules/orders/index.ts': 'import type { P } from "../payments"; export type O = { p?: P };',
+  'modules/payments/index.ts': 'import type { O } from "../orders"; export type P = { o?: O };',
+}, result => assert.match(result.errors.join(' '), /cross-module-cycle/)));
+
+test('do not reject independent intra-module type-only cycles', () => withFixture({
+  'modules/orders/model/a.ts': 'import type { B } from "./b"; export type A = { b?: B };',
+  'modules/orders/model/b.ts': 'import type { A } from "./a"; export type B = { a?: A };',
+}, result => { assert.deepEqual(result.errors, []); assert.match(result.warnings.join(' '), /source-level-cycle/); }));
+
+test('reject an empty source tree rather than reporting a misleading pass', () => withFixture({
+  'ignored.md': '# Empty project',
+}, result => assert.match(result.errors.join(' '), /no-source-files/)));
+
+test('relative CSS asset is valid and a missing asset is a reported error', () => {
+  withFixture({
+    'main.tsx': 'import "./style.css"; export const app = 1;',
+    'style.css': 'body { color: black; }',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    'main.tsx': 'import "./not-here.css"; export const app = 1;',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+});
+
+test('reject domain importing generated API DTOs directly', () => withFixture({
+  'modules/orders/domain/order.ts': 'import type { OrderDto } from "../../../generated/api/order"; export type Order = OrderDto;',
+  'generated/api/order.ts': 'export interface OrderDto { id: string }',
+}, result => assert.match(result.errors.join(' '), /pure-layer-imports-technical/)));
+
+test('reject application importing a shared HTTP client', () => withFixture({
+  'modules/orders/application/place.ts': 'import { get } from "../../../shared/api/http"; export const go = get;',
+  'shared/api/http.ts': 'export const get = () => 1;',
+}, result => assert.match(result.errors.join(' '), /pure-layer-imports-technical-shared/)));
+
+test('pure shared libraries cannot import React or shared infrastructure', () => withFixture({
+  'shared/lib/number.ts': 'import { useMemo } from "react"; export const x = useMemo;',
+  'shared/lib/other.ts': 'import { get } from "../api/http"; export const y = get;',
+  'shared/api/http.ts': 'export const get = () => 1;',
+  'modules/orders/domain/order.ts': 'import { x } from "../../../shared/lib/number"; export const order = x;',
+}, result => {
+  assert.match(result.errors.join(' '), /pure-layer-external-package/);
+  assert.match(result.errors.join(' '), /pure-layer-imports-technical-shared/);
+}));
+
+test('two-argument literal dynamic imports and requires are checked', () => withFixture({
+  'modules/orders/index.ts': 'export const order = 1;',
+  'shared/util.ts': 'export const a = import("../modules/orders/index", { with: { type: "json" } });',
+  'shared/util2.ts': 'export const b = require("../modules/orders/index", undefined);',
+}, result => assert.equal(result.errors.filter(e => e.includes('shared-must-be-independent')).length, 2)));
+
+test('custom aliases resolving outside scanned src cannot evade enforcement', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":".","paths":{"@external/*":["outside/*"]}}}',
+  '../outside/secret.ts': 'export const leaked = 123;',
+  'modules/orders/domain/order.ts': 'import { leaked } from "@external/secret"; export const order = leaked;',
+}, result => assert.match(result.errors.join(' '), /outside-source-import/)));
+
+test('extension matching excludes unextended filenames ending in ts and js', () => withFixture({
+  'assets': 'this is not valid TypeScript!',
+  'robots': 'this is not valid TypeScript!',
+  'archivejs': 'this is not valid TypeScript!',
+  'shared/lib/example.ts': 'export const valid = 1;',
+}, result => {
+  assert.equal(result.count, 1);
+  assert.deepEqual(result.errors, []);
+}));
+
+test('pure application may import a pure shared library', () => withFixture({
+  'shared/lib/money.ts': 'export const amount = 10;',
+  'modules/orders/application/place.ts': 'import { amount } from "../../../shared/lib/money"; export const price = amount;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('tsconfig path-alias asset is allowed only when the target actually exists', () => {
+  withFixture({
+    '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@/*":["*"]}}}',
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { '@': 'src' } }),
+    'main.tsx': 'import "@/style.css"; export const app = 1;',
+    'style.css': 'body { margin: 0 }',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@/*":["*"]}}}',
+    'main.tsx': 'import "@/missing.css"; export const app = 1;',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+});
+
+test('pure layers reject imported styles even when the asset exists', () => {
+  withFixture({
+    'modules/orders/domain/order.ts': 'import "../ui/styles.css"; export const value = 1;',
+    'modules/orders/ui/styles.css': ':root { color: red }',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+  withFixture({
+    'modules/orders/application/order.ts': 'import "../ui/styles.css"; export const value = 1;',
+    'modules/orders/ui/styles.css': ':root { color: red }',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+  withFixture({
+    'shared/lib/util.ts': 'import "./styles.css"; export const value = 1;',
+    'shared/lib/styles.css': ':root { color: red }',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+});
+
+test('UI and application composition may import existing stylesheets', () => withFixture({
+  'app/main.tsx': 'import "./app.css"; export const app = 1;',
+  'app/app.css': ':root { color: blue }',
+  'modules/orders/ui/view.tsx': 'import "./view.css"; export const view = 1;',
+  'modules/orders/ui/view.css': ':root { color: red }',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('approved JavaScript module public APIs accept index.mjs and index.cjs', () => withFixture({
+  '../architecture.config.json': '{"allowCrossModule":{"payments":["orders"]}}',
+  'modules/orders/index.mjs': 'export const order = 1;',
+  'modules/orders/index.cjs': 'module.exports = { order: 1 };',
+  'modules/payments/ui/pay.mjs': 'import { order } from "../../orders/index.mjs"; export const paid = order;',
+  'modules/payments/ui/pay.cjs': 'const orders = require("../../orders/index.cjs"); module.exports = orders;',
+  'routes/home.mjs': 'import { order } from "../modules/orders/index.mjs"; export const home = order;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('self-barrel imports are rejected for JavaScript module entrypoints', () => withFixture({
+  'modules/orders/index.mjs': 'export const value = 1;',
+  'modules/orders/ui/form.mjs': 'import { value } from "../index.mjs"; export const form = value;',
+}, result => assert.match(result.errors.join(' '), /no-self-barrel/)));
+
+test('static assets never bypass shared ownership or sibling module privacy', () => {
+  withFixture({
+    'shared/ui/button.tsx': 'import "../../modules/orders/ui/order.css"; export const Button = () => 1;',
+    'modules/orders/ui/order.css': '.order { color: red }',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  withFixture({
+    'modules/payments/ui/payment.tsx': 'import "../../orders/ui/order.css"; export const Payment = () => 1;',
+    'modules/orders/ui/order.css': '.order { color: red }',
+  }, result => assert.match(result.errors.join(' '), /sibling-module-dependency/));
+  withFixture({
+    'app/start.tsx': 'import "../modules/orders/ui/order.css"; export const App = () => 1;',
+    'modules/orders/ui/order.css': '.order { color: red }',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/));
+});
+
+test('valid same-owner CSS imports still pass after ownership enforcement', () => withFixture({
+  'modules/orders/ui/order.css': '.order { color: red }',
+  'modules/orders/ui/order.tsx': 'import "./order.css"; export const Order = () => 1;',
+  'shared/ui/button.css': '.button { color: blue }',
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'app/app.css': ':root { color: blue }',
+  'app/main.tsx': 'import "./app.css"; export const app = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('JSON imports are valid local data dependencies, not TypeScript source edges', () => withFixture({
+  'app/config.json': '{"theme":"dark"}',
+  'app/main.ts': 'import config from "./config.json"; export const theme = config.theme;',
+  'modules/orders/domain/tax.json': '{"tax":10}',
+  'modules/orders/domain/tax.ts': 'import tax from "./tax.json"; export const cents = tax.tax;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('JSON import targets must exist and must respect ownership', () => {
+  withFixture({
+    'app/main.ts': 'import missing from "./missing.json"; export const config = missing;',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+  withFixture({
+    'shared/ui/button.ts': 'import order from "../../modules/orders/domain/order.json"; export const value = order;',
+    'modules/orders/domain/order.json': '{"id":1}',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  withFixture({
+    'modules/payments/ui/payment.ts': 'import order from "../../orders/domain/order.json"; export const value = order;',
+    'modules/orders/domain/order.json': '{"id":1}',
+  }, result => assert.match(result.errors.join(' '), /sibling-module-dependency/));
+  withFixture({
+    'modules/orders/domain/order.ts': 'import schema from "../../../generated/api/schema.json"; export const value = schema;',
+    'generated/api/schema.json': '{"type":"object"}',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-imports-technical/));
+});
+
+test('assets resolving outside the scanned root cannot bypass the boundary', () => withFixture({
+  'app/start.ts': 'import "../../external/style.css"; export const app = 1;',
+  '../external/style.css': ':root { color: red }',
+}, result => assert.match(result.errors.join(' '), /outside-source-import/)));
+
+test('runtime cycle diagnostics contain exactly one closing node', () => withFixture({
+  'modules/orders/model/a.ts': 'import { b } from "./b"; export const a = b;',
+  'modules/orders/model/b.ts': 'import { a } from "./a"; export const b = a;',
+}, result => {
+  assert.ok(result.errors.some(error =>
+    error === 'runtime-cycle: modules/orders/model/a.ts -> modules/orders/model/b.ts -> modules/orders/model/a.ts'));
+  assert.ok(!result.errors.some(error => /a\.ts -> a\.ts/.test(error)));
+}));
+
+test('asset path aliases take precedence over baseUrl fallback files', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@styles/*":["modules/payments/ui/*"]}}}',
+  'modules/orders/ui/view.tsx': 'import "@styles/view.css"; export const View = () => 1;',
+  'modules/payments/ui/view.css': '.payment { color: red }',
+  '@styles/view.css': '.shadow { color: blue }',
+}, result => assert.match(result.errors.join(' '), /sibling-module-dependency/)));
+
+test('source symlinks cannot disguise a business module as pure shared code', t => {
+  const fixture = setup({
+    'modules/orders/domain/order.ts': 'export type Order = { id: string };',
+    'shared/lib/use.ts': 'import type { Order } from "./alias"; export type Use = Order;',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, 'modules/orders/domain/order.ts'),
+        path.join(fixture.root, 'shared/lib/alias.ts'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows file symlinks');
+      throw error;
+    }
+    const result = check(fixture.root);
+    assert.match(result.errors.join(' '), /source-symlink-ownership/);
+    assert.match(result.errors.join(' '), /shared-must-be-independent/);
+  } finally { fixture.cleanup(); }
+});
+
+test('source symlinks pointing outside src are always reported', t => {
+  const fixture = setup({
+    '../external.ts': 'export const external = 1;',
+    'shared/lib/use.ts': 'import { external } from "./alias"; export const value = external;',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, '../external.ts'),
+        path.join(fixture.root, 'shared/lib/alias.ts'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows file symlinks');
+      throw error;
+    }
+    assert.match(check(fixture.root).errors.join(' '), /outside-source-symlink/);
+  } finally { fixture.cleanup(); }
+});
+
+test('same-owner source-file aliases are not treated as different modules', t => {
+  const fixture = setup({
+    'shared/lib/real.ts': 'export const value = 1;',
+    'shared/lib/consumer.ts': 'import { value } from "./alias"; export const x = value;',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, 'shared/lib/real.ts'),
+        path.join(fixture.root, 'shared/lib/alias.ts'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows file symlinks');
+      throw error;
+    }
+    assert.deepEqual(check(fixture.root).errors, []);
+  } finally { fixture.cleanup(); }
+});
+
+test('reject a module that mixes simple and complex layer layouts', () => withFixture({
+  'modules/orders/model/product.ts': 'export const product = 1;',
+  'modules/orders/domain/order.ts': 'export const order = 1;',
+}, result => assert.match(result.errors.join(' '), /mixed-module-layout/)));
+
+test('a justified temporary migration can explicitly permit mixed layouts', () => withFixture({
+  '../architecture.config.json': '{"allowMixedLayouts":{"orders":"Gradual migration tracked by ticket #123"}}',
+  'modules/orders/model/product.ts': 'export const product = 1;',
+  'modules/orders/domain/order.ts': 'export const order = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('empty mixed-layout migration reasons are invalid', () => {
+  const f = setup({
+    '../architecture.config.json': '{"allowMixedLayouts":{"orders":" "}}',
+    'modules/orders/model/product.ts': 'export const product = 1;',
+    'modules/orders/domain/order.ts': 'export const order = 1;',
+  });
+  try { assert.throws(() => check(f.root), /Invalid architecture.config.json/); }
+  finally { f.cleanup(); }
+});
+
+test('migration exceptions do not permit direct simple-to-complex layer coupling', () => withFixture({
+  '../architecture.config.json': '{"allowMixedLayouts":{"orders":"Migrate API clients into infrastructure"}}',
+  'modules/orders/api/request.ts': 'import { http } from "../infrastructure/http"; export const request = http;',
+  'modules/orders/infrastructure/http.ts': 'export const http = 1;',
+}, result => assert.match(result.errors.join(' '), /mixed-mode-import/)));
+
+test('independent simple and complex modules can coexist in one app', () => withFixture({
+  'modules/catalog/api/list.ts': 'export const list = () => [];',
+  'modules/catalog/model/product.ts': 'export type Product = { id: string };',
+  'modules/orders/domain/order.ts': 'export type Order = { id: string };',
+  'modules/orders/application/use-case.ts': 'import type { Order } from "../domain/order"; export type Save = (order: Order) => void;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite lazy and eager glob imports fail closed rather than skipping private dependencies', () => {
+  withFixture({
+    'shared/ui/collection.ts': 'export const all = import.meta.glob("../../modules/orders/ui/*.tsx");',
+    'modules/orders/ui/form.tsx': 'export const Form = () => 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-glob/));
+  withFixture({
+    'modules/orders/ui/collection.ts': 'export const all = import.meta.glob("./*.tsx", { eager: true });',
+    'modules/orders/ui/form.tsx': 'export const Form = () => 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-glob/));
+  withFixture({
+    'shared/ui/collection.ts': 'export const all = import.meta.globEager("../../modules/orders/ui/*.tsx");',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-glob/));
+});
+
+test('Vite-only alias definitions must be explicitly mirrored in checker config', () => withFixture({
+  '../vite.config.ts': 'export default { resolve: { alias: { "@orders-private": "/src/modules/orders/ui/form" } } };',
+  'shared/ui/button.ts': 'import { form } from "@orders-private"; export const b = form;',
+  'modules/orders/ui/form.ts': 'export const form = 1;',
+}, result => assert.match(result.errors.join(' '), /unverified-vite-alias/)));
+
+test('configured Vite aliases enforce the same module ownership rules', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@orders-private": fileURLToPath(new URL("./src/modules/orders/ui/form.ts", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@orders-private":"src/modules/orders/ui/form.ts"}}',
+  'shared/ui/button.ts': 'import { form } from "@orders-private"; export const b = form;',
+  'modules/orders/ui/form.ts': 'export const form = 1;',
+}, result => {
+  assert.match(result.errors.join(' '), /shared-must-be-independent/);
+  assert.match(result.errors.join(' '), /deep-module-import/);
+}));
+
+test('configured Vite alias can import permitted public API', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@orders": fileURLToPath(new URL("./src/modules/orders", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@orders":"src/modules/orders"}}',
+  'app/setup.ts': 'import { order } from "@orders"; export const setup = order;',
+  'modules/orders/index.ts': 'export const order = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('computed Vite alias config fails closed', () => withFixture({
+  '../vite.config.ts': 'export default { resolve: { alias: buildAliases() } };',
+  'app/setup.ts': 'export const setup = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/)));
+
+test('Vite root-absolute source imports cannot bypass shared ownership', () => withFixture({
+  'shared/ui/button.ts': 'import { order } from "/src/modules/orders/index"; export const b = order;',
+  'modules/orders/index.ts': 'export const order = 1;',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('configuration prototype properties are never treated as layout exemptions', () => withFixture({
+  'modules/toString/domain/order.ts': 'export const order = 1;',
+  'modules/toString/model/order.ts': 'export const draft = 1;',
+  'modules/constructor/domain/order.ts': 'export const order = 1;',
+  'modules/constructor/api/order.ts': 'export const api = 1;',
+}, result => assert.equal(result.errors.filter(e => e.includes('mixed-module-layout')).length, 2)));
+
+test('an explicitly documented own-property migration exception is honored', () => withFixture({
+  '../architecture.config.json': '{"allowMixedLayouts":{"toString":"Migration in review"}}',
+  'modules/toString/domain/order.ts': 'export const order = 1;',
+  'modules/toString/model/order.ts': 'export const draft = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite aliases that disagree with checker map are rejected', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@safe": fileURLToPath(new URL("./src/modules/orders/ui/private.ts", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@safe":"src/shared/lib/safe.ts"}}',
+  'app/setup.ts': 'export const setup = 1;',
+}, result => assert.match(result.errors.join(' '), /vite-alias-target-mismatch/)));
+
+test('dynamic alias expressions without inspectable targets fail closed', () => withFixture({
+  '../vite.config.ts': 'export default { resolve: { alias: { "@safe": resolveAliasDynamically() } } };',
+  '../architecture.config.json': '{"viteAliases":{"@safe":"src/shared/lib/safe.ts"}}',
+  'app/setup.ts': 'export const setup = 1;',
+}, result => assert.match(result.errors.join(' '), /unverifiable-vite-alias-target/)));
+
+test('Vite shorthand and computed resolve configurations fail closed', () => {
+  withFixture({
+    '../vite.config.ts': 'const resolve = { alias: { "@orders": "/some/path" } }; export default defineConfig({ resolve });',
+    'shared/ui/view.ts': 'import { order } from "@orders"; export const view = order;',
+    'modules/orders/index.ts': 'export const order = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/));
+  withFixture({
+    '../vite.config.ts': 'export default defineConfig({ resolve: makeResolveConfig() });',
+    'app/setup.ts': 'export const setup = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/));
+});
+
+test('Vite config spreads, alias spreads and imported configs fail closed', () => {
+  for (const config of [
+    'export default defineConfig({ ...sharedConfig, plugins: [] });',
+    'export default defineConfig(sharedConfig);',
+    'export default defineConfig({ resolve: { ...resolveConfig } });',
+    'export default { resolve: { alias: { ...aliases } } };',
+    'export default { resolve: { alias: { [name]: "/src/modules/orders" } } };',
+  ]) withFixture({
+    '../vite.config.ts': config,
+    'app/setup.ts': 'export const setup = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/));
+});
+
+test('Vite alias map must reflect Vite config in both directions', () => withFixture({
+  '../vite.config.ts': 'export default { plugins: [] };',
+  '../architecture.config.json': '{"viteAliases":{"@orders":"src/modules/orders"}}',
+  'app/setup.ts': 'export const setup = 1;',
+}, result => assert.match(result.errors.join(' '), /unverified-vite-alias/)));
+
+test('inline Vite defineConfig with no aliases is supported', () => withFixture({
+  '../vite.config.ts': 'import { defineConfig } from "vitest/config"; export default defineConfig({ plugins: [], test: { environment: "jsdom" } });',
+  'app/setup.ts': 'export const setup = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('variable dynamic import and computed require fail closed', () => {
+  withFixture({
+    'shared/ui/loader.ts': 'export async function load(path: string) { return import(path); }',
+  }, result => assert.match(result.errors.join(' '), /unsupported-dynamic-import/));
+  withFixture({
+    'shared/ui/loader.cjs': 'const name = "orders"; module.exports = require(name);',
+  }, result => assert.match(result.errors.join(' '), /unsupported-dynamic-require/));
+});
+
+test('Vite Worker new URL references respect module ownership', () => withFixture({
+  'shared/ui/panel.ts': 'export const worker = new Worker(new URL("../../modules/orders/ui/worker.ts", import.meta.url), { type: "module" });',
+  'modules/orders/ui/worker.ts': 'export const answer = 42;',
+}, result => {
+  assert.match(result.errors.join(' '), /shared-must-be-independent/);
+  assert.match(result.errors.join(' '), /deep-module-import/);
+}));
+
+test('same-module Vite workers remain valid', () => withFixture({
+  'modules/orders/ui/panel.ts': 'export const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });',
+  'modules/orders/ui/worker.ts': 'export const answer = 42;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('new URL static assets respect ownership and pure-layer restrictions', () => {
+  withFixture({
+    'modules/orders/ui/panel.ts': 'export const icon = new URL("./assets/logo.svg", import.meta.url);',
+    'modules/orders/ui/assets/logo.svg': '<svg/>',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    'modules/orders/domain/order.ts': 'export const icon = new URL("../ui/assets/logo.svg", import.meta.url);',
+    'modules/orders/ui/assets/logo.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+  withFixture({
+    'shared/ui/view.ts': 'export const icon = new URL("../../modules/orders/ui/logo.svg", import.meta.url);',
+    'modules/orders/ui/logo.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('prefix-free new URL assets obey module ownership', () => {
+  for (const prefix of ['', './']) withFixture({
+    'shared/ui/view.ts': 'export const icon = new URL("' + prefix + 'assets/../../../modules/orders/ui/logo.svg", import.meta.url);',
+    'modules/orders/ui/logo.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('prefix-free new URL assets resolve beside their importer instead of TypeScript paths', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":".","paths":{"icon.svg":["src/modules/orders/ui/private.svg"]}}}',
+  'shared/ui/view.ts': 'export const icon = new URL("icon.svg", import.meta.url);',
+  'shared/ui/icon.svg': '<svg/>',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('prefix-free new URL assets retain verified Vite alias precedence', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "icon.svg": fileURLToPath(new URL("./src/modules/orders/ui/private.svg", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"icon.svg":"src/modules/orders/ui/private.svg"}}',
+  'shared/ui/view.ts': 'export const icon = new URL("icon.svg", import.meta.url);',
+  'shared/ui/icon.svg': '<svg/>',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('prefix-free new URL assets enforce presence and pure layers', () => {
+  withFixture({
+    'modules/orders/model/order.ts': 'export const icon = new URL(`icon.svg`, import.meta.url);',
+    'modules/orders/model/icon.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+  withFixture({
+    'shared/ui/view.ts': 'export const icon = new URL("missing.svg", import.meta.url);',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+});
+
+test('prefix-free new URL workers retain execution edges while standalone URLs do not', () => {
+  for (const constructor of ['Worker', 'SharedWorker', null]) withFixture({
+    'modules/orders/ui/a.ts': 'export const ref = ' + (constructor ? 'new ' + constructor + '(' : '') +
+      'new URL("b.ts", import.meta.url)' + (constructor ? ', { type: "module" })' : '') + ';',
+    'modules/orders/ui/b.ts': 'import { ref } from "./a"; export const result = ref;',
+  }, result => constructor
+    ? assert.match(result.errors.join(' '), /runtime-cycle/)
+    : assert.deepEqual(result.errors, []));
+});
+
+test('new URL external and same-document references remain outside the local asset graph', () => {
+  for (const spec of ['https://example.com/icon.svg', '//example.com/icon.svg', 'data:image/png;base64,AA==', 'blob:https://example.com/id', '#icon', '?version=1']) {
+    withFixture({ 'shared/ui/view.ts': 'export const icon = new URL(' + JSON.stringify(spec) + ', import.meta.url);' },
+      result => assert.deepEqual(result.errors, [], spec));
+  }
+});
+
+test('computed new URL targets fail closed', () => withFixture({
+  'shared/ui/view.ts': 'export const icon = new URL(name, import.meta.url);',
+}, result => assert.match(result.errors.join(' '), /unsupported-dynamic-url/)));
+
+test('Vite template dynamic imports are rejected rather than silently bundled', () => withFixture({
+  'shared/ui/loader.ts': 'export async function load(name: string) { return import(`../../modules/orders/ui/${name}.tsx`); }',
+  'modules/orders/ui/form.tsx': 'export const Form = () => 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-dynamic-import/)));
+
+test('Vite aliased asset directives resolve actual files', () => {
+  for (const directive of ['url', 'raw', 'inline', 'no-inline']) {
+    withFixture({
+      '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@assets": fileURLToPath(new URL("./src/shared/ui/assets", import.meta.url)) } } };',
+      '../architecture.config.json': '{"viteAliases":{"@assets":"src/shared/ui/assets"}}',
+      'shared/ui/view.ts': 'import icon from "@assets/logo.svg?' + directive + '"; export const view = icon;',
+      'shared/ui/assets/logo.svg': '<svg/>',
+    }, result => assert.deepEqual(result.errors, []));
+  }
+});
+
+test('aliased asset query imports still respect ownership and presence', () => {
+  withFixture({
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@orders": fileURLToPath(new URL("./src/modules/orders/ui", import.meta.url)) } } };',
+    '../architecture.config.json': '{"viteAliases":{"@orders":"src/modules/orders/ui"}}',
+    'shared/ui/view.ts': 'import icon from "@orders/logo.svg?url"; export const view = icon;',
+    'modules/orders/ui/logo.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  withFixture({
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@assets": fileURLToPath(new URL("./src/shared/ui/assets", import.meta.url)) } } };',
+    '../architecture.config.json': '{"viteAliases":{"@assets":"src/shared/ui/assets"}}',
+    'shared/ui/view.ts': 'import icon from "@assets/absent.svg?url"; export const view = icon;',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+});
+
+test('root-absolute Vite assets with queries retain boundaries', () => withFixture({
+  'shared/ui/view.ts': 'import raw from "/src/modules/orders/ui/template.svg?raw"; export const view = raw;',
+  'modules/orders/ui/template.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('Vite asset aliases override relative and root-absolute decoys', () => {
+  for (const spec of ['./icon.svg', '/src/shared/ui/icon.svg']) withFixture({
+    ...aliasConfig(spec, 'src/modules/orders/ui/private.svg'),
+    'shared/ui/view.ts': 'import icon from ' + JSON.stringify(spec) + '; export { icon };',
+    'shared/ui/icon.svg': '<svg/>',
+    'modules/orders/ui/private.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('Vite asset alias matching includes the complete query-qualified request', () => {
+  for (const suffix of ['', '?raw', '?url']) withFixture({
+    ...aliasConfig('/src/shared/ui/icon.svg', 'src/modules/orders/ui/private.svg'),
+    'shared/ui/view.ts': 'import icon from "/src/shared/ui/icon.svg' + suffix + '"; export { icon };',
+    'shared/ui/icon.svg': '<svg/>',
+    'modules/orders/ui/private.svg': '<svg/>',
+  }, result => suffix ? assert.deepEqual(result.errors, []) :
+    assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  for (const suffix of ['?raw', '?url']) withFixture({
+    ...aliasConfig('./assets', 'src/modules/orders/ui'),
+    'shared/ui/view.ts': 'import icon from "./assets/icon.svg' + suffix + '"; export { icon };',
+    'shared/ui/assets/icon.svg': '<svg/>',
+    'modules/orders/ui/icon.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('Vite asset aliases cannot fall back to an existing decoy when the target is absent', () => withFixture({
+  ...aliasConfig('./icon.svg', 'src/shared/ui/absent.svg'),
+  'shared/ui/view.ts': 'import icon from "./icon.svg"; export { icon };',
+  'shared/ui/icon.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /missing-static-asset/)));
+
+test('Vite asset aliases cannot rewrite import transformation flags', () => withFixture({
+  ...aliasConfig('./icon.svg?raw', 'src/shared/ui/icon.svg'),
+  'shared/ui/view.ts': 'import icon from "./icon.svg?raw"; export { icon };',
+  'shared/ui/icon.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/)));
+
+test('Vite asset aliases with a leading hash retain query-qualified prefix matching', () => withFixture({
+  ...aliasConfig('#assets', 'src/shared/ui/assets'),
+  'shared/ui/view.ts': 'import icon from "#assets/icon.svg?url"; export { icon };',
+  'shared/ui/assets/icon.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite asset aliases preserve dot-relative URL handling and root URL alias ownership', () => {
+  for (const spec of ['./icon.svg', '/src/shared/ui/icon.svg']) withFixture({
+    ...aliasConfig(spec, 'src/modules/orders/ui/private.svg'),
+    'shared/ui/view.ts': 'export const icon = new URL(' + JSON.stringify(spec) + ', import.meta.url);',
+    'shared/ui/icon.svg': '<svg/>',
+    'modules/orders/ui/private.svg': '<svg/>',
+  }, result => spec.startsWith('.') ? assert.deepEqual(result.errors, []) :
+    assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('Vite asset aliases retain JSON layer checks and worker execution edges', () => {
+  withFixture({
+    ...aliasConfig('./config.json', 'src/modules/orders/ui/config.json'),
+    'modules/orders/model/order.ts': 'import config from "./config.json"; export { config };',
+    'modules/orders/model/config.json': '{}',
+    'modules/orders/ui/config.json': '{}',
+  }, result => assert.match(result.errors.join(' '), /pure-model-import/));
+  withFixture({
+    ...aliasConfig('./workers', 'src/modules/orders/ui/actual'),
+    'modules/orders/ui/a.ts': 'import worker from "./workers/b.ts?worker"; export { worker };',
+    'modules/orders/ui/workers/b.ts': 'export const decoy = true;',
+    'modules/orders/ui/actual/b.ts': 'import { worker } from "../a"; export { worker };',
+  }, result => assert.match(result.errors.join(' '), /runtime-cycle/));
+});
+
+test('HTML Vite imports check alias targets instead of safe path decoys', () => {
+  for (const [ext, html] of [
+    ['ts', '<script type="module" src="/src/shared/ui/entry.ts"></script>'],
+    ...['stylesheet', 'preload" as="style', 'icon', 'canonical'].map(rel =>
+      ['css', '<link rel="' + rel + '" href="/src/shared/ui/entry.css">']),
+  ]) withFixture({
+    ...aliasConfig('/src/shared/ui/entry.' + ext, 'src/modules/orders/ui/private.' + ext),
+    '../index.html': html,
+    'shared/ui/check.ts': 'export const checked = true;',
+    ['shared/ui/entry.' + ext]: ext === 'ts' ? 'export const decoy = true;' : '.decoy{}',
+    ['modules/orders/ui/private.' + ext]: ext === 'ts' ? 'export const privateValue = true;' : '.private{}',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/));
+});
+
+test('HTML URL resources do not apply import-only aliases', () => {
+  for (const [ext, html] of [
+    ['svg', '<img src="/src/shared/ui/entry.svg" alt="">'],
+    ['ts', '<link rel="modulepreload" href="/src/shared/ui/entry.ts">'],
+    ['ts', '<link rel="preload" as="script" href="/src/shared/ui/entry.ts">'],
+    ['ts', '<script type="module" vite-ignore src="/src/shared/ui/entry.ts"></script>'],
+    ['css', '<link rel="stylesheet" media="all" href="/src/shared/ui/entry.css">'],
+    ['css', '<link rel="stylesheet" disabled href="/src/shared/ui/entry.css">'],
+    ['CSS', '<link rel="stylesheet" href="/src/shared/ui/entry.CSS">'],
+    ['css', '<link rel="stylesheet" vite-ignore href="/src/shared/ui/entry.css">'],
+  ]) withFixture({
+    ...aliasConfig('/src/shared/ui/entry.' + ext, 'src/modules/orders/ui/private.' + ext),
+    '../index.html': html,
+    'shared/ui/check.ts': 'export const checked = true;',
+    ['shared/ui/entry.' + ext]: ext === 'ts' ? 'export const decoy = true;' : '',
+    ['modules/orders/ui/private.' + ext]: ext === 'ts' ? 'export const privateValue = true;' : '',
+  }, result => assert.deepEqual(result.errors, [], html));
+  withFixture({
+    ...aliasConfig('/src/modules/orders/ui/entry.png', 'src/shared/ui/other.png'),
+    '../index.html': '<img src="/src/modules/orders/ui/entry.png" alt="">',
+    '../public/src/modules/orders/ui/entry.png': 'public image',
+    'shared/ui/check.ts': 'export const checked = true;',
+    'shared/ui/other.png': 'alias image',
+    'modules/orders/ui/entry.png': 'private decoy',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('HTML Vite aliases accept public module barrels and reject missing targets', () => {
+  withFixture({
+    ...aliasConfig('/src/shared/ui/entry.ts', 'src/modules/orders'),
+    '../index.html': '<script type="module" src="/src/shared/ui/entry.ts"></script>',
+    'shared/ui/entry.ts': 'export const decoy = true;',
+    'modules/orders/index.ts': 'export const publicValue = true;',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    ...aliasConfig('/src/shared/ui/entry.ts', 'src/shared/ui/absent.ts'),
+    '../index.html': '<script type="module" src="/src/shared/ui/entry.ts"></script>',
+    'shared/ui/entry.ts': 'export const decoy = true;',
+  }, result => assert.match(result.errors.join(' '), /missing-html-asset/));
+});
+
+test('HTML CSS aliases reject unscanned preprocessing formats', () => {
+  for (const ext of ['pcss', 'postcss', 'sss']) withFixture({
+    ...aliasConfig('/src/shared/ui/entry.css', 'src/shared/ui/actual.' + ext),
+    '../index.html': '<link rel="stylesheet" href="/src/shared/ui/entry.css">',
+    'shared/ui/check.ts': 'export const checked = true;',
+    'shared/ui/entry.css': '.decoy{}',
+    ['shared/ui/actual.' + ext]: '.actual{}',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-html-stylesheet/));
+  for (const attributes of ['media="all"', 'disabled', 'vite-ignore']) withFixture({
+    '../index.html': '<link rel="stylesheet" ' + attributes + ' href="/src/shared/ui/actual.pcss">',
+    'shared/ui/check.ts': 'export const checked = true;',
+    'shared/ui/actual.pcss': '.actual{}',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-html-stylesheet/, attributes));
+});
+
+test('source Vite worker query imports retain graph and layer rules', () => withFixture({
+  'modules/orders/domain/order.ts': 'import worker from "../infrastructure/worker.ts?worker"; export const value = worker;',
+  'modules/orders/infrastructure/worker.ts': 'export const run = 1;',
+}, result => assert.match(result.errors.join(' '), /pure-domain-import/)));
+
+test('TypeScript hash-prefixed path aliases are not mistaken for URL fragments', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"#util":["shared/lib/util.ts"]}}}',
+  'shared/lib/util.ts': 'export const amount = 42;',
+  'modules/orders/application/calculate.ts': 'import { amount } from "#util"; export const value = amount;',
+}, result => assert.match(result.errors.join(' '), /unverified-vite-runtime-alias/)));
+
+test('raw source imports do not create spurious execution cycles', () => withFixture({
+  'modules/orders/ui/a.ts': 'import text from "./b.ts?raw"; export const a = text;',
+  'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('query-modified worker modules still contribute runtime cycle edges', () => withFixture({
+  'modules/orders/ui/a.ts': 'import worker from "./b.ts?worker"; export const a = worker;',
+  'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+}, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+test('Vite aliases without trailing slash resolve prefix assets safely', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared/ui/assets", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared/ui/assets"}}',
+  'shared/ui/view.ts': 'import icon from "@/logo.svg?url"; export const view = icon;',
+  'shared/ui/assets/logo.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite alias precedence/order cannot silently disagree with checker config', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)), "@/orders": fileURLToPath(new URL("./src/modules/orders", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@/orders":"src/modules/orders","@":"src/shared"}}',
+  'app/main.ts': 'export const main = 1;',
+}, result => assert.match(result.errors.join(' '), /vite-alias-order-mismatch/)));
+
+test('trailing slash aliases do not claim support that Vite does not provide', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@/": fileURLToPath(new URL("./src/shared/ui", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@/":"src/shared/ui"}}',
+  'shared/ui/view.ts': 'export const view = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/)));
+
+test('transitive CSS @import cannot connect generic shared UI to business modules', () => withFixture({
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'shared/ui/button.css': '@import "../../modules/orders/ui/private.css";',
+  'modules/orders/ui/private.css': '.private { color: blue }',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('CSS url() references cannot reach business-owned assets from shared code', () => withFixture({
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'shared/ui/button.css': '.button { background-image: url("../../modules/orders/ui/private.svg") }',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('nested CSS import chains still enforce ownership', () => withFixture({
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'shared/ui/button.css': '@import "./tokens.css";',
+  'shared/ui/tokens.css': '@import "../../modules/orders/ui/private.css";',
+  'modules/orders/ui/private.css': '.private { color: blue }',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('CSS imports within shared ownership are valid', () => withFixture({
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'shared/ui/button.css': '@import "./tokens.css"; .button { background: url("./icon.svg") }',
+  'shared/ui/tokens.css': ':root { --accent: red; }',
+  'shared/ui/icon.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('CSS aliases are resolved before stylesheet ownership checks', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: { "@orders": fileURLToPath(new URL("./src/modules/orders/ui", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@orders":"src/modules/orders/ui"}}',
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'shared/ui/button.css': '@import "@orders/private.css";',
+  'modules/orders/ui/private.css': '.private { color: red }',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('Sass @use and @forward cannot bypass module ownership', () => withFixture({
+  'shared/ui/button.tsx': 'import "./button.scss"; export const Button = () => 1;',
+  'shared/ui/button.scss': '@use "../../modules/orders/ui/_tokens.scss";',
+  'modules/orders/ui/_tokens.scss': '$accent: red;',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('CSS references to nonexistent files and dynamic URLs fail closed', () => {
+  withFixture({
+    'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+    'shared/ui/button.css': '@import "./missing.css";',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+  withFixture({
+    'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+    'shared/ui/button.css': '.button { background: url(var(--external)) }',
+  }, result => assert.match(result.errors.join(' '), /unsupported-css-url/));
+});
+
+test('same-owner stylesheet comments and data URLs do not create false violations', () => withFixture({
+  'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+  'shared/ui/button.css': '/* @import "../../modules/orders/ui/private.css" */ .button { background: url(data:image/png;base64,abc) }',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('standalone new URL references enforce ownership without causing runtime cycles', () => withFixture({
+  'modules/orders/ui/a.ts': 'export const ref = new URL("./b.ts", import.meta.url);',
+  'modules/orders/ui/b.ts': 'import { ref } from "./a"; export const b = ref;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('workers created from new URL remain executable dependency edges', () => withFixture({
+  'modules/orders/ui/a.ts': 'export const worker = new Worker(new URL("./b.ts", import.meta.url), { type: "module" });',
+  'modules/orders/ui/b.ts': 'import { worker } from "./a"; export const b = worker;',
+}, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+test('standalone URL imports still respect shared ownership', () => withFixture({
+  'shared/ui/icon.ts': 'export const privateUrl = new URL("../../modules/orders/ui/worker.ts", import.meta.url);',
+  'modules/orders/ui/worker.ts': 'export const code = 1;',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('uppercase CSS imports and Sass partial filename resolution respect ownership', () => {
+  withFixture({
+    'shared/ui/button.tsx': 'import "./button.css"; export const Button = () => 1;',
+    'shared/ui/button.css': '@IMPORT "../../modules/orders/ui/private.css";',
+    'modules/orders/ui/private.css': '.private { color: red }',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  withFixture({
+    'shared/ui/button.tsx': 'import "./button.scss"; export const Button = () => 1;',
+    'shared/ui/button.scss': '@use "../../modules/orders/ui/tokens.scss";',
+    'modules/orders/ui/_tokens.scss': '$accent: red;',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('multi-target Sass imports and computed load-css cannot bypass stylesheet ownership', () => {
+  withFixture({
+    'shared/ui/view.tsx': 'import "./view.scss"; export const View = () => 1;',
+    'shared/ui/view.scss': '@import "./safe.css", "../../modules/orders/ui/private.css";',
+    'shared/ui/safe.css': '.safe { color: blue }',
+    'modules/orders/ui/private.css': '.private { color: red }',
+  }, result => assert.match(result.errors.join(' '), /unsupported-css-dependency/));
+  withFixture({
+    'shared/ui/view.tsx': 'import "./view.scss"; export const View = () => 1;',
+    'shared/ui/view.scss': '@include meta.load-css("../../modules/orders/ui/private.css");',
+    'modules/orders/ui/private.css': '.private { color: red }',
+  }, result => assert.match(result.errors.join(' '), /unsupported-css-dependency/));
+});
+
+test('a stylesheet api-to-ui edge uses the same direction rules as TypeScript', () => withFixture({
+  'modules/orders/api/request.ts': 'import "./request.css"; export const request = 1;',
+  'modules/orders/api/request.css': '@import "../ui/form.css";',
+  'modules/orders/ui/form.css': '.order { color: red }',
+}, result => assert.match(result.errors.join(' '), /api-imports-ui/)));
+
+test('a stylesheet infrastructure-to-ui edge is rejected by the shared layer policy', () => withFixture({
+  'modules/orders/infrastructure/client.ts': 'import "./client.css"; export const client = 1;',
+  'modules/orders/infrastructure/client.css': '@import "../ui/form.css";',
+  'modules/orders/ui/form.css': '.order { color: red }',
+}, result => assert.match(result.errors.join(' '), /infrastructure-import/)));
+
+test('same-module UI stylesheet imports remain permitted', () => withFixture({
+  'modules/orders/ui/panel.tsx': 'import "./panel.css"; export const panel = 1;',
+  'modules/orders/ui/panel.css': '@import "./tokens.css";',
+  'modules/orders/ui/tokens.css': ':root { --accent: red }',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Less line comments do not invent cross-module imports', () => withFixture({
+  'shared/ui/widget.ts': 'import "./widget.less"; export const widget = 1;',
+  'shared/ui/widget.less': '// @import "../../modules/orders/ui/private.less";\\n.widget { color: red }',
+  'modules/orders/ui/private.less': '.private { color: red }',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Less reference and inline imports within ownership are valid', () => withFixture({
+  'shared/ui/widget.ts': 'import "./widget.less"; export const widget = 1;',
+  'shared/ui/widget.less': '@import (reference, optional) "./tokens.less"; @import (inline) "./base.css";',
+  'shared/ui/tokens.less': '@accent: red;',
+  'shared/ui/base.css': '.base { color: red }',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Less reference and inline imports still reject private business dependencies', () => withFixture({
+  'shared/ui/widget.ts': 'import "./widget.less"; export const widget = 1;',
+  'shared/ui/widget.less': '@import (reference) "../../modules/orders/ui/private.less";',
+  'modules/orders/ui/private.less': '.private { color: red }',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('image-set quoted alternatives cannot bypass stylesheet ownership', () => withFixture({
+  'shared/ui/widget.ts': 'import "./widget.css"; export const widget = 1;',
+  'shared/ui/widget.css': '.widget { background: image-set("../../modules/orders/ui/private.svg" 2x); }',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('valid same-owned image-set choices remain legal', () => withFixture({
+  'shared/ui/widget.ts': 'import "./widget.css"; export const widget = 1;',
+  'shared/ui/widget.css': '.widget { background: image-set("./a.svg" 1x, url("./b.svg") 2x); }',
+  'shared/ui/a.svg': '<svg/>',
+  'shared/ui/b.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('unresolved image-set expressions are reported instead of silently accepted', () => withFixture({
+  'shared/ui/widget.ts': 'import "./widget.css"; export const widget = 1;',
+  'shared/ui/widget.css': '.widget { background: image-set(var(--asset) 1x); }',
+}, result => assert.match(result.errors.join(' '), /unsupported-css-image-set/)));
+
+test('missing optional Less imports are permitted without bypassing existing-file ownership', () => {
+  withFixture({
+    'shared/ui/view.ts': 'import "./view.less"; export const view = 1;',
+    'shared/ui/view.less': '@import (optional) "./missing.less";',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    'shared/ui/view.ts': 'import "./view.less"; export const view = 1;',
+    'shared/ui/view.less': '@import (optional) "../../modules/orders/ui/private.less";',
+    'modules/orders/ui/private.less': '.private { color: red }',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('Sass string interpolation cannot masquerade as a harmless fragment', () => withFixture({
+  'shared/ui/view.ts': 'import "./view.scss"; export const view = 1;',
+  'shared/ui/view.scss': '.view { background: url("#{${asset}}/private.svg"); }',
+}, result => assert.match(result.errors.join(' '), /unsupported-css-dependency/)));
+
+test('bare baseUrl imports outside src cannot masquerade as packages', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"."}}',
+  '../internal/secret.ts': 'export const secret = 1;',
+  'shared/ui/button.ts': 'import { secret } from "internal/secret"; export const button = secret;',
+}, result => assert.match(result.errors.join(' '), /outside-source-import/)));
+test('Vite helper locally shadowed as a function cannot certify aliases', () => withFixture({
+  '../vite.config.ts': 'const fileURLToPath = () => "/tmp/private"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared"}}',
+  'shared/ui/button.ts': 'export const button = 1;',
+}, result => assert.match(result.errors.join(' '), /(?:untrusted-vite-alias-helper|unsupported-vite-alias-config)/)));
+test('shadowed URL constructor is not a trusted Vite alias expression', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; const URL = () => ({ pathname: "/tmp/private" }); export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared"}}',
+  'shared/ui/button.ts': 'export const button = 1;',
+}, result => assert.match(result.errors.join(' '), /(?:untrusted-vite-alias-helper|unsupported-vite-alias-config)/)));
+test('a directly imported Node URL helper remains supported', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared"}}',
+  'shared/ui/button.ts': 'export const button = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+test('more specific path mappings win over generic mappings for source assets', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@*":["shared/ui/*"],"@orders/*":["modules/orders/*"]}}}',
+  'shared/ui/widget.ts': 'import img from "@orders/ui/private.svg"; export const imgUrl = img;',
+  'shared/ui/orders/ui/private.svg': '<svg/>',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+test('TypeScript paths do not certify stylesheet runtime targets', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":"src","paths":{"@*":["shared/ui/*"],"@orders/*":["modules/orders/*"]}}}',
+  'shared/ui/widget.ts': 'import "./widget.css"; export const widget = 1;',
+  'shared/ui/widget.css': '.widget { background: url("@orders/ui/private.svg") }',
+  'shared/ui/orders/ui/private.svg': '<svg/>',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /missing-static-asset/)));
+
+test('fixture setup preserves unbound Vite helpers without rewriting config', () => {
+  const config = 'export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared", import.meta.url)) } } };';
+  const fixture = setup({
+    '../vite.config.ts': config,
+    '../architecture.config.json': '{"viteAliases":{"@":"src/shared"}}',
+    'shared/lib/number.ts': 'export const number = 1;',
+  });
+  try {
+    assert.equal(fs.readFileSync(path.join(fixture.root, '../vite.config.ts'), 'utf8'), config);
+    assert.match(check(fixture.root).errors.join(' '), /(?:untrusted-vite-alias-helper|unsupported-vite-alias-config)/);
+  } finally { fixture.cleanup(); }
+});
+
+test('pure domain, application and model reject unknown technical folders', () => {
+  for (const layer of ['domain', 'application', 'model']) {
+    withFixture({
+      'integrations/http-client.ts': 'export const httpClient = () => 1;',
+      ['modules/orders/' + layer + '/order.ts']:
+        'import { httpClient } from "../../../integrations/http-client"; export const value = httpClient;',
+    }, result => assert.match(result.errors.join(' '), /pure-layer-imports-nonpure-source/));
+  }
+});
+
+test('pure shared rejects arbitrary top-level technical folders', () => withFixture({
+  'utils/telemetry.ts': 'export const send = () => 1;',
+  'shared/lib/metric.ts': 'import { send } from "../../utils/telemetry"; export const metric = send;',
+}, result => assert.match(result.errors.join(' '), /pure-layer-imports-nonpure-source/)));
+
+test('permitted pure module and shared dependencies remain valid', () => withFixture({
+  'shared/lib/money.ts': 'export const cents = 5;',
+  'modules/orders/domain/order.ts': 'import { cents } from "../../../shared/lib/money"; export const amount = cents;',
+  'modules/orders/application/place.ts': 'import { amount } from "../domain/order"; export const price = amount;',
+  'modules/catalog/model/product.ts': 'import { cents } from "../../../shared/lib/money"; export const price = cents;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('query-modified JSON is not pure data', () => {
+  for (const query of ['url', 'raw', 'inline', 'no-inline', 'worker', 'unknown-plugin']) {
+    withFixture({
+      'modules/orders/domain/config.json': '{"tax":1}',
+      'modules/orders/domain/order.ts': 'import config from "./config.json?' + query + '"; export const value = config;',
+    }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+  }
+});
+
+test('query-modified TypeScript source is not a pure import', () => {
+  for (const query of ['url', 'raw', 'worker', 'sharedworker']) {
+    withFixture({
+      'modules/orders/domain/source.ts': 'export const source = 1;',
+      'modules/orders/domain/order.ts': 'import source from "./source.ts?' + query + '"; export const value = source;',
+    }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+  }
+});
+
+test('new URL assets cannot masquerade as JSON configuration in pure code', () => withFixture({
+  'modules/orders/domain/config.json': '{"tax":1}',
+  'modules/orders/domain/order.ts': 'export const configUrl = new URL("./config.json", import.meta.url);',
+}, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/)));
+
+test('ordinary owned JSON configuration in domain remains allowed', () => withFixture({
+  'modules/orders/domain/config.json': '{"tax":1}',
+  'modules/orders/domain/order.ts': 'import config from "./config.json"; export const value = config;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('CommonJS Vite .cjs and .cts configurations are discovered rather than ignored', () => {
+  for (const ext of ['cjs', 'cts']) {
+    withFixture({
+      ['../vite.config.' + ext]: 'module.exports = { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+      'app/start.ts': 'export const x = 1;',
+    }, result => assert.match(result.errors.join(' '), /unverified-vite-alias/));
+  }
+});
+
+test('simple static CommonJS Vite configs without aliases are supported', () => {
+  for (const ext of ['cjs', 'cts']) withFixture({
+    ['../vite.config.' + ext]: 'module.exports = { plugins: [] };',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('dynamic or unverified CommonJS exports cannot bypass alias inspection', () => {
+  withFixture({
+    '../vite.config.cjs': 'module.exports = makeConfig();',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/));
+});
+
+test('custom Vite --config from package scripts cannot be silently ignored', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build --config custom.vite.config.ts"}}',
+  '../custom.vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('a declared custom Vite config is inspected and validated', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build --config custom.vite.config.ts","dev":"vite --config custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('custom Vite aliases require the matching mirrored policy map', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build --config custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /unverified-vite-alias/)));
+
+test('scripts with different Vite configuration choices fail closed', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build","dev":"vite --config special.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"special.vite.config.ts"}',
+  '../vite.config.ts': 'export default { plugins: [] };',
+  '../special.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('custom Vite config paths cannot escape the project or use unsupported extensions', () => {
+  withFixture({
+    '../architecture.config.json': '{"viteConfig":"../external.config.ts"}',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+  withFixture({
+    '../architecture.config.json': '{"viteConfig":"custom.invalid"}',
+    '../custom.invalid': 'export default { plugins: [] };',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('percent-encoded path segments cannot spoof a Vite alias ownership target', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared/%2e%2e/modules/orders/ui", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared/%2e%2e/modules/orders/ui"}}',
+  'shared/ui/view.ts': 'import { x } from "@/hidden"; export const view = x;',
+  'shared/%2e%2e/modules/orders/ui/hidden.ts': 'export const x = 1;',
+  'modules/orders/ui/hidden.ts': 'export const x = 2;',
+}, result => assert.match(result.errors.join(' '), /vite-alias-target-mismatch/)));
+
+test('valid URL-encoded filename segments are decoded consistently', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared/lib/spaced%20dir", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared/lib/spaced dir"}}',
+  'shared/lib/spaced dir/thing.ts': 'export const x = 1;',
+  'shared/ui/view.ts': 'import { x } from "@/thing"; export const view = x;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('invalid encoded separators in Vite file URL aliases fail closed', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@": fileURLToPath(new URL("./src/shared/%2f/private", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"@":"src/shared/%2f/private"}}',
+  'shared/ui/view.ts': 'export const view = 1;',
+}, result => assert.match(result.errors.join(' '), /unverifiable-vite-alias-url/)));
+
+test('CommonJS alias maps cannot be changed by another top-level assignment', () => withFixture({
+  '../vite.config.cjs': 'module.exports = { plugins: [] }; module.exports.resolve = { alias: { "@": "/src/modules/orders/ui" } };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/)));
+
+
+test('custom Vite config symlinks cannot escape the project', t => {
+  const fixture = setup({
+    '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+    'app/start.ts': 'export const x = 1;',
+  });
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'arch-outside-config-'));
+  try {
+    const target = path.join(outside, 'custom.vite.config.ts');
+    fs.writeFileSync(target, 'export default { plugins: [] };');
+    const link = path.join(fixture.root, '../custom.vite.config.ts');
+    try { fs.symlinkSync(target, link, 'file'); }
+    catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows symlinks');
+      throw error;
+    }
+    assert.match(check(fixture.root).errors.join(' '), /config symlink escapes/);
+  } finally {
+    fixture.cleanup();
+    fs.rmSync(outside, { force: true, recursive: true });
+  }
+});
+
+test('declared custom Vite config cannot override an npm script using defaults', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../vite.config.ts': 'export default { resolve: { alias: { "@private": "/src/modules/orders/ui" } } };',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const value = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('multiple Vite commands or --config flags in one script fail closed', () => {
+  for (const command of [
+    'vite build --config a.vite.config.ts && vite dev --config b.vite.config.ts',
+    'vite build --config a.vite.config.ts --config b.vite.config.ts',
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: command } }),
+    '../architecture.config.json': '{"viteConfig":"a.vite.config.ts"}',
+    '../a.vite.config.ts': 'export default { plugins: [] };',
+    '../b.vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const value = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('CommonJS variable declarations cannot mutate a verified Vite alias', () => {
+  for (const extra of [
+    'const changed = (module.exports.resolve.alias["@safe"] = "/src/modules/orders/ui");',
+    'const changed = Object.assign(module.exports.resolve.alias, { "@safe": "/src/modules/orders/ui" });',
+    'var changed = (() => { module.exports.resolve.alias["@safe"] = "/src/modules/orders/ui"; })();',
+  ]) withFixture({
+    '../vite.config.cjs': 'module.exports = { resolve: { alias: { "@safe": "/src/shared/lib" } } }; ' + extra,
+    '../architecture.config.json': '{"viteAliases":{"@safe":"src/shared/lib"}}',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/));
+});
+
+test('CommonJS use strict directive is inert and may precede a static export', () => withFixture({
+  '../vite.config.cjs': '"use strict"; module.exports = { plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('eslint --config in a compound npm script cannot override the Vite config path', () => withFixture({
+  '../package.json': '{"scripts":{"build":"eslint --config safe.vite.config.cjs && vite build"}}',
+  '../architecture.config.json': '{"viteConfig":"safe.vite.config.cjs"}',
+  '../safe.vite.config.cjs': 'module.exports = { plugins: [] };',
+  '../vite.config.ts': 'export default { resolve: { alias: { "@private": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('Vite --config is resolved within its own compound-shell command', () => withFixture({
+  '../package.json': '{"scripts":{"build":"eslint --config eslint.config.mjs && vite build --config safe.vite.config.cjs"}}',
+  '../architecture.config.json': '{"viteConfig":"safe.vite.config.cjs"}',
+  '../safe.vite.config.cjs': 'module.exports = { plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite JavaScript executable in npm script uses the chosen custom config', () => withFixture({
+  '../package.json': '{"scripts":{"build":"node node_modules/vite/bin/vite.js build --config custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('quoted shell separators do not split the Vite configuration command', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: { build: 'echo "not && a command" && vite build --config custom.vite.config.ts' } }),
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite -c must be mirrored rather than silently using default config', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build -c hidden.vite.config.ts"}}',
+  '../vite.config.ts': 'export default { plugins: [] };',
+  '../hidden.vite.config.ts': 'export default { resolve: { alias: { "@": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('declared Vite -c config is validated as the effective config', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build -c custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite --config=path and -c=path select declared config', () => {
+  for (const flag of ['--config=', '-c=']) withFixture({
+    '../package.json': JSON.stringify({scripts:{build:'vite build '+flag+'custom.vite.config.ts'}}),
+    '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+    '../custom.vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('duplicate Vite short/long options must fail closed', () => withFixture({
+  '../package.json': '{"scripts":{"build":"vite build -c custom.vite.config.ts --config custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('working-directory changes must not silently inspect root Vite config', () => withFixture({
+  '../package.json': '{"scripts":{"build":"cd nested && vite build"}}',
+  '../vite.config.ts': 'export default { plugins: [] };',
+  '../nested/vite.config.ts': 'export default { resolve: { alias: { "@": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('a positional Vite project root fails closed', () => {
+  for (const command of ['vite build nested', 'vite nested', 'vite dev nested', 'vite build --root nested'])
+    withFixture({
+      '../package.json': JSON.stringify({scripts:{build:command}}),
+      '../vite.config.ts': 'export default { plugins: [] };',
+      '../nested/vite.config.ts': 'export default { resolve: { alias: { "@": "/src/modules/orders/ui" } } };',
+      'app/start.ts': 'export const start = true;',
+    }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('echoed vite tokens cannot impersonate the actual local executable', () => withFixture({
+  '../package.json': '{"scripts":{"build":"echo vite --config safe.vite.config.ts && ./node_modules/.bin/vite build"}}',
+  '../architecture.config.json': '{"viteConfig":"safe.vite.config.ts"}',
+  '../safe.vite.config.ts': 'export default { plugins: [] };',
+  '../vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('local Vite executable discovers the real default aliases', () => withFixture({
+  '../package.json': '{"scripts":{"build":"echo vite --config safe.vite.config.ts && ./node_modules/.bin/vite build"}}',
+  '../vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unverified-vite-alias/)));
+
+test('unrecognized Vite wrappers and options must not silently trust defaults', () => {
+  for (const command of [
+    'npx --yes vite build -c hidden.vite.config.ts',
+    'cross-env MODE=prod vite build -c hidden.vite.config.ts',
+    'vite build -chidden.vite.config.ts',
+  ]) withFixture({
+    '../package.json': JSON.stringify({scripts:{build:command}}),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { resolve: { alias: { "@": "/src/modules/orders/ui" } } };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('a direct Node Vite CLI uses only its own -c flag', () => withFixture({
+  '../package.json': '{"scripts":{"build":"echo --config decoy.ts && node ./node_modules/vite/bin/vite.js build -c custom.vite.config.ts"}}',
+  '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+  '../custom.vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Windows-local Vite.cmd and Node CLI paths respect their own short config flag', () => {
+  const scripts = [
+    String.raw`.\node_modules\.bin\vite.cmd build -c custom.vite.config.ts`,
+    String.raw`node .\node_modules\vite\bin\vite.js build -c custom.vite.config.ts`,
+    'vite.cmd build -c custom.vite.config.ts',
+  ];
+  for (const command of scripts) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: command } }),
+    '../architecture.config.json': '{"viteConfig":"custom.vite.config.ts"}',
+    '../custom.vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('Windows-local Vite executable cannot be spoofed by earlier echo text', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    build: String.raw`echo vite --config safe.vite.config.ts && .\node_modules\.bin\vite.cmd build`,
+  } }),
+  '../architecture.config.json': '{"viteConfig":"safe.vite.config.ts"}',
+  '../safe.vite.config.ts': 'export default { plugins: [] };',
+  '../vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('embedded shell Vite builds must fail closed instead of trusting the default config', () => {
+  const embedded = [
+    "sh -c 'vite build --config hidden.vite.config.ts'",
+    "bash -lc 'vite build --config hidden.vite.config.ts'",
+    'cmd /c "vite build --config hidden.vite.config.ts"',
+    'powershell -Command "vite build --config hidden.vite.config.ts"',
+    'pwsh -Command "vite build --config hidden.vite.config.ts"',
+    "cross-env MODE=prod sh -c 'vite build --config hidden.vite.config.ts'",
+  ];
+  for (const script of embedded) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: script } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/src/modules/orders/ui" } } };',
+    'app/start.ts': 'export const started = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('opaque shell launchers still fail closed when a custom config is declared', () =>
+  withFixture({
+    '../package.json': '{"scripts":{"build":"sh -c \'vite build --config hidden.vite.config.ts\'"}}',
+    '../architecture.config.json': '{"viteConfig":"hidden.vite.config.ts"}',
+    '../hidden.vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const started = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('programmatic Vite from node evaluation is not assumed to use defaults', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      build: 'node -e \'require("vite").build({configFile:"hidden.vite.config.ts"})\'',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const started = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('Vite --host is optional while other required-value options remain required', () => {
+  const valid = [
+    'vite --host',
+    'vite dev --host',
+    'vite preview --host',
+    'vite dev --host 0.0.0.0',
+    'vite dev --host --port 3000',
+    'vite dev --host=127.0.0.1',
+    'vite dev --port 3000',
+  ];
+  for (const script of valid) withFixture({
+    '../package.json': JSON.stringify({ scripts: { dev: script } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const started = true;',
+  }, result => assert.deepEqual(result.errors, [], script));
+  for (const script of ['vite dev --port', 'vite dev --outDir', 'vite dev --host=']) {
+    withFixture({
+      '../package.json': JSON.stringify({ scripts: { dev: script } }),
+      '../vite.config.ts': 'export default { plugins: [] };',
+      'app/start.ts': 'export const started = true;',
+    }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+  }
+});
+
+test('an ambiguous host argument cannot swallow a Vite subcommand', () => withFixture({
+  '../package.json': '{"scripts":{"dev":"vite --host build"}}',
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const started = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('the reference app compound build script remains supported', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    build: 'npm run arch && tsc --noEmit && vite build --outDir ../../.vite-build/react-app --emptyOutDir',
+    arch: 'node ../../tools/check-boundaries.cjs src',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const started = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('shell command interpreters remain unsupported with intervening flags or script files', () => {
+  for (const script of [
+    "bash -e -c 'vite build -c hidden.vite.config.ts'",
+    "pwsh -File scripts/build.ps1",
+    "sh scripts/build.sh",
+    "env MODE=prod bash -e -c 'vite build'",
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: script } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const started = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('echoed shell interpreter names do not imply an executable Vite wrapper', () =>
+  withFixture({
+    '../package.json': '{"scripts":{"build":"echo bash -c hidden && vite build"}}',
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const started = true;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('unbound and shadowed defineConfig cannot certify static alias configuration', () => {
+  const configs = [
+    'function defineConfig(config) { config.resolve.alias["@safe"] = "/private"; return config; } export default defineConfig({ resolve: { alias: { "@safe": "/safe" } } });',
+    'const defineConfig = config => { config.resolve.alias["@safe"] = "/private"; return config; }; export default defineConfig({ resolve: { alias: { "@safe": "/safe" } } });',
+    'export default defineConfig({ resolve: { alias: { "@safe": "/safe" } } });',
+    'import { defineConfig } from "untrusted-helper"; export default defineConfig({ resolve: { alias: { "@safe": "/safe" } } });',
+  ];
+  for (const config of configs) withFixture({
+    '../vite.config.ts': config,
+    '../architecture.config.json': '{"viteAliases":{"@safe":"src/shared/lib"}}',
+    'shared/lib/safe.ts': 'export const safe = true;',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/));
+});
+
+test('only a directly trusted Vite or Vitest defineConfig import can wrap a static object', () => {
+  for (const origin of ['vite', 'vitest/config']) withFixture({
+    '../vite.config.ts': 'import { defineConfig } from "' + origin + '"; export default defineConfig({ plugins: [] });',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('additional executable ESM declarations cannot mutate the verified configuration', () => {
+  for (const extra of [
+    'function mutate(config) { config.resolve.alias["@safe"] = "/private"; }',
+    'const altered = (globalThis.URL = () => ({ href: "file:///private" }));',
+    'class UnexpectedSideEffect { static value = globalThis.URL = () => 1; }',
+  ]) withFixture({
+    '../vite.config.ts': 'import { defineConfig } from "vite"; ' + extra +
+      ' export default defineConfig({ resolve: { alias: { "@safe": "/safe" } } });',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/));
+});
+
+test('opaque build runners cannot quietly verify a different default Vite config', () => {
+  for (const script of [
+    'node scripts/build.mjs',
+    'tsx scripts/build.ts',
+    'node ./scripts/build.mjs --config hidden.vite.config.ts',
+    'python scripts/build.py',
+    'npm run --silent custombuild',
+    'npm run build:delegated',
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: script } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { resolve: { alias: { "@unsafe": "/private" } } };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('an external builder in a dev or namespaced build entrypoint is also rejected', () => {
+  for (const key of ['dev', 'build:prod', 'preview', 'bundle']) withFixture({
+    '../package.json': JSON.stringify({ scripts: { [key]: 'node scripts/hidden-build.js' } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('instrumentation script names cannot be repurposed to run an opaque builder', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    build: 'npm run arch && vite build',
+    arch: 'node scripts/hidden-vite.mjs',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('an explicit local boundary check followed by Vite remains supported', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    build: 'npm run arch && tsc --noEmit && vite build',
+    arch: 'node ../../tools/check-boundaries.cjs src',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('delegated architecture checker cannot hide a second build after an accepted prefix', () => {
+  const appended = [
+    'node ../../tools/check-boundaries.cjs src && node scripts/hidden-build.mjs',
+    'node ../../tools/check-boundaries.cjs src | node scripts/hidden-build.mjs',
+    'node ../../tools/check-boundaries.cjs src; node scripts/hidden-build.mjs',
+    'node ../../tools/check-boundaries.cjs src > result.txt',
+    'node ../../tools/check-boundaries.cjs src$(node scripts/hidden-build.mjs)',
+  ];
+  for (const arch of appended) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: 'npm run arch && vite build', arch } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { resolve: { alias: { "@hidden": "/private" } } };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('delegated architecture checker requires an actual complete and safe script', () => {
+  for (const arch of [
+    undefined,
+    'node scripts/hidden-build.mjs',
+    'node ../../tools/check-boundaries.cjs src --exec scripts/hidden-build.mjs',
+    'node ../../tools/check-boundaries.cjs src || true',
+  ]) withFixture({
+    '../package.json': JSON.stringify({
+      scripts: {
+        build: 'npm run arch && vite build',
+        ...(arch === undefined ? {} : { arch }),
+      },
+    }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('delegated architecture checker cannot hide builds in its npm lifecycle hooks', () => {
+  for (const hook of ['prearch', 'postarch']) withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      build: 'npm run arch && vite build',
+      arch: 'node ../../tools/check-boundaries.cjs src',
+      [hook]: 'node scripts/hidden-build.mjs',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('pre and post npm build or dev hooks cannot execute opaque builders unchecked', () => {
+  for (const hook of ['prebuild', 'postbuild', 'predev', 'postdev', 'prebuild:prod', 'postbuild:prod']) {
+    const name = hook.includes('dev') ? 'dev' : hook.endsWith(':prod') ? 'build:prod' : 'build';
+    withFixture({
+      '../package.json': JSON.stringify({ scripts: {
+        [name]: 'vite build',
+        [hook]: 'node scripts/hidden-build.mjs',
+      } }),
+      '../vite.config.ts': 'export default { plugins: [] };',
+      'app/start.ts': 'export const start = true;',
+    }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+  }
+});
+
+test('explicit Vite lifecycle hooks remain supported and must use the same config', () => {
+  withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      prebuild: 'vite build',
+      build: 'vite build',
+      postbuild: 'echo done',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      prebuild: 'vite build -c hidden.vite.config.ts',
+      build: 'vite build',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('exact delegated boundary checks are accepted for the supported names', () => {
+  for (const name of ['arch', 'check:arch', 'test:architecture']) withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      build: 'npm run ' + name + ' && vite build',
+      [name]: 'node ../../tools/check-boundaries.cjs src',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('CommonJS module.require cannot cross from shared code into module internals', () => {
+  for (const loader of [
+    'module.require("../../modules/orders/ui/private.cjs")',
+    'module["require"]("../../modules/orders/ui/private.cjs")',
+    "module['require']('../../modules/orders/ui/private.cjs')",
+  ]) withFixture({
+    'shared/lib/bridge.cjs': 'module.exports = ' + loader + ';',
+    'modules/orders/ui/private.cjs': 'module.exports = { private: true };',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('module.require creates runtime edges for CommonJS cycles', () => withFixture({
+  'modules/orders/infrastructure/a.cjs': 'module.exports = module.require("./b.cjs");',
+  'modules/orders/infrastructure/b.cjs': 'module.exports = module.require("./a.cjs");',
+}, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+test('computed, nonliteral and detached module require cannot bypass the graph', () => {
+  const loaders = [
+    ['module[operation]("./target.cjs")', /unsupported-computed-module-loader/],
+    ['module.require(target)', /unsupported-dynamic-require/],
+    ['module["require"](target)', /unsupported-dynamic-require/],
+    ['const loader = module.require; loader("./target.cjs")', /unsupported-indirect-module-require/],
+    ['module.require.call(module, "./target.cjs")', /unsupported-indirect-module-require/],
+    ['const { require: load } = module; load("./target.cjs")', /unsupported-indirect-module-require/],
+    ['require.call(null, "./target.cjs")', /unsupported-indirect-require/],
+  ];
+  for (const [content, error] of loaders) withFixture({
+    'modules/orders/infrastructure/loader.cjs': content,
+    'modules/orders/infrastructure/target.cjs': 'module.exports = {};',
+  }, result => assert.match(result.errors.join(' '), error));
+});
+
+test('Node createRequire factories cannot hide arbitrary CommonJS load edges', () => {
+  const statements = [
+    'import { createRequire } from "node:module"; const load = createRequire(import.meta.url);',
+    'import { createRequire as makeRequire } from "module"; const load = makeRequire(import.meta.url);',
+    'import * as loader from "node:module"; const load = loader.createRequire(import.meta.url);',
+    'const mod = require("node:module"); const load = mod.createRequire(__filename);',
+    'const load = require("module").createRequire(__filename);',
+  ];
+  for (const src of statements) withFixture({
+    'modules/orders/infrastructure/loader.mjs': src,
+  }, result => assert.match(result.errors.join(' '), /unsupported-node-create-require/));
+});
+
+test('ordinary literal CommonJS module.require dependencies remain supported', () => withFixture({
+  'modules/orders/infrastructure/io.cjs': 'const path = module.require("node:path"); module.exports = path.sep;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('npm verification and test orchestration hooks fail closed on opaque builders', () => {
+  for (const [main, hook] of [
+    ['verify', 'preverify'], ['verify', 'postverify'],
+    ['test', 'pretest'], ['test', 'posttest'],
+    ['lint', 'prelint'], ['build:release', 'prebuild:release'],
+    ['check:react', 'postcheck:react'],
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      [main]: 'vite build',
+      [hook]: 'node scripts/hidden-build.mjs',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('inert npm verification hooks remain compatible with explicit Vite scripts', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    preverify: 'tsc --noEmit',
+    verify: 'npm run build',
+    postverify: 'echo complete',
+    build: 'npm run arch && tsc --noEmit && vite build',
+    arch: 'node ../../tools/check-boundaries.cjs src',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('aliased CommonJS require and module identifiers must fail closed', () => {
+  const aliases = [
+    'const load = require; module.exports = load("../../modules/orders/ui/private.cjs");',
+    'const mod = module; mod.require("../../modules/orders/ui/private.cjs");',
+    'let load; load = require; module.exports = load("../../modules/orders/ui/private.cjs");',
+    'const f = (loader) => loader("../../modules/orders/ui/private.cjs"); module.exports = f(require);',
+    'function wrap(module) { return module.require("../../modules/orders/ui/private.cjs"); }',
+    'const load = (require); load("../../modules/orders/ui/private.cjs");',
+    'const { require: load } = module; load("../../modules/orders/ui/private.cjs");',
+  ];
+  for (const source of aliases) withFixture({
+    'shared/lib/bridge.cjs': source,
+    'modules/orders/ui/private.cjs': 'module.exports = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-indirect-commonjs-loader|unsupported-indirect-module-require/, source));
+});
+
+test('shadowed CommonJS loader parameters fail closed even for same-owner targets', () => {
+  for (const source of [
+    'function load(module) { return module.require("./impl.cjs"); }',
+    'function load(require) { return require("./impl.cjs"); }',
+  ]) withFixture({
+    'modules/orders/infrastructure/bridge.cjs': source,
+    'modules/orders/infrastructure/impl.cjs': 'module.exports = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-indirect-commonjs-loader/, source));
+});
+
+test('valid direct CommonJS loaders and module.exports remain supported', () => withFixture({
+  'modules/orders/infrastructure/bridge.cjs': 'const path = require("node:path"); module.exports = module.require("./impl.cjs");',
+  'modules/orders/infrastructure/impl.cjs': 'module.exports = require("node:os").platform();',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('opaque main verify and test scripts cannot hide Vite builders', () => {
+  for (const [name,cmd] of [
+    ['verify', 'node scripts/hidden-build.mjs'],
+    ['test', 'tsx scripts/hidden-build.ts'],
+    ['verify', 'npm run hidden'],
+    ['test', 'npm run nested'],
+    ['check:react', 'node scripts/build.cjs'],
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      [name]: cmd,
+      hidden: 'node scripts/hidden-build.mjs',
+      nested: 'npm run hidden',
+      build: 'vite build',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('npm script reachability includes hooks on a deeply delegated target', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    verify: 'npm run validate && npm run build',
+    validate: 'npm run lint',
+    lint: 'eslint src',
+    prelint: 'node scripts/hidden-build.mjs',
+    build: 'vite build',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('npm script recursion detects cycles before trusting configuration', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    verify: 'npm run test',
+    test: 'npm run verify',
+    build: 'vite build',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /cyclic npm script delegation/)));
+
+test('safe npm verify/test script graph remains supported', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    verify: 'npm run lint && npm test && npm run build',
+    lint: 'eslint src',
+    test: 'vitest run',
+    build: 'npm run arch && tsc --noEmit && vite build',
+    arch: 'node ../../tools/check-boundaries.cjs src',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('safe Node test and test lifecycle tools are allowed', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    pretest: 'tsc --noEmit',
+    test: 'node --test tests/*.test.mjs',
+    build: 'vite build',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('deprecated process.mainModule loaders cannot bypass ownership checks', () => {
+  for (const loader of [
+    'process.mainModule.require("../../modules/orders/ui/private.cjs")',
+    'process["mainModule"].require("../../modules/orders/ui/private.cjs")',
+    "const main = process.mainModule; main.require('../../modules/orders/ui/private.cjs')",
+  ]) withFixture({
+    'shared/lib/bridge.cjs': 'module.exports = ' + loader + ';',
+    'modules/orders/ui/private.cjs': 'module.exports = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-node-mainmodule-loader/));
+});
+
+test('npm script argument forwarding cannot change the selected Vite config', () => {
+  for (const verify of [
+    'npm run build -- --config hidden.vite.config.ts',
+    'npm run build -- -c hidden.vite.config.ts',
+    'npm run build -- --mode staging',
+    'npm run build -- --config=hidden.vite.config.ts',
+    'npm test -- --config hidden.vite.config.ts',
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      verify,
+      test: 'npm run build',
+      build: 'vite build',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { resolve: { alias: { "@private": "/src/modules/orders/ui" } } };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('npm workspace/prefix flags cannot select an unverified package build', () => {
+  for (const verify of [
+    'npm run build --workspace other',
+    'npm run build -w other',
+    'npm run build --prefix packages/other',
+    'npm --workspace other run build',
+    'npm --prefix packages/other run build',
+    'pnpm --filter other run build',
+    'yarn workspace other run build',
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: { verify, build: 'vite build' } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('nested npm argument forwarding remains unsupported', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    verify: 'npm run test',
+    test: 'npm run build -- --config hidden.vite.config.ts',
+    build: 'vite build',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/)));
+
+test('ordinary unmodified npm build delegation remains supported', () => withFixture({
+  '../package.json': JSON.stringify({ scripts: {
+    verify: 'npm run lint && npm test && npm run build',
+    lint: 'eslint src',
+    test: 'vitest run',
+    build: 'npm run arch && tsc --noEmit && vite build',
+    arch: 'node ../../tools/check-boundaries.cjs src',
+  } }),
+  '../vite.config.ts': 'export default { plugins: [] };',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('ordinary TypeScript property names named module and require do not imply a loader', () => withFixture({
+  'shared/lib/plugin.ts': [
+    'export interface PluginInfo { module: string; require: boolean; }',
+    'export class PluginState { module = "example"; require = false; }',
+    'export type PluginShape = { module: string; require?: boolean };',
+    'export function visit(module: string, require: boolean): number { return 1; }',
+    'export const plugin = { module: "example", require: true };',
+  ].join('\n'),
+}, result => assert.deepEqual(result.errors, [])));
+
+test('TypeScript method signatures and enum names are not CommonJS loaders', () => withFixture({
+  'shared/lib/plugins.ts': [
+    'export interface PluginManager { require(name: string): string; module(): string; }',
+    'export class Plugin { require(): string { return "ok"; } module(): string { return "ok"; } }',
+    'export enum Action { require = "require", module = "module" }',
+  ].join('\n'),
+}, result => assert.deepEqual(result.errors, [])));
+
+test('unsafe loader aliases remain rejected', () => {
+  for (const code of [
+    'const load = require; module.exports = load("./internal.cjs");',
+    'const load = module; load.require("./internal.cjs");',
+    'const run = () => require; module.exports = run;',
+  ]) withFixture({
+    'modules/orders/infrastructure/a.cjs': code,
+    'modules/orders/infrastructure/internal.cjs': 'module.exports = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-indirect-commonjs-loader/));
+});
+
+test('test-runner command injections and executable configuration flags fail closed', () => {
+  for (const script of [
+    'node --test --import ./scripts/hidden-build.mjs tests/unit.test.cjs',
+    'node --test --require ./scripts/hidden-build.cjs tests/unit.test.cjs',
+    'node --test --loader ./scripts/loader.mjs tests/unit.test.cjs',
+    'node --test --test-reporter ./scripts/reporter.mjs tests/unit.test.cjs',
+    'vitest run --config hidden.vite.config.ts',
+    'vitest --config hidden.vite.config.ts run',
+    'vitest run --setupFiles ./scripts/hidden-build.mjs',
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: { test: script, build: 'vite build' } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../hidden.vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-custom-config/));
+});
+
+test('documented narrow Node and Vitest test runner commands remain supported', () => {
+  for (const script of ['node --test tests/unit.test.cjs', 'node --test tests/*.test.mjs', 'vitest run']) {
+    withFixture({
+      '../package.json': JSON.stringify({ scripts: { test: script, build: 'vite build' } }),
+      '../vite.config.ts': 'export default { plugins: [] };',
+      'app/start.ts': 'export const start = true;',
+    }, result => assert.deepEqual(result.errors, []));
+  }
+});
+
+test('destructured domain properties called module and require remain ordinary data', () => withFixture({
+  'shared/lib/destructure.ts': [
+    'const config = { module: "catalog", require: true };',
+    'const { module: moduleName, require: needed } = config;',
+    'export const description = moduleName + String(needed);',
+  ].join('\n'),
+}, result => assert.deepEqual(result.errors, [])));
+
+test('typed local module and require parameters remain accessible inside their functions', () => withFixture({
+  'shared/lib/local-names.ts': [
+    'export function label(module: string): string { return module.toUpperCase(); }',
+    'export function enabled(require: boolean): boolean { return !require; }',
+    'export function combine(module: string, require: boolean) {',
+    '  return module + String(require);',
+    '}',
+    'export function description() { const module = "catalog"; return module.toUpperCase(); }',
+  ].join('\n'),
+}, result => assert.deepEqual(result.errors, [])));
+
+test('unsafe runtime loader aliases are still rejected with typed names supported', () => {
+  for (const statement of [
+    'const loader = require; module.exports = loader("./private.cjs");',
+    'const loader = module; loader.require("./private.cjs");',
+    'const passed = (loader) => loader("./private.cjs"); passed(require);',
+  ]) withFixture({
+    'modules/orders/infrastructure/unsafe.cjs': statement,
+    'modules/orders/infrastructure/private.cjs': 'module.exports = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-indirect-commonjs-loader/));
+});
+
+test('a local untyped loader binding cannot borrow safety from an outer primitive binding', () => withFixture({
+  'shared/lib/shadowed.ts': [
+    'const module = "harmless";',
+    'export function inspect(module: unknown) { return module; }',
+  ].join('\n'),
+}, result => assert.match(result.errors.join(' '), /unsupported-indirect-commonjs-loader/)));
+
+test('typed local primitive bindings permit domain vocabulary without allowing bare loader references', () => withFixture({
+  'shared/lib/typed-local.ts': [
+    'const module: string = "catalog";',
+    'const require: boolean = false;',
+    'export const details = module.toUpperCase() + String(require);',
+  ].join('\n'),
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite plugins cannot silently change statically inspected aliases', () => {
+  for (const plugin of [
+    "{ name: 'override', config() { return { resolve: { alias: { '@safe': '/elsewhere' } } }; } }",
+    'react()',
+    'unknownPlugin',
+  ]) withFixture({
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@safe": fileURLToPath(new URL("./src/shared/lib/safe.ts", import.meta.url)) } }, plugins: [' + plugin + '] };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { '@safe': 'src/shared/lib/safe.ts' } }),
+    'shared/lib/safe.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unverifiable-vite-plugin-alias/));
+});
+
+test('empty plugin array does not block an otherwise valid alias map', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@safe": fileURLToPath(new URL("./src/shared/lib/safe.ts", import.meta.url)) } }, plugins: [] };',
+  '../architecture.config.json': JSON.stringify({ viteAliases: { '@safe': 'src/shared/lib/safe.ts' } }),
+  'shared/lib/safe.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('escaped CSS identifiers cannot bypass complete ownership enforcement', () => {
+  for (const css of ["@im\\70ort \"../../modules/orders/ui/private.css\";",".widget { background: u\\72l(\"../../modules/orders/ui/private.svg\"); }"]) withFixture({
+    'shared/ui/panel.css': css,
+    'modules/orders/ui/private.css': '.private { color: red }',
+    'modules/orders/ui/private.svg': '<svg/>',
+    'shared/ui/view.ts': 'import "./panel.css"; export const view = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-css-escaped-identifier/));
+});
+
+test('root verify includes orders architecture check', () => {
+  const rootManifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  assert.equal(rootManifest.scripts['check:orders'], 'node tools/check-boundaries.cjs examples/orders/src');
+  assert.match(rootManifest.scripts.verify, /npm run check:orders/);
+});
+
+test('plugin-added aliases fail even when no static alias map exists', () => {
+  for (const plugins of [
+    "[{ name: 'inject', config() { return { resolve: { alias: { '@orders': '/elsewhere' } } }; } }]",
+    '[untrustedPlugin()]',
+    'getPlugins()',
+  ]) withFixture({
+    '../vite.config.ts': 'export default { plugins: ' + plugins + ' };',
+    'shared/ui/view.ts': 'import value from "@orders/private"; export const view = value;',
+    'modules/orders/ui/private.ts': 'export const secret = true;',
+  }, result => assert.match(result.errors.join(' '), /unverifiable-vite-plugin-alias/));
+});
+
+test('pinned unconfigured React Fast Refresh plugin is a narrow exception', () => withFixture({
+  '../vite.config.ts': 'import react from "@vitejs/plugin-react"; export default { plugins: [react()] };',
+  '../package.json': JSON.stringify({ devDependencies: { '@vitejs/plugin-react': '4.7.0' } }),
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('React plugin exception refuses changed versions, options, imports and extra plugins', () => {
+  const cfg = 'import react from "@vitejs/plugin-react"; export default { plugins: [react()] };';
+  for (const [config, manifest] of [
+    [cfg, { devDependencies: { '@vitejs/plugin-react': '^4.7.0' } }],
+    [cfg.replace('react()', 'react({})'), { devDependencies: { '@vitejs/plugin-react': '4.7.0' } }],
+    [cfg.replace('[react()]', '[react(), injected()]'), { devDependencies: { '@vitejs/plugin-react': '4.7.0' } }],
+    [cfg.replace('import react from "@vitejs/plugin-react"', 'import react from "./unsafe"'), { devDependencies: { '@vitejs/plugin-react': '4.7.0' } }],
+  ]) withFixture({
+    '../vite.config.ts': config,
+    '../package.json': JSON.stringify(manifest),
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverifiable-vite-plugin-alias|unsupported-vite-alias-config: additional top-level executable declarations/));
+});
+
+test('Vite custom root and bundler entrypoint overrides cannot hide unscanned code', () => {
+  for (const body of [
+    'root: "../unverified-app"',
+    'root: makeRoot()',
+    'build: { rollupOptions: { input: "../unverified-app/index.html" } }',
+    'build: { lib: { entry: "../unverified-app/index.ts" } }',
+    'build: { ssr: "../unverified-app/index.ts" }',
+    'environments: { client: { build: { rollupOptions: { input: "../outside.ts" } } } }',
+    'builder: customBuilder()',
+  ]) withFixture({
+    '../vite.config.ts': 'export default { ' + body + ' };',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-build-entry/));
+});
+
+test('default root and empty build block remain within supported static grammar', () => withFixture({
+  '../vite.config.ts': 'export default { root: ".", build: {}, plugins: [] };',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite HTML source scope and executable entries retain specific error identifiers', () => {
+  for (const [name, html, expected] of [
+    ['outside JS', '<script type="module" src="/other/main.ts"></script>', /outside-source-html-import/],
+    ['inline JS', '<script type="module">import "../other/main.ts"</script>', /unsupported-vite-html-entry/],
+    ['outside style', '<link rel="stylesheet" href="/other/styles.css">', /outside-source-html-import/],
+    ['classic script', '<script src="/src/main.ts"></script>', /unsupported-vite-html-entry/],
+  ]) withFixture({
+    '../vite.config.ts': 'export default { plugins: [] };',
+    '../index.html': html,
+    '../other/main.ts': 'export const main = true;',
+    '../other/styles.css': '.x {}',
+    'app/start.ts': 'export const x = 1;',
+  }, result => assert.match(result.errors.join(' '), expected, name));
+});
+test('Vite default HTML entries inside scanned source remain supported', () => withFixture({
+  '../vite.config.ts': 'export default { plugins: [] };',
+  '../index.html': '<!doctype html><script type="module" src="/src/app/start.ts"></script>',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('default Vite HTML entry cannot bypass checking even without vite.config', () => withFixture({
+  '../index.html': '<script type="module" src="/outside/main.ts"></script>',
+  '../outside/main.ts': 'export const x = 1;',
+  'app/start.ts': 'export const x = 1;',
+}, result => assert.match(result.errors.join(' '), /outside-source-html-import/)));
+
+test('Vite post-source JS/Sass dependency injection never receives static source-graph approval', () => {
+  for (const setting of [
+    'esbuild: { jsxInject: "import \'../../modules/orders/ui/private.ts\';" }',
+    'css: { preprocessorOptions: { scss: { additionalData: "@use \'../../modules/orders/ui/private.scss\';" } } }',
+    'esbuild: makeEsbuildOptions()',
+    'css: makeStyleOptions()',
+    'css: { modules: { generateScopedName: "x" } }',
+  ]) withFixture({
+    '../vite.config.ts': 'export default { plugins: [], ' + setting + ' };',
+    'shared/ui/component.tsx': 'export const View = () => null;',
+    'modules/orders/ui/private.ts': 'export const secret = true;',
+  }, result => assert.match(result.errors.join(' '), /unverifiable-vite-transforms/, setting));
+});
+
+test('empty transform options and explicitly disabled esbuild remain safe static configurations', () => {
+  for (const setting of ['esbuild: {}, css: {}', 'esbuild: false']) withFixture({
+    '../vite.config.ts': 'export default { plugins: [], ' + setting + ' };',
+    'app/start.ts': 'export const value = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('HTML event handlers, inline styles and executable URLs fail closed', () => {
+  for (const [name, html] of [["onload","<script type=\"module\" src=\"/src/app/start.ts\" onload=\"import('/src/modules/orders/ui/private.ts')\"></script>"],["onerror","<img onerror=\"import('/src/modules/orders/ui/private.ts')\"><script type=\"module\" src=\"/src/app/start.ts\"></script>"],["onclick","<button onclick=\"import('/src/modules/orders/ui/private.ts')\">Click</button><script type=\"module\" src=\"/src/app/start.ts\"></script>"],["quoted greater-than","<button data-example=\"a > b\" onpointerdown=\"import('/src/modules/orders/ui/private.ts')\">Click</button>"],["inline CSS import","<style>@import url(\"/src/modules/orders/ui/private.css\");</style><script type=\"module\" src=\"/src/app/start.ts\"></script>"],["inline CSS URL","<style>.x{background:url(\"/src/modules/orders/ui/private.css\")}</style>"],["CSS style attribute","<div style=\"background:url('/src/modules/orders/ui/private.css')\"></div>"],["javascript URL","<a href=\"javascript:import('/src/modules/orders/ui/private.ts')\">Click</a>"],["encoded javascript","<a href=\"java&#x73;cript:alert(1)\">Click</a>"],["srcdoc","<iframe srcdoc=\"<script>import('/src/private.ts')</script>\"></iframe>"],["import map","<script type=\"importmap\">{\"imports\":{\"x\":\"/src/modules/orders/ui/private.ts\"}}</script>"],["meta refresh","<meta http-equiv=\"refresh\" content=\"0;url=javascript:alert(1)\">"],["inline stylesheet attribute","<p STYLE=\"color:red\">hello</p>"]]) withFixture({
+    '../index.html': html,
+    'app/start.ts': 'export const start = true;',
+    'app/base.css': 'body { color: black; }',
+    'modules/orders/ui/private.ts': 'export const privateValue = true;',
+    'modules/orders/ui/private.css': '.private { color: red; }',
+  }, result => assert.match(result.errors.join(' '),
+    /unsupported-vite-html-(?:entry|inline|url)/, name));
+});
+
+test('ordinary HTML attributes, inert scripts and checked stylesheet entries remain valid', () => {
+  for (const html of ["<div data-example=\"x > y\" aria-label=\"Hello\">Hello</div><script type=\"module\" src=\"/src/app/start.ts\"></script>","<!-- <style>@import url(\"evil.css\");</style> --><script type=\"module\" src=\"/src/app/start.ts\"></script>","<link rel=\"stylesheet\" href=\"/src/app/base.css\"><script type=\"application/json\">{\"hello\":\"world\"}</script><script type=\"module\" src=\"/src/app/start.ts\"></script>","<div data-label=\"onerror=not-an-attribute\"></div><script type=\"module\" src=\"/src/app/start.ts\"></script>"]) withFixture({
+    '../index.html': html,
+    'app/start.ts': 'export const start = true;',
+    'app/base.css': 'body { color: black; }',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+
+test('browser RCDATA cannot mask script, event or CSS violations as comments', () => {
+  const main = '<script type="module" src="/src/app/start.ts"></script>';
+  for (const html of [
+    '<title><!--</title><style>@import "/src/modules/orders/ui/private.css";</style>-->' + main,
+    '<textarea><!--</textarea><script type="module" src="/outside/evil.ts"></script>-->' + main,
+    '<title><!--</title><button onclick="import(\'/src/private.ts\')">Go</button>-->' + main,
+  ]) withFixture({
+    '../index.html': html,
+    'app/start.ts': 'export const start = true;',
+    'modules/orders/ui/private.css': '.x { color: red; }',
+  }, result => assert.match(result.errors.join(' '),
+    /unsupported-vite-html-(?:inline|entry|url)|missing-html-asset/, html));
+});
+
+test('Vite public directory cannot silently ship executable or unknown files', () => {
+  for (const name of ['hidden.html', 'evil.js', 'style.css', 'image.svg', 'unverified.xyz']) {
+    withFixture({
+      ['../public/' + name]: '<script>alert(1)</script>',
+      'app/start.ts': 'export const start = true;',
+    }, result => assert.match(result.errors.join(' '),
+      /unverified-vite-public-dir: unsupported public asset/, name));
+  }
+});
+
+test('raster public assets and default public HTML references are checked', () => withFixture({
+  '../public/images/logo.png': 'test binary fixture',
+  '../index.html': '<img src="/images/logo.png"><script type="module" src="/src/app/start.ts"></script>',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('HTML private asset and responsive image references cannot bypass ownership', () => {
+  for (const image of [
+    '<img src="/src/modules/orders/ui/private.svg">',
+    '<img srcset="/src/modules/orders/ui/private.svg 1x">',
+    '<source src="/src/modules/orders/ui/private.svg">',
+    '<link rel="icon" href="/src/modules/orders/ui/private.svg">',
+  ]) withFixture({
+    '../index.html': image + '<script type="module" src="/src/app/start.ts"></script>',
+    'app/start.ts': 'export const start = true;',
+    'modules/orders/ui/private.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/, image));
+});
+
+test('HTML references missing or outside-source files fail closed', () => {
+  for (const html of [
+    '<img src="/not-found.png">',
+    '<script type="module" src="/unscanned.ts"></script>',
+  ]) withFixture({
+    '../index.html': html,
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /missing-html-asset/, html));
+});
+
+test('Vite publicDir cannot select an unchecked sibling directory', () => {
+  for (const setting of ['"../elsewhere"', 'makePublicDir()', '"assets"']) withFixture({
+    '../vite.config.ts': 'export default { plugins: [], publicDir: ' + setting + ' };',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-public-dir/));
+});
+
+test('publicDir:false still rejects dev-servable HTML under the project-root public folder', () =>
+  withFixture({
+    '../vite.config.ts': 'export default { plugins: [], publicDir: false };',
+    '../public/hidden.html': '<script type="module" src="/src/modules/orders/ui/private.ts"></script>',
+    '../index.html': '<script type="module" src="/src/app/start.ts"></script>',
+    'app/start.ts': 'export const start = true;',
+    'modules/orders/ui/private.ts': 'export const hidden = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-html-page: secondary HTML entry public\/hidden\.html/)));
+
+test('publicDir:false permits unused inert public assets but not HTML', () => withFixture({
+  '../vite.config.ts': 'export default { plugins: [], publicDir: false };',
+  '../public/unused.png': 'placeholder for an unused image',
+  'app/start.ts': 'export const start = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('valid quoted greater-than in a module script attribute must remain supported', () => {
+  for (const html of [
+    '<script type="module" src="/src/app/start.ts" data-note="a > b"></script>',
+    "<script data-note='a > b' src='/src/app/start.ts' type='module'></script>",
+  ]) withFixture({
+    '../index.html': html,
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('HTML-embedded browsing contexts are unsupported until their graphs are audited', () => {
+  for (const element of [
+    '<iframe src="/hidden.html"></iframe>',
+    '<object data="/hidden.html"></object>',
+  ]) withFixture({
+    '../index.html': element,
+    '../public/hidden.html': '<script type="module" src="/src/private.ts"></script>',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-vite-html-embed/, element));
+});
+
+test('worker-only Vite transforms and Rollup inputs cannot hide unchecked imports', () => {
+  for (const worker of [
+    'worker: { plugins: () => [{ name: "inject", transform(code) { return code; } }] }',
+    'worker: { plugins: loadPlugins() }',
+    'worker: { rollupOptions: { input: "./outside/worker.ts" } }',
+    'worker: getWorkerConfig()',
+    'worker: { format: "es" }',
+  ]) withFixture({
+    '../vite.config.ts': 'export default { plugins: [], ' + worker + ' };',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unverifiable-vite-worker-graph/, worker));
+});
+
+test('an inert empty Vite worker option object remains supported', () => withFixture({
+  '../vite.config.ts': 'export default { plugins: [], worker: {} };',
+  'app/start.ts': 'export const ready = true;',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite additional dev HTML pages fail closed outside the checked index', () => {
+  for (const file of ['about.html', 'blog/index.html', 'src/app/hidden.html']) withFixture({
+    ['../' + file]: '<script type="module" src="/src/modules/orders/ui/private.ts"></script>',
+    '../index.html': '<script type="module" src="/src/app/start.ts"></script>',
+    'app/start.ts': 'export const ready = true;',
+    'modules/orders/ui/private.ts': 'export const hidden = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-html-page/, file));
+});
+
+test('root generated-output HTML is rejected because Vite can still serve it in development', () => {
+  for (const page of ['dist/built.html', 'build/hidden.html', 'coverage/report.html',
+    '.next/hidden.html', '.vite/hidden.html']) withFixture({
+    '../index.html': '<script type="module" src="/src/app/start.ts"></script>',
+    ['../' + page]: '<script type="module" src="/src/modules/orders/ui/private.ts"></script>',
+    'app/start.ts': 'export const ready = true;',
+    'modules/orders/ui/private.ts': 'export const privateValue = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-html-page/, page));
+});
+
+test('root node_modules vendor HTML is excluded from first-party page discovery', () =>
+  withFixture({
+    '../index.html': '<script type="module" src="/src/app/start.ts"></script>',
+    '../node_modules/pkg/demo.html': '<script type="module" src="/outside.ts"></script>',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('Vite metadata and responsive link references enforce physical module ownership', () => {
+  for (const html of [
+    '<meta property="og:image" content="/src/modules/orders/ui/private.svg">',
+    '<meta name="twitter:image" content="/src/modules/orders/ui/private.svg">',
+    '<link rel="preload" as="image" href="/src/app/safe.png" ' +
+      'imagesrcset="/src/modules/orders/ui/private.svg 2x">',
+  ]) withFixture({
+    '../index.html': html,
+    'app/start.ts': 'export const ready = true;',
+    'app/safe.png': 'placeholder',
+    'modules/orders/ui/private.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/, html));
+});
+
+test('nested directories sharing generated or public names still expose Vite HTML', () => {
+  for (const file of [
+    'docs/public/hidden.html',
+    'pages/dist/hidden.html',
+    'site/build/hidden.html',
+    'packages/node_modules/hidden.html',
+    'nested/coverage/index.html',
+  ]) withFixture({
+    ['../' + file]: '<script type="module" src="/src/modules/orders/ui/private.ts"></script>',
+    '../index.html': '<script type="module" src="/src/app/start.ts"></script>',
+    'app/start.ts': 'export const ready = true;',
+    'modules/orders/ui/private.ts': 'export const hidden = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-html-page/, file));
+});
+
+test('secondary-page scanning reports a dangling unrelated symlink without throwing', t => {
+  const fixture = setup({ 'app/start.ts': 'export const ready = true;' });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, '..', 'not-present'),
+        path.join(fixture.root, '..', 'dangling-link'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows symlinks');
+      throw error;
+    }
+    const result = check(fixture.root);
+    assert.match(result.errors.join(' '), /unverified-vite-html-page: unresolved symlink dangling-link/);
+  } finally { fixture.cleanup(); }
+});
+
+test('secondary-page scanning ignores a valid non-HTML file symlink', t => {
+  const fixture = setup({
+    '../README.md': 'harmless documentation',
+    'app/start.ts': 'export const ready = true;',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, '..', 'README.md'),
+        path.join(fixture.root, '..', 'README-link'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows symlinks');
+      throw error;
+    }
+    assert.deepEqual(check(fixture.root).errors, []);
+  } finally { fixture.cleanup(); }
+});
+
+test('secondary-page scanning rejects symlinked directories and linked HTML documents', t => {
+  const fixture = setup({
+    'app/start.ts': 'export const ready = true;',
+  });
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'react-arch-html-'));
+  try {
+    fs.writeFileSync(path.join(outside, 'hidden.html'), '<script type="module" src="/private.js"></script>');
+    try {
+      fs.symlinkSync(outside, path.join(fixture.root, '..', 'html-alias'), 'dir');
+      fs.symlinkSync(path.join(outside, 'hidden.html'),
+        path.join(fixture.root, '..', 'page-alias.html'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows symlinks');
+      throw error;
+    }
+    const result = check(fixture.root);
+    assert.match(result.errors.join(' '), /unverified-vite-html-page: symlinked HTML or directory html-alias/);
+    assert.match(result.errors.join(' '), /unverified-vite-html-page: symlinked HTML entry page-alias\.html/);
+  } finally { fixture.cleanup(); fs.rmSync(outside, { force: true, recursive: true }); }
+});
+
+
+test('CSS remote and data stylesheet imports fail closed, unlike decorative remote media', () => {
+  for (const [file, contents] of [
+    ['site.css', '@import "https://cdn.example.org/unchecked.css";'],
+    ['site.css', '@import "http://cdn.example.org/unchecked.css";'],
+    ['site.css', '@import url("//cdn.example.org/unchecked.css");'],
+    ['site.css', '@import "data:text/css,@import%20url(https://cdn.example.org/unchecked.css)";'],
+    ['site.scss', '@use "https://cdn.example.org/unchecked.scss";'],
+    ['site.scss', '@forward "https://cdn.example.org/unchecked.scss";'],
+  ]) withFixture({
+    ['shared/ui/' + file]: contents,
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-css-external-stylesheet: shared\/ui\/site\.(?:css|scss)/, contents));
+});
+
+test('remote image url() and Sass built-in modules remain supported CSS resources', () =>
+  withFixture({
+    'shared/ui/theme.css': '.logo { background: url("https://example.org/logo.png"); }',
+    'modules/orders/ui/math.scss': '@use "sass:math"; .value { width: math.div(10px, 2); }',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('dangling TypeScript and CSS file symlinks report diagnostics, not thrown exceptions', t => {
+  const fixture = setup({ 'app/start.ts': 'export const ready = true;' });
+  try {
+    try {
+      fs.mkdirSync(path.join(fixture.root, 'shared', 'ui'), { recursive: true });
+      fs.symlinkSync(path.join(fixture.root, 'shared', 'ui', 'gone.ts'),
+        path.join(fixture.root, 'shared', 'ui', 'dangling.ts'), 'file');
+      fs.symlinkSync(path.join(fixture.root, 'shared', 'ui', 'gone.css'),
+        path.join(fixture.root, 'shared', 'ui', 'dangling.css'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows file symlinks');
+      throw error;
+    }
+    const result = check(fixture.root);
+    assert.match(result.errors.join(' '), /unresolved-source-symlink: shared\/ui\/dangling\.ts/);
+    assert.match(result.errors.join(' '), /unresolved-stylesheet-symlink: shared\/ui\/dangling\.css/);
+  } finally { fixture.cleanup(); }
+});
+
+test('stylesheet aliases cannot impersonate another module or layer', t => {
+  for (const [name, alias, target] of [
+    ['shared to module', 'shared/ui/alias.css', 'modules/orders/ui/private.css'],
+    ['cross-module', 'modules/payments/ui/alias.css', 'modules/orders/ui/private.css'],
+    ['cross-layer', 'modules/orders/ui/alias.css', 'modules/orders/domain/private.css'],
+  ]) {
+    const fixture = setup({
+      'app/start.ts': 'export const ready = true;',
+      [target]: '.private { display: block; }',
+    });
+    try {
+      const aliasFile = path.join(fixture.root, alias);
+      fs.mkdirSync(path.dirname(aliasFile), { recursive: true });
+      try {
+        fs.symlinkSync(path.join(fixture.root, target), aliasFile, 'file');
+      } catch (error) {
+        if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) {
+          return t.skip('OS disallows file symlinks');
+        }
+        throw error;
+      }
+      assert.match(check(fixture.root).errors.join(' '),
+        /stylesheet-symlink-ownership:/, name);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test('stylesheet aliases outside the source root fail closed', t => {
+  const fixture = setup({
+    'app/start.ts': 'export const ready = true;',
+    '../unowned.css': '.outside { display: block; }',
+  });
+  try {
+    const alias = path.join(fixture.root, 'shared/ui/alias.css');
+    fs.mkdirSync(path.dirname(alias), { recursive: true });
+    try {
+      fs.symlinkSync(path.join(fixture.root, '../unowned.css'), alias, 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) {
+        return t.skip('OS disallows file symlinks');
+      }
+      throw error;
+    }
+    assert.match(check(fixture.root).errors.join(' '), /outside-source-symlink:/);
+  } finally { fixture.cleanup(); }
+});
+
+test('valid same-owner stylesheet symlink preserves ownership validation', t => {
+  const fixture = setup({
+    'shared/ui/base.css': '.notice { display: block; }',
+    'app/start.ts': 'export const ready = true;',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, 'shared', 'ui', 'base.css'),
+        path.join(fixture.root, 'shared', 'ui', 'alias.css'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows file symlinks');
+      throw error;
+    }
+    assert.deepEqual(check(fixture.root).errors, []);
+  } finally { fixture.cleanup(); }
+});
+
+test('nested generated-looking folders never hide source dependencies', () => {
+  for (const folder of ['dist', 'coverage', 'build', 'node_modules']) withFixture({
+    ['shared/lib/' + folder + '/private.ts']:
+      'import { secret } from "../../../modules/orders/ui/private"; export const leak = secret;',
+    'modules/orders/ui/private.ts': 'export const secret = true;',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/, folder));
+});
+
+test('nested CSS dependencies are validated transitively regardless of folder names', () => {
+  for (const folder of ['dist', 'coverage', 'build', 'node_modules']) withFixture({
+    'shared/ui/main.css': '@import "./' + folder + '/bridge.css";',
+    ['shared/ui/' + folder + '/bridge.css']:
+      '@import "../../../modules/orders/ui/private.css";',
+    'modules/orders/ui/private.css': '.private { display: block }',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/, folder));
+});
+
+test('src root generated-looking directories remain in source and CSS discovery', () =>
+  withFixture({
+    'dist/private.ts': 'export const privateSource = 1;',
+    'coverage/report.css': '.display { color: blue }',
+    'app/start.ts': 'export const start = true;',
+  }, result => {
+    assert.equal(result.count, 2);
+    assert.deepEqual(result.errors, []);
+  }));
+
+test('disabled Vite publicDir still checks potentially active JS/CSS/SVG under public', () => {
+  for (const [file, contents] of [
+    ['unverified.js', 'import "/src/modules/orders/ui/private.ts";'],
+    ['unverified.css', '@import "/src/modules/orders/ui/private.css";'],
+    ['unverified.svg', '<svg><script>alert(1)</script></svg>'],
+    ['nested/hidden.js', 'export const leak = true;'],
+  ]) withFixture({
+    '../vite.config.ts': 'export default { plugins: [], publicDir: false };',
+    ['../public/' + file]: contents,
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-public-dir/, file));
+});
+
+test('disabled Vite publicDir still permits inert raster/font assets', () =>
+  withFixture({
+    '../vite.config.ts': 'export default { plugins: [], publicDir: false };',
+    '../public/logo.png': 'raster placeholder',
+    '../public/nested/font.woff2': 'font placeholder',
+    'app/start.ts': 'export const start = true;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+
+test('outside-source paths under arbitrary vendor node_modules are not external packages', () => {
+  for (const contents of [
+    'import { privateValue } from "../../vendor/node_modules/private"; export const leaked = privateValue;',
+    'export { privateValue } from "../../vendor/node_modules/private";',
+    'export const load = () => import("../../vendor/node_modules/private");',
+  ]) withFixture({
+    '../vendor/node_modules/private.ts': 'export const privateValue = 42;',
+    'app/start.ts': contents,
+  }, result => assert.match(result.errors.join(' '), /outside-source-import/, contents));
+});
+
+test('tsconfig aliases cannot disguise vendor node_modules as installed packages', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: '.', paths: { '@vendor/*': ['vendor/node_modules/*'] },
+    } }),
+    '../vendor/node_modules/secret.ts': 'export const secret = true;',
+    'app/start.ts': 'import { secret } from "@vendor/secret"; export const leaked = secret;',
+  }, result => assert.match(result.errors.join(' '), /outside-source-import/)));
+
+test('bare-looking baseUrl imports into unrelated vendor folders fail closed', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.' } }),
+    '../vendor/node_modules/private.ts': 'export const privateValue = 9;',
+    'app/start.ts': 'import { privateValue } from "vendor/node_modules/private"; export const leaked = privateValue;',
+  }, result => assert.match(result.errors.join(' '), /outside-source-import/)));
+
+test('first-party node_modules-named folders remain ordinary owned source', () =>
+  withFixture({
+    'shared/lib/node_modules/math.ts': 'export const add = (a: number, b: number) => a + b;',
+    'shared/lib/calculate.ts': 'import { add } from "./node_modules/math"; export const total = add(2, 3);',
+    'app/start.ts': 'import { total } from "../shared/lib/calculate"; export const value = total;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('true bare dependencies in an ancestor node_modules remain external packages', () =>
+  withFixture({
+    '../node_modules/safe-demo-package/package.json':
+      JSON.stringify({ name: 'safe-demo-package', version: '1.0.0', types: 'index.d.ts' }),
+    '../node_modules/safe-demo-package/index.d.ts': 'export declare const value: number;',
+    'app/start.ts': 'import { value } from "safe-demo-package"; export const consumer = value;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('native reference build output is outside the Vite-served project root', () => {
+  const appRoot = path.resolve(__dirname, '../examples/react-app');
+  const manifest = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
+  const match = /vite build --outDir ([^\s]+) --emptyOutDir$/.exec(manifest.scripts.build);
+  assert.ok(match, 'native build must use a clean external output');
+  const out = path.resolve(appRoot, match[1]);
+  assert.notEqual(out, appRoot);
+  assert.equal(out.startsWith(appRoot + path.sep), false,
+    'generated output must not appear under the dev-served project root');
+  assert.equal(manifest.scripts.preview, 'vite preview --outDir ' + match[1]);
+});
+
+test('architecture verification remains stable after external generated output', () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'react-arch-repeat-build-'));
+  const appRoot = path.join(sandbox, 'examples', 'react-app');
+  const src = path.join(appRoot, 'src');
+  const output = path.join(sandbox, '.vite-build', 'react-app');
+  try {
+    fs.mkdirSync(path.join(src, 'app'), { recursive: true });
+    fs.writeFileSync(path.join(src, 'app', 'start.ts'), 'export const started = true;');
+    const before = check(src);
+    assert.deepEqual(before.errors, []);
+    fs.mkdirSync(output, { recursive: true });
+    fs.writeFileSync(path.join(output, 'index.html'),
+      '<script type="module" src="/src/modules/orders/ui/private.ts"></script>');
+    const after = check(src);
+    assert.deepEqual(after.errors, []);
+    assert.deepEqual(after, before);
+    fs.mkdirSync(path.join(appRoot, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(appRoot, 'dist', 'index.html'), '<h1>Unchecked dev entry</h1>');
+    assert.match(check(src).errors.join(' '),
+      /unverified-vite-html-page: secondary HTML entry dist\/index\.html/);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+
+test('installed workspace symlinks are trusted for both TypeScript symlink modes', t => {
+  const ts = require('typescript');
+  for (const preserveSymlinks of [false, true]) {
+    const fixture = setup({
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler', preserveSymlinks,
+      } }),
+      '../packages/workspace-package/package.json':
+        JSON.stringify({ name: 'workspace-package', version: '1.0.0', types: 'index.d.ts' }),
+      '../packages/workspace-package/index.d.ts': 'export declare const value: number;',
+      'app/start.ts': 'import { value } from "workspace-package"; export const consumer = value;',
+    });
+    try {
+      const project = path.dirname(fixture.root);
+      const logical = path.join(project, 'node_modules', 'workspace-package');
+      fs.mkdirSync(path.dirname(logical), { recursive: true });
+      try {
+        fs.symlinkSync(path.join(project, 'packages', 'workspace-package'), logical, 'dir');
+      } catch (error) {
+        if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows directory links');
+        throw error;
+      }
+      const source = path.join(fixture.root, 'app', 'start.ts');
+      const options = { module: ts.ModuleKind.ESNext,
+        moduleResolution: ts.ModuleResolutionKind.Bundler, preserveSymlinks };
+      const resolution = ts.resolveModuleName('workspace-package', source, options, ts.sys).resolvedModule;
+      assert.ok(resolution?.isExternalLibraryImport, 'TypeScript should recognize installed package');
+      assert.equal(
+        Boolean(resolution.originalPath),
+        !preserveSymlinks,
+        'originalPath must carry the logical node_modules path for default resolution',
+      );
+      assert.deepEqual(check(fixture.root).errors, [], 'preserveSymlinks=' + preserveSymlinks);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test('scoped installed workspace packages retain logical package provenance', t => {
+  const fixture = setup({
+    '../packages/scoped-package/package.json':
+      JSON.stringify({ name: '@example/scoped-package', version: '1.0.0', types: 'index.d.ts' }),
+    '../packages/scoped-package/index.d.ts': 'export declare const value: number;',
+    'app/start.ts':
+      'import { value } from "@example/scoped-package"; export const consumer = value;',
+  });
+  try {
+    const project = path.dirname(fixture.root);
+    const logical = path.join(project, 'node_modules', '@example', 'scoped-package');
+    fs.mkdirSync(path.dirname(logical), { recursive: true });
+    try {
+      fs.symlinkSync(path.join(project, 'packages', 'scoped-package'), logical, 'dir');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows directory links');
+      throw error;
+    }
+    assert.deepEqual(check(fixture.root).errors, []);
+  } finally { fixture.cleanup(); }
+});
+
+test('a project alias into a legitimate linked package is still an explicit local edge', t => {
+  const fixture = setup({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+      baseUrl: '.', paths: { '@internal/*': ['node_modules/workspace-package/*'] },
+    } }),
+    '../packages/workspace-package/package.json':
+      JSON.stringify({ name: 'workspace-package', version: '1.0.0', types: 'index.d.ts' }),
+    '../packages/workspace-package/index.d.ts': 'export declare const value: number;',
+    'app/start.ts': 'import { value } from "@internal/index"; export const consumer = value;',
+  });
+  try {
+    const project = path.dirname(fixture.root);
+    const logical = path.join(project, 'node_modules', 'workspace-package');
+    fs.mkdirSync(path.dirname(logical), { recursive: true });
+    try {
+      fs.symlinkSync(path.join(project, 'packages', 'workspace-package'), logical, 'dir');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip('OS disallows directory links');
+      throw error;
+    }
+    assert.match(check(fixture.root).errors.join(' '), /outside-source-import/);
+  } finally { fixture.cleanup(); }
+});
+
+
+test('bare installed CSS packages fail closed instead of vanishing from the source graph', () => {
+  for (const [file, contents] of [
+    ['theme.css', '@import "https://cdn.example.org/private.css";'],
+    ['theme.module.css', '.hidden { color: red }'],
+    ['theme.scss', '@use "https://cdn.example.org/private.scss";'],
+    ['theme.less', '@import "https://cdn.example.org/private.less";'],
+  ]) withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0',
+    }),
+    ['../node_modules/ui-kit/' + file]: contents,
+    'app/start.ts': 'import "ui-kit/' + file + '"; export const app = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> ui-kit\//, file));
+});
+
+test('query-qualified bare stylesheet imports do not bypass fail-closed verification', () => {
+  for (const suffix of ['?inline', '?raw', '?url']) withFixture({
+    '../node_modules/ui-kit/theme.css': '.theme { color: red }',
+    'app/start.ts': 'import "ui-kit/theme.css' + suffix + '"; export const app = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> ui-kit\/theme\.css/, suffix));
+});
+
+test('pure layers reject active bare package stylesheets even if a package is allowlisted', () =>
+  withFixture({
+    '../architecture.config.json': JSON.stringify({ allowPureExternal: ['ui-kit/theme.css'] }),
+    '../node_modules/ui-kit/theme.css': 'body { color: red }',
+    'shared/lib/math.ts': 'import "ui-kit/theme.css"; export const price = 1;',
+  }, result => {
+    const errors = result.errors.join(' ');
+    assert.match(errors, /unverified-package-stylesheet/);
+    assert.match(errors, /pure-layer-static-asset/);
+  }));
+
+test('local stylesheets, audited aliases, and ordinary external JavaScript remain supported', () => {
+  withFixture({
+    'modules/orders/ui/button.ts': 'import "./button.css"; export const button = 1;',
+    'modules/orders/ui/button.css': '.button { color: red }',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: 'src', paths: { '@ui/*': ['shared/ui/*'] },
+    } }),
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@ui": fileURLToPath(new URL("./src/shared/ui", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { '@ui': 'src/shared/ui' } }),
+    'app/start.ts': 'import "@ui/site.css"; export const start = true;',
+    'shared/ui/site.css': '.site { color: blue }',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    '../node_modules/js-kit/package.json': JSON.stringify({
+      name: 'js-kit', version: '1.0.0', types: 'index.d.ts',
+    }),
+    '../node_modules/js-kit/index.d.ts': 'export declare const value: number;',
+    'app/start.ts': 'import { value } from "js-kit"; export const start = value;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('pure first-party baseUrl source imports do not require external-package exceptions', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: 'src/shared/lib' } }),
+    'shared/lib/math.ts': 'export const sum = (a: number, b: number) => a + b;',
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "math": fileURLToPath(new URL("./src/shared/lib/math.ts", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { 'math': 'src/shared/lib/math.ts' } }),
+    'shared/lib/price.ts': 'import { sum } from "math"; export const price = sum(1, 2);',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('pure-layer baseUrl still enforces forbidden first-party module dependencies', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: 'src' } }),
+    'modules/orders/domain/order.ts':
+      'import { form } from "modules/orders/ui/form"; export const value = form;',
+    'modules/orders/ui/form.ts': 'export const form = 1;',
+  }, result => {
+    assert.match(result.errors.join(' '), /pure-domain-import/);
+    assert.doesNotMatch(result.errors.join(' '), /pure-layer-external-package/);
+  }));
+
+test('real third-party packages remain restricted in pure modules', () =>
+  withFixture({
+    '../node_modules/react/package.json': JSON.stringify({
+      name: 'react', version: '19.0.0', types: 'index.d.ts',
+    }),
+    '../node_modules/react/index.d.ts': 'export declare const useMemo: () => unknown;',
+    'shared/lib/calculate.ts': 'import { useMemo } from "react"; export const memo = useMemo;',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-external-package/)));
+
+test('approved genuine external packages retain their pure-layer exception', () =>
+  withFixture({
+    '../architecture.config.json': JSON.stringify({ allowPureExternal: ['pure-kit'] }),
+    '../node_modules/pure-kit/package.json': JSON.stringify({
+      name: 'pure-kit', version: '1.0.0', types: 'index.d.ts',
+    }),
+    '../node_modules/pure-kit/index.d.ts': 'export declare const amount: number;',
+    'shared/lib/value.ts': 'import { amount } from "pure-kit"; export const value = amount;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+
+test('extensionless package CSS exports fail closed at both package root and deep subpaths', () => {
+  for (const spec of ['ui-kit', 'ui-kit/theme']) withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0',
+      exports: { '.': './index.css', './theme': './theme.css' },
+    }),
+    '../node_modules/ui-kit/index.css': 'body { color: red }',
+    '../node_modules/ui-kit/theme.css': '@import "https://cdn.example.org/private.css";',
+    'app/start.ts': 'import "' + spec + '"; export const ready = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet/, spec));
+});
+
+test('conditional export CSS cannot hide behind TypeScript declaration paths', () =>
+  withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0',
+      exports: { './theme': {
+        types: './theme.d.ts',
+        import: './theme.css',
+        default: './theme.css',
+      } },
+    }),
+    '../node_modules/ui-kit/theme.d.ts': 'declare const classes: Record<string, string>; export default classes;',
+    '../node_modules/ui-kit/theme.css': '.private { color: red }',
+    'app/start.ts': 'import styles from "ui-kit/theme"; export const ready = styles;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/)));
+
+test('scoped and wildcard package style exports cannot bypass graph checks', () => {
+  for (const [spec, pattern, target, file] of [
+    ['@ui-kit/theme/dark', './theme/*', './assets/*.css', 'assets/dark.css'],
+    ['@ui-kit/theme', './theme', './theme.scss', 'theme.scss'],
+    ['@ui-kit/stylus', './stylus', './theme.styl', 'theme.styl'],
+  ]) withFixture({
+    '../node_modules/@ui-kit/package/package.json': JSON.stringify({
+      name: '@ui-kit/package', version: '1.0.0', exports: { [pattern]: target },
+    }),
+    ['../node_modules/@ui-kit/package/' + file]: '.theme { color: red }',
+    'app/start.ts': 'import "' + spec.replace('@ui-kit/', '@ui-kit/package/') +
+      '"; export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/, spec));
+});
+
+test('legacy package main and module stylesheet entries fail closed', () => {
+  for (const field of ['main', 'module', 'browser']) withFixture({
+    '../node_modules/theme-kit/package.json': JSON.stringify({
+      name: 'theme-kit', version: '1.0.0', [field]: './styles.css',
+    }),
+    '../node_modules/theme-kit/styles.css': '.theme { color: black }',
+    'app/start.ts': 'import "theme-kit"; export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/, field));
+});
+
+test('explicit bare Stylus styles and opaque side-effect package imports fail closed', () => {
+  withFixture({
+    '../node_modules/theme-kit/theme.styl': '.theme\n  color red',
+    'app/start.ts': 'import "theme-kit/theme.styl"; export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/));
+  withFixture({
+    'app/start.ts': 'import "unresolvable-theme"; export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-import/));
+});
+
+test('JS exports with a separate stylesheet subpath stay supported for the JS import', () =>
+  withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0',
+      exports: { '.': { types: './index.d.ts', default: './index.js' },
+        './theme': './theme.css' },
+    }),
+    '../node_modules/ui-kit/index.d.ts': 'export declare const ready: boolean;',
+    '../node_modules/ui-kit/index.js': 'export const ready = true;',
+    '../node_modules/ui-kit/theme.css': '.theme { color: blue }',
+    'app/start.ts': 'import { ready } from "ui-kit"; export const value = ready;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('first-party baseUrl and mapped style aliases still follow owned-source rules', () => {
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: 'src/shared/lib' } }),
+    'shared/lib/math.ts': 'export const value = 1;',
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "math": fileURLToPath(new URL("./src/shared/lib/math.ts", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { 'math': 'src/shared/lib/math.ts' } }),
+    'shared/lib/start.ts': 'import { value } from "math"; export const ready = value;',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: 'src', paths: { '@style/*': ['shared/ui/*'] },
+    } }),
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "@style": fileURLToPath(new URL("./src/shared/ui", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { '@style': 'src/shared/ui' } }),
+    'app/start.ts': 'import "@style/theme.css"; export const ready = true;',
+    'shared/ui/theme.css': '.theme { color: teal }',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('unresolved runtime package errors do not misclassify type-only imports', () =>
+  withFixture({
+    'app/start.ts': 'import type { Theme } from "uninstalled-types"; export type AppTheme = Theme;',
+  }, result => assert.equal(
+    result.errors.some(e => e.includes('unverified-package-import')), false)));
+
+
+test('more-specific JavaScript package wildcard does not inherit broad stylesheet pattern', () =>
+  withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0',
+      exports: {
+        './*': './styles/*.css',
+        './utils/*': { types: './utils/*.d.ts', default: './utils/*.js' },
+      },
+    }),
+    '../node_modules/ui-kit/utils/math.d.ts': 'export declare const value: number;',
+    '../node_modules/ui-kit/utils/math.js': 'export const value = 5;',
+    '../node_modules/ui-kit/styles/utils/math.css': '.fake { color: red }',
+    'app/start.ts': 'import { value } from "ui-kit/utils/math"; export const ready = value;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+
+test('active npm scripts reject shell redirection changing the Vite execution graph', () => {
+  for (const script of [
+    'echo altered > vite.config.ts && vite build',
+    'printf altered 1>vite.config.ts && vite build',
+    'vite build > build.log',
+    'npm run build -- --config hidden.ts > output.log',
+  ]) withFixture({
+    '../package.json': JSON.stringify({ scripts: { build: script } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unsupported-vite-custom-config/, script));
+  // A comparison operator inside a quoted echo argument is inert.
+  withFixture({
+    '../package.json': JSON.stringify({ scripts: {
+      build: 'echo "1 > 0" && vite build',
+    } }),
+    '../vite.config.ts': 'export default { plugins: [] };',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('Vite config rejects executable imports, ignored side effects and unknown resolution', () => {
+  for (const config of [
+    'import "./extra-build.mjs"; export default { plugins: [] };',
+    'import { configure } from "./extra-build.mjs"; export default { plugins: [] };',
+    'export default { plugins: [], unchecked: (() => true)() };',
+    'export default { plugins: [], test: { include: (() => ["src/**/*.test.ts"])() } };',
+    'export default { plugins: [], resolve: { conditions: ["custom"] } };',
+  ]) withFixture({
+    '../vite.config.ts': config,
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unsupported-vite-alias-config|unverifiable-vite-config-expression|unverifiable-vite-resolution-option/, config));
+  withFixture({
+    '../vite.config.ts': 'export default { plugins: [], test: { environment: "jsdom", include: ["src/**/*.test.ts"], clearMocks: true } };',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('package imports mappings expose CSS even when types resolve to owned declarations', () => {
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture-pkg', type: 'module',
+      imports: { '#theme': {
+        types: './src/shared/lib/theme.d.ts',
+        default: './src/modules/orders/ui/private.css',
+      } },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'shared/lib/theme.d.ts': 'declare const theme: string; export default theme;',
+    'modules/orders/ui/private.css': '.hidden { color: red }',
+    'app/start.ts': 'import theme from "#theme"; export const ready = theme;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> #theme/));
+});
+
+test('package self-name exports cannot mask CSS with a declaration path', () => {
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture-pkg', type: 'module',
+      exports: { './theme': {
+        types: './src/shared/lib/theme.d.ts',
+        default: './src/modules/orders/ui/private.css',
+      } },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'shared/lib/theme.d.ts': 'declare const theme: string; export default theme;',
+    'modules/orders/ui/private.css': '.hidden { color: red }',
+    'app/start.ts': 'import theme from "fixture-pkg/theme"; export const ready = theme;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> fixture-pkg\/theme/));
+  // Self exports to JavaScript, not CSS, retain a working positive control.
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture-pkg',
+      exports: { './math': {
+        types: './src/shared/lib/math.d.ts', default: './src/shared/lib/math.js',
+      } },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'shared/lib/math.d.ts': 'export declare const value: number;',
+    'shared/lib/math.js': 'export const value = 5;',
+    'app/start.ts': 'import { value } from "fixture-pkg/math"; export const ready = value;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('Vite auto-discovered PostCSS configurations cannot bypass the CSS scanner', () => {
+  for (const file of [
+    '../postcss.config.js', '../postcss.config.cjs',
+    '../postcss.config.ts', '../.postcssrc', '../.postcssrc.json',
+  ]) withFixture({
+    [file]: 'module.exports = { plugins: [] }',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverifiable-vite-postcss-config/, file));
+  withFixture({
+    '../package.json': JSON.stringify({ postcss: { plugins: {} } }),
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverifiable-vite-postcss-config/));
+  withFixture({
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+
+test('runtime CSS import mapping wins over a conflicting TypeScript paths alias', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module',
+      imports: { '#theme': './src/modules/orders/ui/private.css' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '#theme': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const safe = true;',
+    'modules/orders/ui/private.css': '.private { color: crimson }',
+    'app/start.ts': 'import { safe } from "#theme"; export const ready = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> #theme/)));
+
+test('chained package imports follow an installed package CSS export', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module',
+      imports: { '#theme': '#appearance', '#appearance': 'ui-kit' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '#theme': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({ name: 'ui-kit',
+      exports: { '.': { types: './theme.d.ts', default: './theme.css' } } }),
+    '../node_modules/ui-kit/theme.d.ts': 'export declare const safe: boolean;',
+    '../node_modules/ui-kit/theme.css': '.private { color: crimson }',
+    'shared/lib/safe.ts': 'export const safe = true;',
+    'app/start.ts': 'import { safe } from "#theme"; export const ready = safe;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/)));
+
+test('self-name package CSS mapping cannot be masked by a TS paths alias', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module',
+      exports: { './theme': {
+        types: './src/shared/lib/safe.ts', default: './src/modules/orders/ui/private.css',
+      } } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'fixture-pkg/theme': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const safe = true;',
+    'modules/orders/ui/private.css': '.private { color: crimson }',
+    'app/start.ts': 'import { safe } from "fixture-pkg/theme"; export const ready = safe;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/)));
+
+test('safe JS package import mapping and matching TS alias do not trigger false positives', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module',
+      imports: { '#safe': './src/shared/lib/safe.js' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '#safe': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const safe = true;',
+    'app/start.ts': 'import { safe } from "#safe"; export const ready = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('erased import type never checks an executable CSS package target', () => {
+  for (const spec of ['#theme', 'fixture-pkg/theme']) {
+    const condition = { types: './src/shared/lib/theme.d.ts',
+      default: './src/modules/orders/ui/private.css' };
+    const metadata = spec[0] === '#'
+      ? { imports: { '#theme': condition } }
+      : { exports: { './theme': condition } };
+    withFixture({
+      '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module', ...metadata }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler', verbatimModuleSyntax: true,
+      } }),
+      'shared/lib/theme.d.ts': 'export interface Theme { primary: string }',
+      'modules/orders/ui/private.css': '.private { color: crimson }',
+      'app/start.ts': 'import type { Theme } from "' + spec + '"; export type AppTheme = Theme;',
+    }, result => assert.deepEqual(result.errors, [], spec));
+  }
+});
+
+test('verbatimModuleSyntax inline type specifiers retain runtime import side effects', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module',
+      imports: { '#theme': { types: './src/shared/lib/theme.d.ts',
+        default: './src/modules/orders/ui/private.css' } } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', verbatimModuleSyntax: true,
+    } }),
+    'shared/lib/theme.d.ts': 'export interface Theme { primary: string }',
+    'modules/orders/ui/private.css': '.private { color: crimson }',
+    'app/start.ts': 'import { type Theme } from "#theme"; export type AppTheme = Theme;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/)));
+
+
+test('query-qualified #imports retain the actual package key for CSS verification', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture-pkg', type: 'module',
+      imports: { '#theme': './src/modules/orders/ui/private.css' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'modules/orders/ui/private.css': '.private { color: crimson }',
+    'app/start.ts': 'import rawTheme from "#theme?raw"; export const theme = rawTheme;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-stylesheet/)));
+
+test('erased type-only external package import does not become a CSS runtime dependency', () =>
+  withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({ name: 'ui-kit', version: '1.0.0',
+      exports: { './theme': { types: './theme.d.ts', default: './theme.css' } } }),
+    '../node_modules/ui-kit/theme.d.ts': 'export interface Theme { primary: string }',
+    '../node_modules/ui-kit/theme.css': '.private { color: crimson }',
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', verbatimModuleSyntax: true,
+    } }),
+    'app/start.ts': 'import type { Theme } from "ui-kit/theme"; export type View = Theme;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+
+test('package #imports JS runtime target enforces private infrastructure ownership', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      imports: { '#private': './src/modules/orders/infrastructure/unsafe.js' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+      paths: { '#private': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'modules/orders/infrastructure/unsafe.js': 'export const safe = 2;',
+    'app/start.ts': 'import { safe } from "#private"; export const result = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /deep-module-import: app\/start\.ts -> modules\/orders\/infrastructure\/unsafe\.js/)));
+
+test('package self-export JS runtime target enforces owner rather than declarations', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      exports: { './private': { types: './src/shared/lib/safe.d.ts',
+        default: './src/modules/orders/infrastructure/unsafe.js' } } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'shared/lib/safe.d.ts': 'export declare const safe: number;',
+    'modules/orders/infrastructure/unsafe.js': 'export const safe = 2;',
+    'app/start.ts': 'import { safe } from "fixture/private"; export const result = safe;',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/)));
+
+test('chained and wildcard #imports still check runtime JS ownership', () => {
+  for (const spec of ['#chained', '#private/name']) {
+    withFixture({
+      '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+        imports: { '#chained': '#private/name',
+          '#private/*': './src/modules/orders/infrastructure/*.js' } }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+        paths: { '#chained': ['src/shared/lib/safe.ts'],
+          '#private/*': ['src/shared/lib/safe.ts'] },
+      } }),
+      'shared/lib/safe.ts': 'export const safe = 1;',
+      'modules/orders/infrastructure/name.js': 'export const safe = 2;',
+      'app/start.ts': 'import { safe } from "' + spec + '"; export const result = safe;',
+    }, result => assert.match(result.errors.join(' '), /deep-module-import/, spec));
+  }
+});
+
+test('safe runtime JS package mapping remains permitted', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      imports: { '#safe': './src/shared/lib/safe.js' },
+      exports: { './safe': { types: './src/shared/lib/safe.ts',
+        default: './src/shared/lib/safe.js' } } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+      paths: { '#safe': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "#safe"; export { safe as value } from "fixture/safe";',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('external, unresolved and cyclic package mapping targets fail closed', () => {
+  for (const target of ['ui-kit', '#unknown', '#loop']) {
+    withFixture({
+      '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+        imports: { '#alias': target, '#loop': '#loop' } }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+        paths: { '#alias': ['src/shared/lib/safe.ts'] },
+      } }),
+      'shared/lib/safe.ts': 'export const safe = 1;',
+      'app/start.ts': 'import { safe } from "#alias"; export const result = safe;',
+    }, result => assert.match(result.errors.join(' '),
+      /unverified-package-runtime-mapping/, target));
+  }
+});
+
+test('erased type-only alias is not a runtime JS dependency', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      imports: { '#private': './src/modules/orders/infrastructure/unsafe.js' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+      paths: { '#private': ['src/shared/lib/safe.ts'] },
+      verbatimModuleSyntax: true,
+    } }),
+    'shared/lib/safe.ts': 'export type Safe = { ok: true };',
+    'modules/orders/infrastructure/unsafe.js': 'export const unsafe = 1;',
+    'app/start.ts': 'import type { Safe } from "#private"; export type App = Safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('Stylus stylesheet HTML entrypoints fail closed instead of hiding transitive imports', () => {
+  for (const extension of ['styl', 'stylus']) {
+    withFixture({
+      '../index.html': '<!doctype html><html><head><link rel="stylesheet" href="/src/shared/ui/theme.' +
+        extension + '"></head><body></body></html>',
+      ['shared/ui/theme.' + extension]: '@import "../../modules/orders/ui/private.' + extension + '"',
+      ['modules/orders/ui/private.' + extension]: '.private\n  color red',
+      'app/start.ts': 'export const start = true;',
+    }, result => assert.match(result.errors.join(' '),
+      /unverified-vite-stylus-graph/, extension));
+  }
+});
+
+test('Stylus side-effect imports fail closed but local CSS remains permitted', () => {
+  withFixture({
+    'shared/ui/theme.styl': '.safe\n  color blue',
+    'shared/ui/start.ts': 'import "./theme.styl"; export const start = true;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-stylus-graph/));
+  withFixture({
+    'shared/ui/theme.css': '.safe { color: blue }',
+    'shared/ui/start.ts': 'import "./theme.css"; export const start = true;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('unrelated installed ordinary JavaScript package remains permitted', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module' }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({ name: 'ui-kit', version: '1.0.0',
+      main: './index.js' }),
+    '../node_modules/ui-kit/index.js': 'exports.safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const result = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+
+test('runtime-only mapped JavaScript edges still contribute to cycle detection', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      imports: { '#b': './src/modules/orders/ui/b.js' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+      paths: { '#b': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const b = 0;',
+    'modules/orders/ui/a.ts': 'import { b } from "#b"; export const a = b;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+test('conditional runtime package paths cannot hide a forbidden browser-only dependency', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      imports: { '#private': {
+        types: './src/shared/lib/safe.d.ts',
+        browser: './src/modules/orders/infrastructure/private.js',
+        default: './src/shared/lib/safe.js',
+      } } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'shared/lib/safe.d.ts': 'export declare const safe: number;',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'modules/orders/infrastructure/private.js': 'export const safe = 2;',
+    'app/start.ts': 'import { safe } from "#private"; export const result = safe;',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/)));
+
+test('runtime package mappings outside src are never considered owned sources', () =>
+  withFixture({
+    '../package.json': JSON.stringify({ name: 'fixture', type: 'module',
+      imports: { '#private': './vendor/hidden.js' } }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: '.', module: 'ESNext', moduleResolution: 'Bundler',
+      paths: { '#private': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../vendor/hidden.js': 'export const safe = 2;',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "#private"; export const result = safe;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-runtime-mapping/)));
+
+
+test('package-mapped Vite raw and URL assets are forbidden in pure domain code', () => {
+  for (const query of ['raw', 'url']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        imports: { '#source': './src/modules/orders/domain/payload.js' },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'modules/orders/domain/payload.ts': 'export const payload = true;',
+      'modules/orders/domain/order.ts':
+        'import value from "#source?' + query + '"; export const order = value;',
+    }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/, query));
+  }
+});
+
+test('package-mapped ?raw and ?url are non-executable assets, not runtime cycles', () => {
+  for (const query of ['raw', 'url']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        imports: { '#source': './src/modules/orders/ui/b.js' },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'modules/orders/ui/a.ts': 'import value from "#source?' + query + '"; export const a = value;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => {
+      assert.doesNotMatch(result.errors.join(' '), /runtime-cycle/, query);
+      assert.deepEqual(result.errors, [], query);
+    });
+  }
+});
+
+test('package-mapped executable modules and ?worker still contribute runtime edges', () => {
+  for (const suffix of ['', '?worker']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        imports: { '#source': './src/modules/orders/ui/b.js' },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'modules/orders/ui/a.ts': 'import { b } from "#source' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
+  }
+});
+
+test('a package raw import still observes architectural ownership as an asset', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      imports: { '#private': './src/modules/orders/infrastructure/secret.js' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'modules/orders/infrastructure/secret.ts': 'export const secret = "private";',
+    'app/start.ts': 'import contents from "#private?raw"; export const result = contents;',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/)));
+
+test('a valid Vite query asset imported through a TS alias remains non-executable', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      imports: { '#source': './src/modules/orders/ui/b.js' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+      baseUrl: '.', paths: { '#source': ['src/modules/orders/ui/b.ts'] },
+    } }),
+    'modules/orders/ui/a.ts': 'import value from "#source?raw"; export const a = value;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => {
+    assert.deepEqual(result.errors, []);
+    assert.doesNotMatch(result.errors.join(' '), /runtime-cycle/);
+  }));
+
+test('repeated valid self-package targets across conditions are not cycles', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      exports: { './shared': './src/shared/lib/math.js' },
+      imports: {
+        '#entry': { node: 'fixture/shared', default: 'fixture/shared' },
+      },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'shared/lib/math.ts': 'export const value = 2;',
+    'app/start.ts': 'import { value } from "#entry"; export const result = value;',
+  }, result => assert.deepEqual(result.errors, [])));
+test('valid conditional and fallback-array mappings reuse exports without false cycles', () => {
+  for (const spec of ['#entry', '#array']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        exports: {
+          './left': './src/shared/lib/math.js',
+          './right': './src/shared/lib/math.js',
+        },
+        imports: {
+          '#entry': { browser: 'fixture/left', default: 'fixture/right' },
+          '#array': ['fixture/left', 'fixture/left'],
+        },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'shared/lib/math.ts': 'export const value = 2;',
+      'app/start.ts': 'import { value } from "' + spec + '"; export const result = value;',
+    }, result => assert.deepEqual(result.errors, [], spec));
+  }
+});
+test('genuine recursive #imports remain unverifiable after the branch-stack fix', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      imports: { '#first': '#second', '#second': '#first' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+      baseUrl: '.', paths: { '#first': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const value = 2;',
+    'app/start.ts': 'import { value } from "#first"; export const result = value;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-runtime-mapping/)));
+
+
+test('nonconforming nested #imports targets fail closed even when a source exists', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      imports: {
+        '#leaf': './src/shared/lib/math.js',
+        '#entry': '#leaf',
+      },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+      baseUrl: '.', paths: { '#entry': ['src/shared/lib/math.ts'] },
+    } }),
+    'shared/lib/math.ts': 'export const value = 2;',
+    'app/start.ts': 'import { value } from "#entry"; export const result = value;',
+  }, result => assert.match(result.errors.join(' '), /unverified-package-runtime-mapping/)));
+
+
+test('installed CSS export shadows a TypeScript-only paths alias without a Vite alias', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit/theme': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', exports: {
+        './theme': { types: './theme.d.ts', default: './theme.css' },
+      },
+    }),
+    '../node_modules/ui-kit/theme.d.ts': 'export declare const safe: number;',
+    '../node_modules/ui-kit/theme.css': '.private { color: red }',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit/theme"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> ui-kit\/theme/)));
+
+test('installed executable package shadows a TypeScript-only local alias', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit/private': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', type: 'module',
+      exports: { './private': {
+        types: './private.d.ts', default: './private.js',
+      } },
+    }),
+    '../node_modules/ui-kit/private.d.ts': 'export declare const safe: number;',
+    '../node_modules/ui-kit/private.js': 'export const safe = 2;',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit/private"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-runtime-mapping: app\/start\.ts -> ui-kit\/private/)));
+
+test('installed scoped package shadowing a TS wildcard alias also fails closed', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '@scope/ui-kit/*': ['src/shared/lib/*.ts'] },
+    } }),
+    '../node_modules/@scope/ui-kit/package.json': JSON.stringify({
+      name: '@scope/ui-kit',
+      exports: { './theme': './theme.css' },
+    }),
+    '../node_modules/@scope/ui-kit/theme.css': '.theme {}',
+    'shared/lib/theme.ts': 'export const theme = 1;',
+    'app/start.ts': 'import { theme } from "@scope/ui-kit/theme"; export const value = theme;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> @scope\/ui-kit\/theme/)));
+
+test('an actual audited Vite alias takes precedence over an installed CSS package', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url";\n' +
+      'export default { resolve: { alias: { "ui-kit": fileURLToPath(new URL("./src/shared/lib/safe.ts", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({
+      viteAliases: { 'ui-kit': 'src/shared/lib/safe.ts' },
+    }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', exports: { '.': './theme.css' },
+    }),
+    '../node_modules/ui-kit/theme.css': '.theme {}',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('an actual audited Vite alias takes precedence over an installed JS package', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url";\n' +
+      'export default { resolve: { alias: { "ui-kit": fileURLToPath(new URL("./src/shared/lib/safe.ts", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({
+      viteAliases: { 'ui-kit': 'src/shared/lib/safe.ts' },
+    }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', type: 'module', exports: { '.': './unsafe.js' },
+    }),
+    '../node_modules/ui-kit/unsafe.js': 'export const unsafe = 1;',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('type-only imports stay source-checked but do not inspect runtime shadow packages', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit': ['src/shared/lib/safe.ts'] },
+      verbatimModuleSyntax: true,
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', exports: { '.': './theme.css' },
+    }),
+    '../node_modules/ui-kit/theme.css': '.theme {}',
+    'shared/lib/safe.ts': 'export type Safe = { value: number };',
+    'app/start.ts': 'import type { Safe } from "ui-kit"; export type Result = Safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('non-colliding TS alias and ordinary installed library keep passing', () => {
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit': ['src/shared/lib/safe.ts'] },
+    } }),
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-runtime-alias/));
+
+  withFixture({
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0', types: './index.d.ts', main: './index.js',
+    }),
+    '../node_modules/ui-kit/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/ui-kit/index.js': 'exports.safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+
+test('a wildcard paths entry does not reclassify an actually external installed package', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '*': ['*'] },
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0', types: './index.d.ts', main: './index.js',
+    }),
+    '../node_modules/ui-kit/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/ui-kit/index.js': 'exports.safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+
+test('manifestless installed legacy package still shadows a TS-only alias', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { 'ui-kit': ['src/shared/lib/safe.ts'] },
+    } }),
+    '../node_modules/ui-kit/index.js': 'exports.safe = 2;',
+    'shared/lib/safe.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-runtime-mapping: app\/start\.ts -> ui-kit/)));
+
+
+test('relative TypeScript inline modifiers preserve executable runtime cycles', () => {
+  for (const suffix of ['?inline', '?no-inline', '?inline&no-inline']) {
+    withFixture({
+      'modules/orders/ui/a.ts': 'import { b } from "./b.ts' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
+  }
+});
+
+test('relative JavaScript inline modifiers preserve executable runtime cycles', () => {
+  for (const suffix of ['?inline', '?no-inline']) {
+    withFixture({
+      'modules/orders/ui/a.js': 'import { b } from "./b.js' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.js': 'import { a } from "./a.js"; export const b = a;',
+    }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
+  }
+});
+
+test('source-only inline modifiers stay valid in a pure domain layer', () => {
+  for (const suffix of ['?inline', '?no-inline']) {
+    withFixture({
+      'modules/orders/domain/a.ts': 'import { b } from "./b.ts' + suffix + '"; export const a = b;',
+      'modules/orders/domain/b.ts': 'export const b = 7;',
+    }, result => assert.deepEqual(result.errors, [], suffix));
+  }
+});
+
+test('package-mapped inline JavaScript imports still contribute runtime edges', () => {
+  for (const suffix of ['?inline', '?no-inline']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        imports: { '#source': './src/modules/orders/ui/b.js' },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'modules/orders/ui/a.ts': 'import { b } from "#source' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
+  }
+});
+
+test('package import inline modifiers do not introduce false pure asset errors', () => {
+  for (const suffix of ['?inline', '?no-inline']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        imports: { '#source': './src/modules/orders/domain/b.js' },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'modules/orders/domain/a.ts': 'import { b } from "#source' + suffix + '"; export const a = b;',
+      'modules/orders/domain/b.ts': 'export const b = 3;',
+    }, result => assert.deepEqual(result.errors, [], suffix));
+  }
+});
+
+test('self-package runtime exports retain executable edges with inline modifiers', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      exports: { './b': './src/modules/orders/ui/b.js' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler',
+    } }),
+    'modules/orders/ui/a.ts': 'import { b } from "fixture/b?inline"; export const a = b;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+test('Vite-aliased source inline modifiers retain executable runtime graph edges', () => {
+  for (const suffix of ['?inline', '?no-inline']) {
+    withFixture({
+      '../vite.config.ts': 'import { fileURLToPath } from "node:url";\n' +
+        'export default { resolve: { alias: { "@ui": fileURLToPath(new URL("./src/modules/orders/ui", import.meta.url)) } } };',
+      '../architecture.config.json': JSON.stringify({
+        viteAliases: { '@ui': 'src/modules/orders/ui' },
+      }),
+      'modules/orders/ui/a.ts': 'import { b } from "@ui/b' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
+  }
+});
+
+test('inline/no-inline CSS and images remain assets, including in pure layers', () => {
+  for (const [file, content] of [
+    ['style.css', '.style { color: blue }'],
+    ['picture.svg', '<svg xmlns="http://www.w3.org/2000/svg"></svg>'],
+  ]) {
+    for (const suffix of ['?inline', '?no-inline']) {
+      withFixture({
+        ['modules/orders/ui/' + file]: content,
+        'modules/orders/ui/a.ts': 'import asset from "./' + file + suffix + '"; export const a = asset;',
+      }, result => assert.deepEqual(result.errors, [], file + suffix));
+      withFixture({
+        ['modules/orders/domain/' + file]: content,
+        'modules/orders/domain/a.ts': 'import asset from "./' + file + suffix + '"; export const a = asset;',
+      }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/, file + suffix));
+    }
+  }
+});
+
+test('raw/url transforms remain data even with inline modifiers', () => {
+  for (const suffix of ['?raw&inline', '?url&no-inline']) {
+    withFixture({
+      'modules/orders/ui/a.ts': 'import value from "./b.ts' + suffix + '"; export const a = value;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => {
+      assert.doesNotMatch(result.errors.join(' '), /runtime-cycle/, suffix);
+      assert.deepEqual(result.errors, [], suffix);
+    });
+  }
+});
+
+test('worker entrypoint with inline modifier remains executable', () =>
+  withFixture({
+    'modules/orders/ui/a.ts': 'import Worker from "./b.ts?worker&inline"; export const a = Worker;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+
+test('wildcard paths resolving an installed package stays an external runtime import', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '*': ['*'] },
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0', types: './index.d.ts', main: './index.js',
+    }),
+    '../node_modules/ui-kit/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/ui-kit/index.js': 'exports.safe = 1;',
+    'app/start.ts': 'import { safe } from "ui-kit"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('a paths wildcard resolving a scoped installed package stays external', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '*': ['*'] },
+    } }),
+    '../node_modules/@vendor/client/package.json': JSON.stringify({
+      name: '@vendor/client', version: '1.0.0', types: './index.d.ts', main: './index.js',
+    }),
+    '../node_modules/@vendor/client/index.d.ts': 'export declare const value: number;',
+    '../node_modules/@vendor/client/index.js': 'exports.value = 2;',
+    'app/start.ts': 'import { value } from "@vendor/client"; export const result = value;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('pure code still requires external package review under wildcard paths', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '*': ['*'] },
+    } }),
+    '../node_modules/ui-kit/package.json': JSON.stringify({
+      name: 'ui-kit', version: '1.0.0', types: './index.d.ts', main: './index.js',
+    }),
+    '../node_modules/ui-kit/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/ui-kit/index.js': 'exports.safe = 1;',
+    'modules/orders/domain/order.ts': 'import { safe } from "ui-kit"; export const total = safe;',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-external-package/)));
+
+test('baseUrl package-like prefixes can still resolve genuine installed dependencies', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+    } }),
+    '../node_modules/modules/package.json': JSON.stringify({
+      name: 'modules', version: '1.0.0',
+      exports: { './helpers': { types: './helpers.d.ts', default: './helpers.js' } },
+    }),
+    '../node_modules/modules/helpers.d.ts': 'export declare const safe: number;',
+    '../node_modules/modules/helpers.js': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "modules/helpers"; export const result = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('a wildcard that genuinely targets owned source keeps architectural checks', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: '.',
+      paths: { '*': ['src/*'] },
+    } }),
+    'modules/orders/infrastructure/private.ts': 'export const hidden = 1;',
+    'app/start.ts': 'import { hidden } from "modules/orders/infrastructure/private"; export const result = hidden;',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/)));
+
+test('query flags with assigned values are not Vite raw or URL data loaders', () => {
+  for (const suffix of ['?raw=true', '?url=1', '?foo=1&raw=true', '?worker=1']) {
+    withFixture({
+      'modules/orders/ui/a.ts': 'import { b } from "./b.ts' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => {
+      const errors = result.errors.join(' ');
+      assert.match(errors, /unverified-vite-import-query/, suffix);
+      assert.match(errors, /runtime-cycle/, suffix);
+    });
+  }
+});
+
+test('invalid source-query flags do not bypass an internal public-barrel ban', () =>
+  withFixture({
+    'modules/orders/index.ts': 'export const shared = 1;',
+    'modules/orders/ui/form.ts': 'import { shared } from "../index.ts?raw=true"; export const f = shared;',
+  }, result => {
+    const errors = result.errors.join(' ');
+    assert.match(errors, /unverified-vite-import-query/);
+    assert.match(errors, /no-self-barrel/);
+  }));
+
+test('package-mapped invalid raw flags still expose real executable cycles', () => {
+  for (const suffix of ['?raw=true', '?url=1']) {
+    withFixture({
+      '../package.json': JSON.stringify({
+        name: 'fixture', type: 'module',
+        imports: { '#source': './src/modules/orders/ui/b.js' },
+      }),
+      '../tsconfig.json': JSON.stringify({ compilerOptions: {
+        module: 'ESNext', moduleResolution: 'Bundler',
+      } }),
+      'modules/orders/ui/a.ts': 'import { b } from "#source' + suffix + '"; export const a = b;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => {
+      const errors = result.errors.join(' ');
+      assert.match(errors, /unverified-vite-import-query/, suffix);
+      assert.match(errors, /runtime-cycle/, suffix);
+    });
+  }
+});
+
+test('invalid query tokens fail closed without impersonating static asset imports', () =>
+  withFixture({
+    'modules/orders/domain/a.ts': 'import { b } from "./b.ts?raw=1"; export const a = b;',
+    'modules/orders/domain/b.ts': 'export const b = 4;',
+  }, result => {
+    const errors = result.errors.join(' ');
+    assert.match(errors, /unverified-vite-import-query/);
+    assert.doesNotMatch(errors, /pure-layer-static-asset/);
+  }));
+
+test('genuine raw/URL tokens still load data without creating runtime cycle edges', () => {
+  for (const suffix of ['?raw', '?url', '?raw&inline', '?url&no-inline']) {
+    withFixture({
+      'modules/orders/ui/a.ts': 'import value from "./b.ts' + suffix + '"; export const a = value;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => assert.deepEqual(result.errors, [], suffix));
+  }
+});
+
+test('recognized worker tokens remain executable while worker=value fails closed', () => {
+  for (const suffix of ['?worker', '?sharedworker', '?worker&inline']) {
+    withFixture({
+      'modules/orders/ui/a.ts': 'import Worker from "./b.ts' + suffix + '"; export const a = Worker;',
+      'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
+  }
+  withFixture({
+    'modules/orders/ui/a.ts': 'import Worker from "./b.ts?worker=1"; export const a = Worker;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-import-query/));
+});
+
+
+test('arbitrary single-segment baseUrl source detects installed stylesheet shadow', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    '../node_modules/helpers/package.json': JSON.stringify({
+      name: 'helpers', exports: { '.': { types: './index.d.ts', default: './style.css' } },
+    }),
+    '../node_modules/helpers/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/helpers/style.css': '.shadow { color: red }',
+    'helpers.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "helpers"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet: app\/start\.ts -> helpers/)));
+
+test('arbitrary baseUrl imports reject executable installed package shadow', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    '../node_modules/helpers/package.json': JSON.stringify({
+      name: 'helpers', exports: { '.': { types: './index.d.ts', default: './index.js' } },
+    }),
+    '../node_modules/helpers/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/helpers/index.js': 'export const safe = 2;',
+    'helpers.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "helpers"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-runtime-mapping: app\/start\.ts -> helpers/)));
+
+test('nested arbitrary baseUrl aliases still see scoped and subpath package collisions', () => {
+  for (const [specifier, local, manifest] of [
+    ['features/helpers', 'features/helpers.ts', {
+      name: 'features', exports: { './helpers': { types: './helpers.d.ts', default: './unsafe.css' } },
+    }],
+    ['@internal/helpers', '@internal/helpers.ts', {
+      name: '@internal/helpers', exports: { '.': { types: './index.d.ts', default: './unsafe.css' } },
+    }],
+  ]) withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    ['../node_modules/' + manifest.name + '/package.json']: JSON.stringify(manifest),
+    [local]: 'export const value = 1;',
+    'app/start.ts': 'import { value } from "' + specifier + '"; export const result = value;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet/, specifier));
+});
+
+test('non-colliding arbitrary baseUrl source still needs a runtime alias', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    'helpers.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "helpers"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-runtime-alias/)));
+
+test('arbitrary baseUrl source still enforces cross-layer ownership', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    'private/ui/form.ts': 'export const hidden = 1;',
+    'shared/lib/consumer.ts': 'import { hidden } from "private/ui/form"; export const value = hidden;',
+  }, result => assert.match(result.errors.join(' '),
+    /pure-layer-imports-nonpure-source|pure-layer-imports-technical/)));
+
+test('arbitrary baseUrl raw source imports remain static assets in pure layers', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src/shared/lib',
+    } }),
+    'shared/lib/config.ts': 'export const secret = 1;',
+    'shared/lib/consumer.ts': 'import config from "config?raw"; export const value = config;',
+  }, result => assert.match(result.errors.join(' '),
+    /pure-layer-static-asset: shared\/lib\/consumer\.ts -> config\?raw/)));
+
+test('exact baseUrl aliases do not certify unmatched raw imports', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src/shared/lib',
+    } }),
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "config": fileURLToPath(new URL("./src/shared/lib/config.ts", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { 'config': 'src/shared/lib/config.ts' } }),
+    'shared/lib/config.ts': 'export const secret = 1;',
+    'shared/ui/view.ts': 'import config from "config?raw"; export const value = config;',
+  }, result => assert.deepEqual(result.errors, [
+    'unverified-vite-runtime-alias: shared/ui/view.ts -> config?raw',
+  ])));
+
+test('arbitrary baseUrl CSS assets remain pure-layer restricted but supported in UI', () => {
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src/shared/lib',
+    } }),
+    'shared/lib/theme.css': '.theme { color: blue }',
+    'shared/lib/consumer.ts': 'import "theme.css?inline"; export const value = 1;',
+  }, result => assert.match(result.errors.join(' '),
+    /pure-layer-static-asset/));
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src/shared/ui',
+    } }),
+    'shared/ui/theme.css': '.theme { color: blue }',
+    'shared/ui/view.ts': 'import "theme.css?inline"; export const value = 1;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-runtime-alias/));
+});
+
+test('arbitrary baseUrl CSS assets cannot be shadowed by installed CSS packages', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src/shared/ui',
+    } }),
+    '../node_modules/theme.css/package.json': JSON.stringify({
+      name: 'theme.css', exports: { '.': './other.css' },
+    }),
+    '../node_modules/theme.css/other.css': '.shadow { color: red }',
+    'shared/ui/theme.css': '.theme { color: blue }',
+    'shared/ui/view.ts': 'import "theme.css"; export const value = 1;',
+  }, result => assert.match(result.errors.join(' '),
+    /unverified-package-stylesheet/)));
+
+test('erased baseUrl type-only imports do not inspect installed runtime shadows', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+      verbatimModuleSyntax: true,
+    } }),
+    '../node_modules/helpers/package.json': JSON.stringify({
+      name: 'helpers', exports: { '.': './style.css' },
+    }),
+    '../node_modules/helpers/style.css': '.shadow {}',
+    'helpers.ts': 'export type Safe = { value: number };',
+    'app/start.ts': 'import type { Safe } from "helpers"; export type Result = Safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('ordinary external package fallback remains valid under broad baseUrl', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    '../node_modules/helpers/package.json': JSON.stringify({
+      name: 'helpers', version: '1.0.0', types: './index.d.ts', main: './index.js',
+    }),
+    '../node_modules/helpers/index.d.ts': 'export declare const safe: number;',
+    '../node_modules/helpers/index.js': 'exports.safe = 1;',
+    'app/start.ts': 'import { safe } from "helpers"; export const value = safe;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+
+test('baseUrl inference does not override #imports data mappings', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      imports: { '#payload': './src/modules/orders/ui/b.js' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    'modules/orders/ui/a.ts': 'import value from "#payload?raw"; export const a = value;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => {
+    assert.doesNotMatch(result.errors.join(' '), /missing-static-asset|runtime-cycle/);
+    assert.deepEqual(result.errors, []);
+  }));
+
+test('baseUrl inference does not override self-package URL data mappings', () =>
+  withFixture({
+    '../package.json': JSON.stringify({
+      name: 'fixture', type: 'module',
+      exports: { './payload': './src/modules/orders/ui/b.js' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    'modules/orders/ui/a.ts': 'import value from "fixture/payload?url"; export const a = value;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => {
+    assert.doesNotMatch(result.errors.join(' '), /missing-static-asset|runtime-cycle/);
+    assert.deepEqual(result.errors, []);
+  }));
+
+
+test('extensionless relative Vite raw and URL imports resolve source modules', () => {
+  for (const suffix of ['?raw', '?url']) withFixture({
+    'modules/orders/ui/data.ts': 'export const data = "serialized";',
+    'modules/orders/ui/view.ts': 'import value from "./data' + suffix + '"; export const rendered = value;',
+  }, result => assert.deepEqual(result.errors, [], suffix));
+});
+
+test('extensionless source data imports still fail pure-layer static-asset restrictions', () => {
+  for (const spec of ['./data?raw', './data?url']) withFixture({
+    'modules/orders/domain/data.ts': 'export const data = 1;',
+    'modules/orders/domain/consumer.ts': 'import value from "' + spec + '"; export const result = value;',
+  }, result => {
+    assert.match(result.errors.join(' '), /pure-layer-static-asset/, spec);
+    assert.doesNotMatch(result.errors.join(' '), /missing-static-asset/, spec);
+  });
+});
+
+test('extensionless raw imports keep Vite source-extension precedence and JSON support', () => {
+  withFixture({
+    'shared/ui/data.js': 'export default "js";',
+    'shared/ui/data.ts': 'export default "ts";',
+    'shared/ui/view.ts': 'import text from "./data?raw"; export const result = text;',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    'shared/ui/data.json': '{"ok":true}',
+    'shared/ui/view.ts': 'import text from "./data?raw"; export const result = text;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('extensionless Vite raw imports still report genuinely missing sources', () =>
+  withFixture({
+    'shared/ui/view.ts': 'import text from "./absent?raw"; export const result = text;',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/)));
+
+test('extensionless worker queries contribute executable runtime cycle edges', () =>
+  withFixture({
+    'modules/orders/ui/a.ts': 'import Worker from "./b?worker"; export const a = Worker;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => assert.match(result.errors.join(' '), /runtime-cycle/)));
+
+test('audited Vite prefix alias resolves extensionless raw source modules', () =>
+  withFixture({
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; ' +
+      'export default { resolve: { alias: { "@raw": fileURLToPath(new URL("./src/shared/ui", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({
+      viteAliases: { '@raw': 'src/shared/ui' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      baseUrl: 'src', paths: { '@raw/*': ['shared/ui/*'] },
+    } }),
+    'shared/ui/data.ts': 'export const message = 1;',
+    'shared/ui/view.ts': 'import text from "@raw/data?raw"; export const result = text;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('exact baseUrl alias permits its executable request but not an unmatched raw variant', () =>
+  withFixture({
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; ' +
+      'export default { resolve: { alias: { "helpers": fileURLToPath(new URL("./src/helpers.ts", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({
+      viteAliases: { helpers: 'src/helpers.ts' },
+    }),
+    '../tsconfig.json': JSON.stringify({ compilerOptions: {
+      module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src',
+    } }),
+    'helpers.ts': 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "helpers"; import text from "helpers?raw"; export const value = safe + text.length;',
+  }, result => assert.deepEqual(result.errors, [
+    'unverified-vite-runtime-alias: app/start.ts -> helpers?raw',
+  ])));
+
+test('TypeScript-only baseUrl and paths runtime imports fail closed without Vite mapping', () => {
+  for (const [compilerOptions, path, spec] of [
+    [{ baseUrl: 'src' }, 'helpers.ts', 'helpers'],
+    [{ baseUrl: 'src', paths: { '@safe/*': ['shared/lib/*'] } },
+      'shared/lib/helpers.ts', '@safe/helpers'],
+  ]) withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions }),
+    [path]: 'export const safe = 1;',
+    'app/start.ts': 'import { safe } from "' + spec + '"; export const value = safe;',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-runtime-alias/, spec));
+});
+
+test('TypeScript-only extensionless raw import does not pass Vite runtime verification', () =>
+  withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: 'src/shared/ui' } }),
+    'shared/ui/config.ts': 'export const data = 1;',
+    'shared/ui/view.ts': 'import content from "config?raw"; export const value = content;',
+  }, result => {
+    assert.match(result.errors.join(' '), /unverified-vite-runtime-alias/);
+    assert.doesNotMatch(result.errors.join(' '), /missing-static-asset/);
+  }));
+
+test('Vite aliases do not exempt extensionless raw assets from ownership checks', () =>
+  withFixture({
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; ' +
+      'export default { resolve: { alias: { "@private": fileURLToPath(new URL("./src/modules/orders/ui", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({
+      viteAliases: { '@private': 'src/modules/orders/ui' },
+    }),
+    'modules/orders/ui/data.ts': 'export const data = 1;',
+    'shared/ui/view.ts': 'import data from "@private/data?raw"; export const result = data;',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('verified Vite aliases cannot conceal missing extensionless asset targets', () =>
+  withFixture({
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; ' +
+      'export default { resolve: { alias: { "@data": fileURLToPath(new URL("./src/shared/ui", import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({
+      viteAliases: { '@data': 'src/shared/ui' },
+    }),
+    'shared/ui/view.ts': 'import data from "@data/missing?url"; export const result = data;',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/)));
+
+test('erased baseUrl and paths type imports need no Vite runtime alias', () => {
+  for (const compilerOptions of [
+    { baseUrl: 'src/shared/lib' },
+    { baseUrl: 'src', paths: { '@helpers': ['shared/lib/helpers.ts'] } },
+  ]) withFixture({
+    '../tsconfig.json': JSON.stringify({ compilerOptions }),
+    'shared/lib/helpers.ts': 'export type Helper = { name: string };',
+    'shared/lib/consumer.ts': 'import type { Helper } from "' +
+      (compilerOptions.paths ? '@helpers' : 'helpers') + '"; export type Result = Helper;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+
+test('extensionless inline modifiers still load executable TypeScript source', () => {
+  for (const suffix of ['?inline', '?no-inline']) withFixture({
+    'modules/orders/ui/a.ts': 'import { b } from "./b' + suffix + '"; export const a = b;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+  }, result => {
+    assert.match(result.errors.join(' '), /runtime-cycle/, suffix);
+    assert.doesNotMatch(result.errors.join(' '), /missing-static-asset/, suffix);
+  });
+  withFixture({
+    'shared/lib/math.ts': 'export const value = 1;',
+    'shared/lib/consumer.ts': 'import { value } from "./math?inline"; export const answer = value;',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+
+test('extensionless raw imports cannot traverse source-file symlinks outside root', t => {
+  const fixture = setup({
+    '../external.ts': 'export const value = 1;',
+    'shared/ui/view.ts': 'import value from "./data?raw"; export const result = value;',
+  });
+  try {
+    try {
+      fs.symlinkSync(path.join(fixture.root, '..', 'external.ts'),
+        path.join(fixture.root, 'shared/ui/data.ts'), 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) {
+        return t.skip('OS disallows file symlinks');
+      }
+      throw error;
+    }
+    const errors = check(fixture.root).errors.join(' ');
+    assert.match(errors, /outside-source-symlink/);
+    assert.match(errors, /outside-source-import/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('runtime graph follows existing JS when a TypeScript-preferred TS also exists', () => {
+  for (const spec of ['./b', './b.js']) withFixture({
+    'modules/orders/ui/a.ts': 'import { b } from "' + spec + '"; export const a = b;',
+    'modules/orders/ui/b.ts': 'export const b = 1;',
+    'modules/orders/ui/b.js': 'import { a } from "./a"; export const b = a;',
+  }, result => assert.match(result.errors.join(' '), /runtime-cycle/, spec));
+});
+test('cycle in TS substitute does not turn safe executed JS into a runtime cycle', () =>
+  withFixture({
+    'modules/orders/ui/a.ts': 'import { b } from "./b.js"; export const a = b;',
+    'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
+    'modules/orders/ui/b.js': 'export const b = 1;',
+  }, result => assert.doesNotMatch(result.errors.join(' '), /runtime-cycle/)));
+test('Vite local resolution still supports missing-JS TypeScript fallback', () =>
+  withFixture({
+    'modules/orders/ui/a.ts': 'import { b } from "./b.js"; export const a = b;',
+    'modules/orders/ui/b.ts': 'export const b = 1;',
+  }, result => assert.deepEqual(result.errors, [])));
+test('Less executable plugin statements fail closed in owned source', () =>
+  withFixture({
+    'shared/ui/theme.less': '@plugin "../../modules/orders/infrastructure/plugin.js";',
+    'modules/orders/infrastructure/plugin.js': 'module.exports = {};',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-less-plugin/)));
+
+test('asset URLs containing @plugin are not misclassified as executable Less directives', () =>
+  withFixture({
+    'shared/ui/theme.less': '.card { background: url(./@plugin.svg); }',
+    'shared/ui/@plugin.svg': '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('Less plugin syntax remains forbidden next to otherwise valid asset URLs', () =>
+  withFixture({
+    'shared/ui/theme.less': '.card { background: url(./@plugin.svg); }\n' +
+      '@plugin "../infrastructure/private.js";',
+    'shared/ui/@plugin.svg': '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-less-plugin/)));
+
+test('Less @plugin variable declarations and detached-ruleset calls remain allowed', () =>
+  withFixture({
+    'shared/ui/theme.less': '@plugin : { color: red; };\n@plugin();',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.deepEqual(result.errors, [])));
+
+test('a real executable Less plugin remains forbidden after a safe @plugin variable', () =>
+  withFixture({
+    'shared/ui/theme.less': '@plugin : { color: red; };\n@plugin();\n' +
+      '@plugin "../../modules/orders/infrastructure/plugin.js";',
+    'modules/orders/infrastructure/plugin.js': 'module.exports = {};',
+    'app/start.ts': 'export const ready = true;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-less-plugin/)));
