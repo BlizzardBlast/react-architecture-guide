@@ -20,6 +20,8 @@ The `app` composition function wires concrete dependencies. A React route/compon
 
 The shared analytics interface intentionally knows **nothing about Order**. Only the orders adapter maps business fields to the transport event.
 
+Order notifications are best effort after persistence, including asynchronous analytics failures. They do not delay or undo a successful order; critical delivery requires a durable mechanism such as an outbox.
+
 ## Run locally
 
 ~~~bash

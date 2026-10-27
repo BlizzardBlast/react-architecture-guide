@@ -7,7 +7,7 @@ export function createOrderAnalytics(client: AnalyticsClient): OrderEvents {
   return {
     orderPlaced(receipt: OrderReceipt, draft: OrderDraft) {
       try {
-        client.track("order_placed", {
+        return client.track("order_placed", {
           orderId: receipt.orderId,
           totalCents: draft.totalCents,
         });

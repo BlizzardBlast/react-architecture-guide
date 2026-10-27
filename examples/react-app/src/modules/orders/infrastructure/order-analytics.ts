@@ -3,7 +3,7 @@ import type { OrderEvents } from '../application/orders-service';
 export function createOrderAnalytics(sink: AnalyticsSink): OrderEvents {
   return {
     orderPlaced(receipt) {
-      try { sink.track('order_placed', { orderId: receipt.id, priceCents: receipt.priceCents }); }
+      try { return sink.track('order_placed', { orderId: receipt.id, priceCents: receipt.priceCents }); }
       catch { /* Best effort analytics: order was already saved. */ }
     },
   };
