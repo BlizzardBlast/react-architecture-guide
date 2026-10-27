@@ -10,7 +10,7 @@
     "dev": "vite",
     "build": "npm run arch && tsc --noEmit && vite build --outDir ../../.vite-build/react-app --emptyOutDir",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && node --test tests/*.test.mjs",
     "arch": "node ../../tools/check-boundaries.cjs src",
     "verify": "npm run lint && npm test && npm run build",
     "lint": "eslint src vite.config.ts vitest.setup.ts",

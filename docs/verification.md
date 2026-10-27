@@ -4,7 +4,18 @@ CR-P1-011's recurring installation and verification blocker was resolved in an e
 
 ## Review repair ledger
 
-Baseline for the current repair: clean branch `docs/m1-executable-architecture` at `389f6dab4c265ef070905837f0ad838d719e601d`, compared with `origin/main` at `5154e7d7150c34d5459cc616f309fb9d01b7f1aa`. Two bounded passes resolve the two scoped findings below. New regression tests reproduced the failures before implementation; the focused tests, related controls and complete gate now pass. The scoped recheck identified slow backtracking on long invalid backtick runs; pass 2 avoids the repeated suffix scan and tests varied fence widths. No merge was performed.
+Baseline for the current repair: clean branch `docs/m1-executable-architecture` at `bc45e4a9b3f54c4e5b4aabd38de955a67e8f5034`, compared with `origin/main` at `5154e7d7150c34d5459cc616f309fb9d01b7f1aa`. Three bounded passes resolve the two scoped findings below. New regression tests reproduced the failures before implementation; focused tests, related controls and the complete gate now pass. Pass 2 corrects three older fixtures that assumed exact aliases matched query-qualified requests, retaining executable-cycle coverage through a valid prefix alias and checking rejected bare-query requests against Vite. HTML CSS dispatch also follows Vite's case-sensitive extension rule. Pass 3 applies the unsupported-stylesheet-format guard to direct URL resources as well as Vite imports, covering media/disabled/vite-ignore controls. No merge was performed.
+
+| Finding | Remediation and verification | Status |
+| --- | --- | --- |
+| CR-P1-052 | Resolve matching aliases before relative/root-absolute asset decoys, matching the full query-qualified request. Retain Vite's direct dot-relative URL behavior; reject alias definitions that rewrite transformation flags. Unit tests cover missing targets, leading-hash aliases, JSON layer rules and worker cycles. Real Vite tests cover both alias-reached private assets and valid direct/query URL controls. | Resolved |
+| CR-P1-053 | Carry HTML module-import provenance into ownership resolution. Module scripts and Vite-imported CSS links use actual aliases; images, JS preloads, uppercase CSS extensions, media/disabled links and vite-ignore controls retain URL resolution. Public-file precedence, module public barrels, missing targets and unsupported CSS formats retain explicit checks. Two automated Vite conformance groups check 23 real resolution cases as part of example verification, including encoded HTML paths, public precedence, rejected bare-query requests, CSS preloads and non-stylesheet rel values. | Resolved |
+
+Delivery also preserves documentation-only commit `2d5612874468853d5a06339a834c9dd5348f936c`, which advanced the PR during validation. The repair was rebased without changing its implementation; final checks include the interaction-performance guide and all 20 Markdown files. The proposed external interaction benchmarks were not run.
+
+### Previous repair batch: CR-050 through CR-051
+
+This batch began clean at `389f6dab4c265ef070905837f0ad838d719e601d` and resolved its two scoped findings in two passes. A scoped recheck identified slow backtracking on long invalid backtick runs; pass 2 avoids the repeated suffix scan and tests varied fence widths. Its complete gate passed on both Node versions.
 
 | Finding | Remediation and verification | Status |
 | --- | --- | --- |
@@ -56,12 +67,12 @@ The earlier batch began clean at `7e6e97385628ffdc79971594d515231ae2cab4c4` and 
 | Observed command/check | Result |
 | --- | --- |
 | Clean dependency installation | All three package installs and isolated root/React `npm ci --engine-strict` followed by example `verify` passed in the earlier candidate; this repair does not change dependencies or lockfiles |
-| `npm run verify` | Passed on Node 22.13.0 and Node 24.22.0: 123 Markdown tests, 459 architecture tests, 6 orders tests, 21 React tests per run (609 total); no skipped tests |
+| `npm run verify` | Passed on Node 22.13.0 and Node 24.22.0: 123 Markdown tests, 471 architecture tests, 6 orders tests, 21 React component tests and 2 Vite conformance groups per run (623 total); no skipped tests |
 | Checks included in `verify` | Markdown links/fences, both example boundary checks, orders compilation, React Hooks/JSX accessibility lint, React typecheck and Vite 7.3.7 production build |
 | `python scripts/validate_docs.py` | Passed through the shared Markdown validator |
 | `npm audit` in each of the three packages | Zero reported vulnerabilities in all three resolved trees |
 | Consecutive production builds | Both Node-version gates built successfully without changing output location or weakening the secondary-HTML rule |
-| Vite URL conformance probes | The current repair rejects a prefix-free URL reaching a private module asset and a verified Vite alias overriding a safe relative decoy; real Vite builds emit the private target in both cases. Owned relative files and TS-only mapping controls pass. Earlier stylesheet and encoded asset probes remain historical evidence |
+| Automated Vite alias/HTML conformance | The current repair checks actual Vite resolution for 23 source/HTML cases, including relative/root imports, URL references, query matching and rejected bare requests, module scripts, encoded HTML paths, CSS links/preloads, images, public precedence, JS preloads, uppercase CSS, media/disabled and vite-ignore controls. These groups are part of the example's npm test command. Earlier URL, stylesheet and encoded asset probes remain historical evidence |
 | Targeted focus browser check | The previous repair's `royalblue` outline was verified in light/dark modes at 320px, with contrast above 3:1 against both backgrounds and no horizontal overflow; this tooling repair does not change the app |
 | Dev and preview HTTP smoke | Entry HTML, linked JS/CSS assets and `/about` fallback returned 200 with expected content types/content |
 | Dev browser smoke | Catalog rendered; empty customer name produced a linked error (`aria-invalid`/`aria-describedby`); saving a valid order updated history; changing product cleared success feedback; About navigation worked via Enter |

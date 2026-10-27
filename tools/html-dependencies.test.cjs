@@ -4,6 +4,29 @@ const { scanHtml } = require('./html-dependencies.cjs');
 
 const main = '<script type="module" src="/src/main.tsx"></script>';
 
+test('HTML references distinguish Vite module imports from URL-only resources', () => {
+  for (const [html, moduleImport] of [
+    [main, true],
+    ['<script type="module" vite-ignore src="/src/main.tsx"></script>', false],
+    ['<link rel="stylesheet" href="/src/shared/ui/style.css">', true],
+    ['<link rel="preload" as="style" href="/src/shared/ui/style.css">', true],
+    ['<link rel="icon" href="/src/shared/ui/style.css">', true],
+    ['<link rel="canonical" href="/src/shared/ui/style.css">', true],
+    ['<link rel="stylesheet" media="all" href="/src/shared/ui/style.css">', false],
+    ['<link rel="stylesheet" disabled href="/src/shared/ui/style.css">', false],
+    ['<link rel="stylesheet" href="/src/shared/ui/style.CSS">', false],
+    ['<link rel="stylesheet" vite-ignore href="/src/shared/ui/style.css">', false],
+    ['<link rel="modulepreload" href="/src/shared/ui/main.ts">', false],
+    ['<link rel="preload" as="script" href="/src/shared/ui/main.ts">', false],
+    ['<img src="/src/shared/ui/image.svg" alt="">', false],
+  ]) {
+    const result = scanHtml(html);
+    assert.deepEqual(result.errors, [], html);
+    assert.equal(result.references.length, 1, html);
+    assert.equal(Boolean(result.references[0].moduleImport), moduleImport, html);
+  }
+});
+
 test('HTML5 raw text and RCDATA do not allow fake comments to hide active elements', () => {
   for (const html of [
     '<title><!--</title><style>@import url("/src/private.css");</style>-->' + main,
@@ -21,7 +44,7 @@ test('HTML5 parser preserves quoted greater-than in safe script attributes', () 
     "<script type='module' src='/src/main.tsx' data-note='1 > 0'></script>",
   ]) {
     assert.deepEqual(scanHtml(html), {
-      errors: [], references: [{ spec: '/src/main.tsx', kind: 'script' }],
+      errors: [], references: [{ spec: '/src/main.tsx', kind: 'script', moduleImport: true }],
     });
   }
 });
@@ -61,7 +84,7 @@ test('inert JSON and actual HTML comments cannot generate source dependencies', 
   const text = '<script type="application/json">{"text":"<script>"}' +
     '</script><!-- <script type="module" src="/hidden.ts"></script> -->' + main;
   assert.deepEqual(scanHtml(text), {
-    errors: [], references: [{ spec: '/src/main.tsx', kind: 'script' }],
+    errors: [], references: [{ spec: '/src/main.tsx', kind: 'script', moduleImport: true }],
   });
 });
 
@@ -131,8 +154,8 @@ test('local CSS entrypoints are included and remote image media stays inert', ()
   assert.deepEqual(scanHtml(html), {
     errors: [],
     references: [
-      { spec: '/src/shared/ui/site.css', kind: 'stylesheet' },
-      { spec: '/src/shared/ui/critical.css', kind: 'stylesheet' },
+      { spec: '/src/shared/ui/site.css', kind: 'stylesheet', moduleImport: true },
+      { spec: '/src/shared/ui/critical.css', kind: 'stylesheet', moduleImport: true },
     ],
   });
 });

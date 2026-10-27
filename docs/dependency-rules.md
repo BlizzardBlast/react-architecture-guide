@@ -99,6 +99,8 @@ Mirror its resolved target:
 
 The checker does not execute the Vite config. Unverifiable dynamic configuration must be changed or explicitly integrated into a trusted module resolver; never silently bypass the architecture check. Alias targets cannot be used to evade shared or sibling module boundaries.
 
+For ordinary source and asset imports, verified Vite aliases take precedence over relative and root-absolute paths. Matching uses the complete incoming request before query modifiers are removed for filesystem lookup: an exact `icon.svg` alias does not match `icon.svg?raw`, while a directory alias can match `assets/icon.svg?raw`. Aliases that rewrite query/fragment syntax are unsupported; a leading `#` in an ordinary alias name remains valid.
+
 ### Vite dynamic imports, worker modules and URL assets
 
 Vite can compile variable dynamic `import()` expressions into module dependencies. The checker **fails closed** on nonliteral dynamic `import()` and computed `require()` rather than silently overlooking their edges. Replace them with reviewed explicit imports or implement a separate trusted enumeration policy.
@@ -107,9 +109,17 @@ For Vite's `new URL('./asset.ext', import.meta.url)` and `new Worker(new URL('./
 
 Local URL names do not require a `./` prefix: `new URL('icon.svg', import.meta.url)` resolves beside its importer after verified Vite aliases are applied. TypeScript `paths` cannot redirect that URL to a different file. External schemes, protocol-relative URLs and same-document query/fragment references do not create local asset edges.
 
+Vite's URL transform resolves explicitly dot-relative `new URL('./icon.svg', import.meta.url)` references directly beside the importer, bypassing aliases. Root-absolute and other local URL names retain Vite alias precedence.
+
 Vite import query suffixes such as `?url`, `?raw`, `?inline`, `?no-inline`, and `?worker` are removed **only for filesystem resolution**. The full import specifier is retained in diagnostics; query-modified worker/source entrypoints still participate in the runtime graph, while `?raw` and `?url` data imports do not create execution-cycle edges.
 
 These AST rules cover documented syntax, not arbitrary plugin transformations or the complete bundler graph. For complex Vite customizations, independently inspect the production output and effective bundler configuration rather than claiming the source checker provides a full security boundary.
+
+### HTML import and asset resolution
+
+HTML module scripts and local CSS links that Vite turns into imports use verified alias targets for ownership checks. CSS import dispatch follows the URL extension, including CSS preloads and CSS URLs with other `rel` values. Ordinary image URLs, JavaScript preloads, and links with `media`, `disabled` or `vite-ignore` retain direct URL resolution; `vite-ignore` module scripts do too. Existing public resources retain Vite's public-file precedence. Unsupported stylesheet formats such as PCSS/PostCSS/SSS fail closed rather than bypassing the owned stylesheet scan.
+
+The React example's `npm test` runs component tests and two Vite conformance groups. Those groups build temporary fixtures for source imports and HTML dispatch, checking the actual emitted target against the ownership result. They require the example's existing Vite dependency and do not replace browser validation.
 
 ### Transitive stylesheet ownership
 

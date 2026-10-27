@@ -35,7 +35,7 @@ function scanHtml(html) {
       }
     },
   });
-  function addReference(spec, kind) {
+  function addReference(spec, kind, moduleImport = false) {
     if (!spec || /[\u0000-\u001f]/.test(spec) || spec.trim() !== spec) {
       errors.push('unsupported-vite-html-url: missing, malformed or control-character URL');
       return;
@@ -63,7 +63,9 @@ function scanHtml(html) {
       errors.push('unsupported-vite-html-url: unresolved URL form: ' + spec);
       return;
     }
-    references.push({ spec, kind });
+    const reference = { spec, kind };
+    if (moduleImport) reference.moduleImport = true;
+    references.push(reference);
   }
   function addSrcset(value) {
     if (!value || /^data:/i.test(value)) {
@@ -118,7 +120,7 @@ function scanHtml(html) {
         } else if (type !== 'module' || !src || content.trim()) {
           errors.push('unsupported-vite-html-entry: script must be a src-only module');
         } else {
-          addReference(src, 'script');
+          addReference(src, 'script', !attrs.has('vite-ignore'));
         }
       }
       if (tag === 'link') {
@@ -126,7 +128,16 @@ function scanHtml(html) {
         // a private candidate in this independent responsive image list.
         if (attrs.has('imagesrcset')) addSrcset(attrs.get('imagesrcset'));
         const rel = new Set((attrs.get('rel') || '').toLowerCase().split(/\s+/));
-        if (rel.has('stylesheet')) addReference(attrs.get('href'), 'stylesheet');
+        const href = attrs.get('href');
+        let cssImport = false;
+        // Vite imports local CSS links by URL, regardless of their rel value.
+        if (href && !attrs.has('media') && !attrs.has('disabled') && !attrs.has('vite-ignore') &&
+            !/^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(href)) {
+          try { cssImport = /\.(?:css|less|sass|scss|styl|stylus|pcss|postcss|sss)(?:$|\?)/.test(decodeURI(href)); }
+          catch { /* Invalid URLs are diagnosed by the ownership resolver. */ }
+        }
+        if (cssImport) addReference(href, 'stylesheet', true);
+        else if (rel.has('stylesheet')) addReference(href, 'stylesheet');
         else if (rel.has('modulepreload')) addReference(attrs.get('href'), 'script');
         else if (rel.has('preload')) {
           const as = (attrs.get('as') || '').toLowerCase();

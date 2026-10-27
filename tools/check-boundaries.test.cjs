@@ -22,6 +22,13 @@ function withFixture(entries, fn) {
   const f = setup(entries);
   try { return fn(check(f.root)); } finally { f.cleanup(); }
 }
+function aliasConfig(find, target) {
+  return {
+    '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { ' +
+      JSON.stringify(find) + ': fileURLToPath(new URL(' + JSON.stringify('./' + target) + ', import.meta.url)) } } };',
+    '../architecture.config.json': JSON.stringify({ viteAliases: { [find]: target } }),
+  };
+}
 const base = {
   'shared/ui/button.ts': 'export const button = 1;',
   'modules/orders/domain/order.ts': 'export type Order = { id: string };',
@@ -969,6 +976,144 @@ test('root-absolute Vite assets with queries retain boundaries', () => withFixtu
   'shared/ui/view.ts': 'import raw from "/src/modules/orders/ui/template.svg?raw"; export const view = raw;',
   'modules/orders/ui/template.svg': '<svg/>',
 }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('Vite asset aliases override relative and root-absolute decoys', () => {
+  for (const spec of ['./icon.svg', '/src/shared/ui/icon.svg']) withFixture({
+    ...aliasConfig(spec, 'src/modules/orders/ui/private.svg'),
+    'shared/ui/view.ts': 'import icon from ' + JSON.stringify(spec) + '; export { icon };',
+    'shared/ui/icon.svg': '<svg/>',
+    'modules/orders/ui/private.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('Vite asset alias matching includes the complete query-qualified request', () => {
+  for (const suffix of ['', '?raw', '?url']) withFixture({
+    ...aliasConfig('/src/shared/ui/icon.svg', 'src/modules/orders/ui/private.svg'),
+    'shared/ui/view.ts': 'import icon from "/src/shared/ui/icon.svg' + suffix + '"; export { icon };',
+    'shared/ui/icon.svg': '<svg/>',
+    'modules/orders/ui/private.svg': '<svg/>',
+  }, result => suffix ? assert.deepEqual(result.errors, []) :
+    assert.match(result.errors.join(' '), /shared-must-be-independent/));
+  for (const suffix of ['?raw', '?url']) withFixture({
+    ...aliasConfig('./assets', 'src/modules/orders/ui'),
+    'shared/ui/view.ts': 'import icon from "./assets/icon.svg' + suffix + '"; export { icon };',
+    'shared/ui/assets/icon.svg': '<svg/>',
+    'modules/orders/ui/icon.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('Vite asset aliases cannot fall back to an existing decoy when the target is absent', () => withFixture({
+  ...aliasConfig('./icon.svg', 'src/shared/ui/absent.svg'),
+  'shared/ui/view.ts': 'import icon from "./icon.svg"; export { icon };',
+  'shared/ui/icon.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /missing-static-asset/)));
+
+test('Vite asset aliases cannot rewrite import transformation flags', () => withFixture({
+  ...aliasConfig('./icon.svg?raw', 'src/shared/ui/icon.svg'),
+  'shared/ui/view.ts': 'import icon from "./icon.svg?raw"; export { icon };',
+  'shared/ui/icon.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-alias-config/)));
+
+test('Vite asset aliases with a leading hash retain query-qualified prefix matching', () => withFixture({
+  ...aliasConfig('#assets', 'src/shared/ui/assets'),
+  'shared/ui/view.ts': 'import icon from "#assets/icon.svg?url"; export { icon };',
+  'shared/ui/assets/icon.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('Vite asset aliases preserve dot-relative URL handling and root URL alias ownership', () => {
+  for (const spec of ['./icon.svg', '/src/shared/ui/icon.svg']) withFixture({
+    ...aliasConfig(spec, 'src/modules/orders/ui/private.svg'),
+    'shared/ui/view.ts': 'export const icon = new URL(' + JSON.stringify(spec) + ', import.meta.url);',
+    'shared/ui/icon.svg': '<svg/>',
+    'modules/orders/ui/private.svg': '<svg/>',
+  }, result => spec.startsWith('.') ? assert.deepEqual(result.errors, []) :
+    assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('Vite asset aliases retain JSON layer checks and worker execution edges', () => {
+  withFixture({
+    ...aliasConfig('./config.json', 'src/modules/orders/ui/config.json'),
+    'modules/orders/model/order.ts': 'import config from "./config.json"; export { config };',
+    'modules/orders/model/config.json': '{}',
+    'modules/orders/ui/config.json': '{}',
+  }, result => assert.match(result.errors.join(' '), /pure-model-import/));
+  withFixture({
+    ...aliasConfig('./workers', 'src/modules/orders/ui/actual'),
+    'modules/orders/ui/a.ts': 'import worker from "./workers/b.ts?worker"; export { worker };',
+    'modules/orders/ui/workers/b.ts': 'export const decoy = true;',
+    'modules/orders/ui/actual/b.ts': 'import { worker } from "../a"; export { worker };',
+  }, result => assert.match(result.errors.join(' '), /runtime-cycle/));
+});
+
+test('HTML Vite imports check alias targets instead of safe path decoys', () => {
+  for (const [ext, html] of [
+    ['ts', '<script type="module" src="/src/shared/ui/entry.ts"></script>'],
+    ...['stylesheet', 'preload" as="style', 'icon', 'canonical'].map(rel =>
+      ['css', '<link rel="' + rel + '" href="/src/shared/ui/entry.css">']),
+  ]) withFixture({
+    ...aliasConfig('/src/shared/ui/entry.' + ext, 'src/modules/orders/ui/private.' + ext),
+    '../index.html': html,
+    'shared/ui/check.ts': 'export const checked = true;',
+    ['shared/ui/entry.' + ext]: ext === 'ts' ? 'export const decoy = true;' : '.decoy{}',
+    ['modules/orders/ui/private.' + ext]: ext === 'ts' ? 'export const privateValue = true;' : '.private{}',
+  }, result => assert.match(result.errors.join(' '), /deep-module-import/));
+});
+
+test('HTML URL resources do not apply import-only aliases', () => {
+  for (const [ext, html] of [
+    ['svg', '<img src="/src/shared/ui/entry.svg" alt="">'],
+    ['ts', '<link rel="modulepreload" href="/src/shared/ui/entry.ts">'],
+    ['ts', '<link rel="preload" as="script" href="/src/shared/ui/entry.ts">'],
+    ['ts', '<script type="module" vite-ignore src="/src/shared/ui/entry.ts"></script>'],
+    ['css', '<link rel="stylesheet" media="all" href="/src/shared/ui/entry.css">'],
+    ['css', '<link rel="stylesheet" disabled href="/src/shared/ui/entry.css">'],
+    ['CSS', '<link rel="stylesheet" href="/src/shared/ui/entry.CSS">'],
+    ['css', '<link rel="stylesheet" vite-ignore href="/src/shared/ui/entry.css">'],
+  ]) withFixture({
+    ...aliasConfig('/src/shared/ui/entry.' + ext, 'src/modules/orders/ui/private.' + ext),
+    '../index.html': html,
+    'shared/ui/check.ts': 'export const checked = true;',
+    ['shared/ui/entry.' + ext]: ext === 'ts' ? 'export const decoy = true;' : '',
+    ['modules/orders/ui/private.' + ext]: ext === 'ts' ? 'export const privateValue = true;' : '',
+  }, result => assert.deepEqual(result.errors, [], html));
+  withFixture({
+    ...aliasConfig('/src/modules/orders/ui/entry.png', 'src/shared/ui/other.png'),
+    '../index.html': '<img src="/src/modules/orders/ui/entry.png" alt="">',
+    '../public/src/modules/orders/ui/entry.png': 'public image',
+    'shared/ui/check.ts': 'export const checked = true;',
+    'shared/ui/other.png': 'alias image',
+    'modules/orders/ui/entry.png': 'private decoy',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('HTML Vite aliases accept public module barrels and reject missing targets', () => {
+  withFixture({
+    ...aliasConfig('/src/shared/ui/entry.ts', 'src/modules/orders'),
+    '../index.html': '<script type="module" src="/src/shared/ui/entry.ts"></script>',
+    'shared/ui/entry.ts': 'export const decoy = true;',
+    'modules/orders/index.ts': 'export const publicValue = true;',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    ...aliasConfig('/src/shared/ui/entry.ts', 'src/shared/ui/absent.ts'),
+    '../index.html': '<script type="module" src="/src/shared/ui/entry.ts"></script>',
+    'shared/ui/entry.ts': 'export const decoy = true;',
+  }, result => assert.match(result.errors.join(' '), /missing-html-asset/));
+});
+
+test('HTML CSS aliases reject unscanned preprocessing formats', () => {
+  for (const ext of ['pcss', 'postcss', 'sss']) withFixture({
+    ...aliasConfig('/src/shared/ui/entry.css', 'src/shared/ui/actual.' + ext),
+    '../index.html': '<link rel="stylesheet" href="/src/shared/ui/entry.css">',
+    'shared/ui/check.ts': 'export const checked = true;',
+    'shared/ui/entry.css': '.decoy{}',
+    ['shared/ui/actual.' + ext]: '.actual{}',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-html-stylesheet/));
+  for (const attributes of ['media="all"', 'disabled', 'vite-ignore']) withFixture({
+    '../index.html': '<link rel="stylesheet" ' + attributes + ' href="/src/shared/ui/actual.pcss">',
+    'shared/ui/check.ts': 'export const checked = true;',
+    'shared/ui/actual.pcss': '.actual{}',
+  }, result => assert.match(result.errors.join(' '), /unverified-vite-html-stylesheet/, attributes));
+});
 
 test('source Vite worker query imports retain graph and layer rules', () => withFixture({
   'modules/orders/domain/order.ts': 'import worker from "../infrastructure/worker.ts?worker"; export const value = worker;',
@@ -3806,11 +3951,11 @@ test('Vite-aliased source inline modifiers retain executable runtime graph edges
   for (const suffix of ['?inline', '?no-inline']) {
     withFixture({
       '../vite.config.ts': 'import { fileURLToPath } from "node:url";\n' +
-        'export default { resolve: { alias: { "@b": fileURLToPath(new URL("./src/modules/orders/ui/b.ts", import.meta.url)) } } };',
+        'export default { resolve: { alias: { "@ui": fileURLToPath(new URL("./src/modules/orders/ui", import.meta.url)) } } };',
       '../architecture.config.json': JSON.stringify({
-        viteAliases: { '@b': 'src/modules/orders/ui/b.ts' },
+        viteAliases: { '@ui': 'src/modules/orders/ui' },
       }),
-      'modules/orders/ui/a.ts': 'import { b } from "@b' + suffix + '"; export const a = b;',
+      'modules/orders/ui/a.ts': 'import { b } from "@ui/b' + suffix + '"; export const a = b;',
       'modules/orders/ui/b.ts': 'import { a } from "./a"; export const b = a;',
     }, result => assert.match(result.errors.join(' '), /runtime-cycle/, suffix));
   }
@@ -4073,7 +4218,7 @@ test('arbitrary baseUrl raw source imports remain static assets in pure layers',
   }, result => assert.match(result.errors.join(' '),
     /pure-layer-static-asset: shared\/lib\/consumer\.ts -> config\?raw/)));
 
-test('arbitrary baseUrl raw source imports remain valid in UI', () =>
+test('exact baseUrl aliases do not certify unmatched raw imports', () =>
   withFixture({
     '../tsconfig.json': JSON.stringify({ compilerOptions: {
       module: 'ESNext', moduleResolution: 'Bundler', baseUrl: 'src/shared/lib',
@@ -4082,7 +4227,9 @@ test('arbitrary baseUrl raw source imports remain valid in UI', () =>
     '../architecture.config.json': JSON.stringify({ viteAliases: { 'config': 'src/shared/lib/config.ts' } }),
     'shared/lib/config.ts': 'export const secret = 1;',
     'shared/ui/view.ts': 'import config from "config?raw"; export const value = config;',
-  }, result => assert.deepEqual(result.errors, [])));
+  }, result => assert.deepEqual(result.errors, [
+    'unverified-vite-runtime-alias: shared/ui/view.ts -> config?raw',
+  ])));
 
 test('arbitrary baseUrl CSS assets remain pure-layer restricted but supported in UI', () => {
   withFixture({
@@ -4231,7 +4378,7 @@ test('audited Vite prefix alias resolves extensionless raw source modules', () =
     'shared/ui/view.ts': 'import text from "@raw/data?raw"; export const result = text;',
   }, result => assert.deepEqual(result.errors, [])));
 
-test('audited Vite alias for baseUrl source permits executable and raw imports', () =>
+test('exact baseUrl alias permits its executable request but not an unmatched raw variant', () =>
   withFixture({
     '../vite.config.ts': 'import { fileURLToPath } from "node:url"; ' +
       'export default { resolve: { alias: { "helpers": fileURLToPath(new URL("./src/helpers.ts", import.meta.url)) } } };',
@@ -4243,7 +4390,9 @@ test('audited Vite alias for baseUrl source permits executable and raw imports',
     } }),
     'helpers.ts': 'export const safe = 1;',
     'app/start.ts': 'import { safe } from "helpers"; import text from "helpers?raw"; export const value = safe + text.length;',
-  }, result => assert.deepEqual(result.errors, [])));
+  }, result => assert.deepEqual(result.errors, [
+    'unverified-vite-runtime-alias: app/start.ts -> helpers?raw',
+  ])));
 
 test('TypeScript-only baseUrl and paths runtime imports fail closed without Vite mapping', () => {
   for (const [compilerOptions, path, spec] of [

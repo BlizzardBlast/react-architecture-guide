@@ -636,7 +636,7 @@ function resolveViteAlias(spec, aliases, projectDir) {
   for (const [find, destination] of Object.entries(aliases)) {
     // Match Vite/Rollup: exact match or the next character must be '/'.
     if (spec === find || spec.startsWith(find + '/')) {
-      const suffix = spec.slice(find.length).replace(/^\//, '');
+      const suffix = spec.slice(find.length).replace(/^\//, '').split(/[?#]/, 1)[0];
       return path.resolve(projectDir, destination, suffix);
     }
   }
@@ -1302,6 +1302,10 @@ function verifyViteAliases(projectDir, policy, errors, viteState) {
         ' missing from architecture.config.json viteAliases');
       continue;
     }
+    if (find.includes('?') || find.slice(1).includes('#') || /[?#]/.test(policy.viteAliases[find])) {
+      errors.push('unsupported-vite-alias-config: aliases cannot rewrite import queries or fragments: ' + find);
+      continue;
+    }
     const expected = path.resolve(projectDir, policy.viteAliases[find]);
     let actual = null;
     if (ts.isStringLiteral(value) && path.isAbsolute(value.text)) {
@@ -1463,21 +1467,27 @@ function verifyViteHtmlEntrypoints(projectDir, sourceRoot, policy, errors, state
   const publicRoot = path.join(projectDir, 'public');
   const { errors: parseErrors, references } = scanHtml(fs.readFileSync(htmlFile, 'utf8'));
   errors.push(...parseErrors.map(message => message + ': index.html'));
-  for (const { spec: rawSpec, kind } of references) {
+  for (const { spec: rawSpec, kind, moduleImport } of references) {
     const spec = decodeAssetUrl(rawSpec, errors, 'index.html');
     if (spec === null) continue;
     const projectCandidate = path.resolve(projectDir, spec.startsWith('/') ? '.' + spec : spec);
     const publicCandidate = path.resolve(publicRoot, spec.startsWith('/') ? '.' + spec : spec);
-    const local = fs.existsSync(projectCandidate) &&
-      fs.statSync(projectCandidate).isFile();
-    const fromPublic = !local && !state.publicDirDisabled &&
+    const fromPublic = !state.publicDirDisabled &&
       fs.existsSync(publicCandidate) && fs.statSync(publicCandidate).isFile();
-    const target = local ? projectCandidate : fromPublic ? publicCandidate : null;
-    if (!target) {
+    const alias = moduleImport && !fromPublic
+      ? resolveViteAlias(kind === 'script' ? rawSpec : spec, policy.viteAliases, projectDir) : null;
+    const candidate = alias || projectCandidate;
+    let target = fromPublic ? publicCandidate : candidate;
+    if (!fromPublic && moduleImport && kind === 'script') target = resolveViteLocalModule(candidate);
+    if (!target || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
       errors.push('missing-html-asset: index.html -> ' + spec);
       continue;
     }
     const physical = fs.realpathSync(target);
+    if (kind === 'stylesheet' && !styleExt.test(target)) {
+      errors.push('unverified-vite-html-stylesheet: unsupported stylesheet format: ' + spec);
+      continue;
+    }
     if (kind === 'script' && !sourceExt.test(target)) {
       errors.push('unsupported-vite-html-entry: module script is not a JS/TS file: ' + spec);
       continue;
@@ -1795,8 +1805,9 @@ function check(srcDir) {
       const mappedAsset = dataQuery || (Boolean(dep.fromUrl) && !dep.workerEntry);
       const transformedImport = Boolean(dep.fromUrl) ||
         (Boolean(query) && !inlineModifiersOnly);
-      const viteAlias = resolveViteAlias(filesystemSpec, policy.viteAliases, path.dirname(root));
-      // Vite prefers importer-relative URL assets after applying its aliases.
+      // Dot-relative URL references bypass aliases in Vite's URL transform.
+      const viteAlias = dep.fromUrl && filesystemSpec.startsWith('.') ? null :
+        resolveViteAlias(dep.spec, policy.viteAliases, path.dirname(root));
       const relativeSpec = filesystemSpec.startsWith('.') ||
         Boolean(dep.fromUrl && !filesystemSpec.startsWith('/') && !viteAlias);
       const rootAbsolute = filesystemSpec.startsWith('/');
@@ -1979,9 +1990,9 @@ function check(srcDir) {
       let originalExternalPath;
       if (localAsset) {
         const candidates = [];
-        if (relativeSpec) candidates.push(path.resolve(path.dirname(file), filesystemSpec));
+        if (viteAlias) candidates.push(viteAlias);
+        else if (relativeSpec) candidates.push(path.resolve(path.dirname(file), filesystemSpec));
         else if (rootPath) candidates.push(rootPath);
-        else if (viteAlias) candidates.push(viteAlias); // Effective Vite alias takes precedence.
         else if (projectAlias) {
           const mapped = resolveMappedAssetCandidates(filesystemSpec, options, path.dirname(root));
           if (mapped.length) candidates.push(...mapped);
