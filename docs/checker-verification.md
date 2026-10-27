@@ -38,7 +38,7 @@ This is the **implementation-specific verification matrix** for the architecture
 
 - [ ] Apply Vite HTML discovery exclusions to **specific root-relative output/vendor directories**, not every nested directory with a matching basename.
 - [ ] Treat remote/data `stylesheet` and `preload as=style` links as active CSS dependencies that require explicit review and transitive checking; preserve intentional inert remote media.
-- [ ] Handle unreadable/dangling symlinks as validation diagnostics without throwing, and reject symlinked HTML documents or directories that could hide additional entrypoints.
+- [ ] Handle unreadable/dangling symlinks as validation diagnostics without throwing, reject symlinked HTML documents or directories, and detect stylesheet aliases into another module/layer even when they contain no import edges.
 - [ ] Exercise both negative bypass cases and harmless controls in the installed architecture tests, plus actual Vite dev-server HTML and stylesheet behavior before merge.
 
 ### Vite disabled publicDir, remote stylesheet directives and source symlinks

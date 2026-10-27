@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -6,7 +6,12 @@ import { createMemoryHistory, createRouter, RouterProvider } from '@tanstack/rea
 import { createOrders } from '../modules/orders';
 import { routeTree } from './tree';
 
+// jsdom has no native scrolling/layout implementation. This mock is scoped to
+// the router integration test, without masking unrelated errors.
+afterEach(() => vi.restoreAllMocks());
+
 it('composes independent catalog and orders modules through a route', { timeout: 15_000 }, async () => {
+  vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const orders = createOrders({ track() {} });
   const router = createRouter({

@@ -72,7 +72,7 @@ For an incremental migration, `allowMixedLayouts` maps a module name to a **none
 
 ### Symlinks and physical file ownership
 
-Source-file symlinks are checked against their physical targets, not just their apparent paths. Aliases that point into a different module/layer, or outside the validated source root, are rejected. Same-owner aliases remain possible. Ownership enforcement applies to type-only and runtime imports.
+Source-file and stylesheet symlinks are checked against their physical targets, not just their apparent paths. Aliases that point into a different module/layer, or outside the validated source root, are rejected. Same-owner aliases remain possible. Ownership enforcement applies to type-only and runtime imports, as well as stylesheet entrypoints even when they contain no imports.
 
 ### Vite imports and alias integrity
 

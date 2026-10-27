@@ -1612,7 +1612,14 @@ function scanOwnedStylesheets(root, physicalRoot, policy, errors) {
       errors.push('outside-source-symlink: ' + path.relative(root, logicalFile));
       return;
     }
+    const logical = category(logicalFile, root);
     const source = category(physicalFile, physicalRoot);
+    // Stylesheet aliases must preserve module/layer ownership, even without imports.
+    // Follow the same physical ownership rule used for JS/TS source symlinks.
+    if (!sameOwnership(logical, source)) {
+      errors.push('stylesheet-symlink-ownership: ' + logical.relative +
+        ' -> ' + source.relative);
+    }
     if (/\.(?:styl|stylus)$/i.test(logicalFile)) {
       errors.push('unverified-vite-stylus-graph: ' + source.relative +
         '; Stylus imports require an audited resolved preprocessing graph');

@@ -2725,6 +2725,53 @@ test('dangling TypeScript and CSS file symlinks report diagnostics, not thrown e
   } finally { fixture.cleanup(); }
 });
 
+test('stylesheet aliases cannot impersonate another module or layer', t => {
+  for (const [name, alias, target] of [
+    ['shared to module', 'shared/ui/alias.css', 'modules/orders/ui/private.css'],
+    ['cross-module', 'modules/payments/ui/alias.css', 'modules/orders/ui/private.css'],
+    ['cross-layer', 'modules/orders/ui/alias.css', 'modules/orders/domain/private.css'],
+  ]) {
+    const fixture = setup({
+      'app/start.ts': 'export const ready = true;',
+      [target]: '.private { display: block; }',
+    });
+    try {
+      const aliasFile = path.join(fixture.root, alias);
+      fs.mkdirSync(path.dirname(aliasFile), { recursive: true });
+      try {
+        fs.symlinkSync(path.join(fixture.root, target), aliasFile, 'file');
+      } catch (error) {
+        if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) {
+          return t.skip('OS disallows file symlinks');
+        }
+        throw error;
+      }
+      assert.match(check(fixture.root).errors.join(' '),
+        /stylesheet-symlink-ownership:/, name);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test('stylesheet aliases outside the source root fail closed', t => {
+  const fixture = setup({
+    'app/start.ts': 'export const ready = true;',
+    '../unowned.css': '.outside { display: block; }',
+  });
+  try {
+    const alias = path.join(fixture.root, 'shared/ui/alias.css');
+    fs.mkdirSync(path.dirname(alias), { recursive: true });
+    try {
+      fs.symlinkSync(path.join(fixture.root, '../unowned.css'), alias, 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) {
+        return t.skip('OS disallows file symlinks');
+      }
+      throw error;
+    }
+    assert.match(check(fixture.root).errors.join(' '), /outside-source-symlink:/);
+  } finally { fixture.cleanup(); }
+});
+
 test('valid same-owner stylesheet symlink preserves ownership validation', t => {
   const fixture = setup({
     'shared/ui/base.css': '.notice { display: block; }',
