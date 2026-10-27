@@ -191,6 +191,6 @@ test('actual Vite config discovery agrees with the architecture policy', async (
   await assertConformance(entries, privateAlias, true, 'computed unsupported configuration',
     undefined, null, null, {
       loadConfig: true, dynamicAlias: true,
-      checkerError: /unverifiable-vite-alias-target/,
+      checkerError: /unsupported-vite-alias-config: additional top-level executable declarations/,
     });
 });
