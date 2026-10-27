@@ -13,6 +13,13 @@ interface Props {
   readonly selection: OrderSelection | null;
 }
 
+// Rejected JavaScript promises are not guaranteed to contain Error instances.
+// Do not leak arbitrary rejection payloads into visible error messages.
+function saveFailureMessage(reason: unknown): string {
+  if (reason instanceof Error && reason.message.trim()) return reason.message;
+  return 'Unable to save the order. Please try again.';
+}
+
 interface SaveGuard {
   readonly isSaving: boolean;
   readonly beginSave: () => boolean;
@@ -69,7 +76,7 @@ function CheckoutForm({ service, selection, isSaving, beginSave, finishSave, rep
       setCustomerName('');
       await queryClient.invalidateQueries({ queryKey: orderKey });
     },
-    onError: error => reportSaveError(error.message, selection?.productName ?? 'product'),
+    onError: error => reportSaveError(saveFailureMessage(error), selection?.productName ?? 'product'),
     // Mutation reset does not cancel requests. Release the cross-form guard only
     // after the actual asynchronous mutation has settled.
     onSettled: finishSave,

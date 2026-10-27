@@ -217,6 +217,30 @@ it('releases the save guard and permits retry after a rejected save', async () =
   expect(await screen.findByText('Order saved.')).toBeInTheDocument();
 });
 
+it.each([
+  ['string', 'unexpected rejection'],
+  ['null', null],
+  ['object', { reason: 'private transport error' }],
+  ['empty Error', new Error('')],
+])('handles a %s rejection safely and permits retry', async (_label, rejected) => {
+  const placeOrder = vi.fn()
+    .mockRejectedValueOnce(rejected)
+    .mockImplementation(async (draft: Parameters<OrdersService['placeOrder']>[0]) => ({
+      ...draft, id: 'retried-after-unknown-rejection',
+    }));
+  renderCheckout({ scopeId: 'unknown-rejection', listOrders: async () => [], placeOrder });
+  await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    "Couldn't save Green tea: Unable to save the order. Please try again.",
+  );
+  expect(screen.queryByText(/private transport error|unexpected rejection/i)).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled());
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  expect(placeOrder).toHaveBeenCalledTimes(2);
+  expect(await screen.findByText('Order saved.')).toBeInTheDocument();
+});
+
 it('keeps a prior product save failure visible after switching products mid-flight', async () => {
   let fail!: (error: Error) => void;
   const pending = new Promise<Awaited<ReturnType<OrdersService['placeOrder']>>>(

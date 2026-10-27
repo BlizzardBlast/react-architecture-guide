@@ -1,0 +1,44 @@
+name: Verify
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+
+# One batched job, not a job per tool or check. Draft PRs wait until ready.
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            examples/orders/package-lock.json
+            examples/react-app/package-lock.json
+      - name: Install pinned dependencies
+        run: |
+          npm ci --no-audit --no-fund
+          npm --prefix examples/orders ci --no-audit --no-fund
+          npm --prefix examples/react-app ci --no-audit --no-fund
+      - name: Lint, unit tests, docs, boundaries, typecheck, production build
+        run: npm run verify
+      - name: Audit all three dependency trees
+        run: |
+          npm audit
+          npm --prefix examples/orders audit
+          npm --prefix examples/react-app audit

@@ -51,6 +51,7 @@ For complex business workflows, **replace**, rather than combine blindly, the si
 | Shared UI responsiveness and interaction benchmarks | [Interaction performance contracts](docs/interaction-performance.md) |
 | Incremental adoption | [Adoption](docs/adoption.md) |
 | Quality and code review | [Review checklist](docs/quality-and-review.md) |
+| Checker-specific verification and regression cases | [Checker verification matrix](docs/checker-verification.md) |
 | Reference sources | [References](docs/references.md) |
 | Architectural decisions | [ADRs](docs/decisions/0001-modular-feature-first.md) |
 | Reusable coding agent guidance | [Copy-ready AGENTS instructions](agents/react-architecture/AGENTS.snippet.md) |
