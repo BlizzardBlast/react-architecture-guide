@@ -533,6 +533,39 @@ test('HTML-looking fence info strings do not conceal links following the fence',
   );
 });
 
+test('backticks in backtick fence info strings cannot hide active links', () => {
+  for (const info of ['ts`bad', 'ts\\`bad']) {
+    for (const prefix of ['', '> ', '- ']) {
+      for (const width of [3, 4, 18_000]) {
+        const fence = '`'.repeat(width);
+        fixture(prefix + fence + info + '\n\n[Broken](missing.md)\n' + fence, root =>
+          assert.match(checkAll(root).issues.join(' '), /missing local link: missing\.md/));
+      }
+    }
+  }
+});
+
+test('invalid backtick fence info cannot hide reference definitions', () => fixture(
+  '```ts`bad\n\n[foo <!--]: README.md\n[foo <!--]\n[Broken](missing.md)\n```', root =>
+    assert.deepEqual(checkAll(root).issues, [
+      'README.md:6: unclosed ``` code fence', 'README.md:5: missing local link: missing.md',
+    ]),
+));
+
+test('invalid backtick fence info does not interrupt multiline inline constructs', () => {
+  fixture('Before ``literal\n```ts`bad\n[Hidden](missing.md)\nend``', root =>
+    assert.deepEqual(checkAll(root).issues, []));
+  fixture('Before <!--\n```ts`bad\n[Hidden](missing.md)\n--> [Broken](missing2.md)', root =>
+    assert.deepEqual(checkAll(root).issues, ['README.md:4: missing local link: missing2.md']));
+});
+
+test('valid backtick and tilde fence info strings retain literal contents', () => {
+  for (const [fence, info] of [['```', 'ts'], ['~~~', 'ts`valid']]) fixture(
+    fence + info + '\n[Hidden](missing.md)\n' + fence, root =>
+      assert.deepEqual(checkAll(root).issues, []),
+  );
+});
+
 test('real HTML comments with fence-like content still hide inactive links', () => fixture(
   '<!--\n~~~md\n[Hidden](missing.md)\n~~~\n-->\n[Broken](missing2.md)',
   root => assert.deepEqual(checkAll(root).issues, ['README.md:6: missing local link: missing2.md']),

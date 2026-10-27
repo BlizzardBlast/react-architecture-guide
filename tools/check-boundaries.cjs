@@ -175,7 +175,7 @@ function imports(node, list, options, inJSDoc = false) {
     const spec = literalString(node.arguments[0]);
     if (spec === null) {
       list.push({ unsupported: 'dynamic-url', line: node.getStart() });
-    } else if (spec.startsWith('.') || spec.startsWith('/')) {
+    } else if (spec && !/^(?:[a-z][a-z\d+.-]*:|\/\/|[?#])/i.test(spec)) {
       const parent = node.parent;
       const workerEntry = Boolean(parent && ts.isNewExpression(parent) &&
         ts.isIdentifier(parent.expression) &&
@@ -1795,10 +1795,12 @@ function check(srcDir) {
       const mappedAsset = dataQuery || (Boolean(dep.fromUrl) && !dep.workerEntry);
       const transformedImport = Boolean(dep.fromUrl) ||
         (Boolean(query) && !inlineModifiersOnly);
-      const relativeSpec = filesystemSpec.startsWith('.');
+      const viteAlias = resolveViteAlias(filesystemSpec, policy.viteAliases, path.dirname(root));
+      // Vite prefers importer-relative URL assets after applying its aliases.
+      const relativeSpec = filesystemSpec.startsWith('.') ||
+        Boolean(dep.fromUrl && !filesystemSpec.startsWith('/') && !viteAlias);
       const rootAbsolute = filesystemSpec.startsWith('/');
       const rootPath = rootAbsolute ? path.resolve(path.dirname(root), '.' + filesystemSpec) : null;
-      const viteAlias = resolveViteAlias(filesystemSpec, policy.viteAliases, path.dirname(root));
       const pathPattern = matchesAlias(filesystemSpec, options.paths);
       // baseUrl can resolve arbitrary specifiers such as "helpers" or
       // "features/helpers"; the names of source directories are not evidence

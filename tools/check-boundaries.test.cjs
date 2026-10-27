@@ -882,6 +882,55 @@ test('new URL static assets respect ownership and pure-layer restrictions', () =
   }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
 });
 
+test('prefix-free new URL assets obey module ownership', () => {
+  for (const prefix of ['', './']) withFixture({
+    'shared/ui/view.ts': 'export const icon = new URL("' + prefix + 'assets/../../../modules/orders/ui/logo.svg", import.meta.url);',
+    'modules/orders/ui/logo.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('prefix-free new URL assets resolve beside their importer instead of TypeScript paths', () => withFixture({
+  '../tsconfig.json': '{"compilerOptions":{"baseUrl":".","paths":{"icon.svg":["src/modules/orders/ui/private.svg"]}}}',
+  'shared/ui/view.ts': 'export const icon = new URL("icon.svg", import.meta.url);',
+  'shared/ui/icon.svg': '<svg/>',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.deepEqual(result.errors, [])));
+
+test('prefix-free new URL assets retain verified Vite alias precedence', () => withFixture({
+  '../vite.config.ts': 'import { fileURLToPath } from "node:url"; export default { resolve: { alias: { "icon.svg": fileURLToPath(new URL("./src/modules/orders/ui/private.svg", import.meta.url)) } } };',
+  '../architecture.config.json': '{"viteAliases":{"icon.svg":"src/modules/orders/ui/private.svg"}}',
+  'shared/ui/view.ts': 'export const icon = new URL("icon.svg", import.meta.url);',
+  'shared/ui/icon.svg': '<svg/>',
+  'modules/orders/ui/private.svg': '<svg/>',
+}, result => assert.match(result.errors.join(' '), /shared-must-be-independent/)));
+
+test('prefix-free new URL assets enforce presence and pure layers', () => {
+  withFixture({
+    'modules/orders/model/order.ts': 'export const icon = new URL(`icon.svg`, import.meta.url);',
+    'modules/orders/model/icon.svg': '<svg/>',
+  }, result => assert.match(result.errors.join(' '), /pure-layer-static-asset/));
+  withFixture({
+    'shared/ui/view.ts': 'export const icon = new URL("missing.svg", import.meta.url);',
+  }, result => assert.match(result.errors.join(' '), /missing-static-asset/));
+});
+
+test('prefix-free new URL workers retain execution edges while standalone URLs do not', () => {
+  for (const constructor of ['Worker', 'SharedWorker', null]) withFixture({
+    'modules/orders/ui/a.ts': 'export const ref = ' + (constructor ? 'new ' + constructor + '(' : '') +
+      'new URL("b.ts", import.meta.url)' + (constructor ? ', { type: "module" })' : '') + ';',
+    'modules/orders/ui/b.ts': 'import { ref } from "./a"; export const result = ref;',
+  }, result => constructor
+    ? assert.match(result.errors.join(' '), /runtime-cycle/)
+    : assert.deepEqual(result.errors, []));
+});
+
+test('new URL external and same-document references remain outside the local asset graph', () => {
+  for (const spec of ['https://example.com/icon.svg', '//example.com/icon.svg', 'data:image/png;base64,AA==', 'blob:https://example.com/id', '#icon', '?version=1']) {
+    withFixture({ 'shared/ui/view.ts': 'export const icon = new URL(' + JSON.stringify(spec) + ', import.meta.url);' },
+      result => assert.deepEqual(result.errors, [], spec));
+  }
+});
+
 test('computed new URL targets fail closed', () => withFixture({
   'shared/ui/view.ts': 'export const icon = new URL(name, import.meta.url);',
 }, result => assert.match(result.errors.join(' '), /unsupported-dynamic-url/)));

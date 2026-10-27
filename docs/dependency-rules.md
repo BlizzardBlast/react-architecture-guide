@@ -105,6 +105,8 @@ Vite can compile variable dynamic `import()` expressions into module dependencie
 
 For Vite's `new URL('./asset.ext', import.meta.url)` and `new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })` syntax, the checker records statically specified local URLs as dependencies. Both must pass ownership, pure-layer and cross-module checks. A standalone `new URL()` reference is not an executable source-module import and does not create a runtime-cycle edge; a `Worker` or `SharedWorker` entrypoint does. Dynamic URL targets fail closed. Generic external URLs are not treated as local source dependencies.
 
+Local URL names do not require a `./` prefix: `new URL('icon.svg', import.meta.url)` resolves beside its importer after verified Vite aliases are applied. TypeScript `paths` cannot redirect that URL to a different file. External schemes, protocol-relative URLs and same-document query/fragment references do not create local asset edges.
+
 Vite import query suffixes such as `?url`, `?raw`, `?inline`, `?no-inline`, and `?worker` are removed **only for filesystem resolution**. The full import specifier is retained in diagnostics; query-modified worker/source entrypoints still participate in the runtime graph, while `?raw` and `?url` data imports do not create execution-cycle edges.
 
 These AST rules cover documented syntax, not arbitrary plugin transformations or the complete bundler graph. For complex Vite customizations, independently inspect the production output and effective bundler configuration rather than claiming the source checker provides a full security boundary.
@@ -168,6 +170,8 @@ The architecture checker only accepts one **static** CommonJS `module.exports = 
 The checker isolates each supported shell command within npm scripts when identifying Vite's own `--config` option; flags belonging to ESLint or another command are not Vite configuration selections. Scripts with multiple conflicting Vite invocations or ambiguous configuration flags fail closed. This limited shell analysis is not a complete interpreter for arbitrary shell functions, runtime wrappers, or externally supplied CLI overrides; inspect your actual build scripts and verify Vite's effective configuration before relying on an architecture-check result.
 
 The Markdown link validator masks inline code before interpreting HTML-comment markers, ignores links in fenced blocks inside ordinary list/blockquote containers, and reports unmatched fenced blocks consistently. It remains a conservative lightweight validator, not a general CommonMark rendering engine; advanced or plugin-specific Markdown syntax requires review.
+
+A backtick fence's info string cannot contain backticks, including escaped ones; tilde fence info strings can. Invalid openers cannot hide links or reference definitions, or interrupt a multiline inline construct.
 
 Reference definitions must begin a Markdown block; they cannot interrupt an existing paragraph, including one containing an inline HTML comment. Reference discovery and link visibility share this eligibility, so inactive definition-looking text cannot certify later links. Separate a forward reference from a following definition with a blank line.
 

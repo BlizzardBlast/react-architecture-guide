@@ -17,7 +17,8 @@ function inspectMarkdown(relative, contents, root) {
   let pendingReferenceTitle = null;
   const active = [];
   const blockTags = /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|meta|nav|noframes|ol|optgroup|option|output|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[\s/>])/i;
-  const fenceMarker = /^ {0,3}([\x60]{3,}|~{3,})(.*)$/;
+  // Backtick fence info cannot contain backticks; tilde fence info can.
+  const fenceMarker = /^ {0,3}(\x60{3,}(?=[^\x60]*$)|~{3,})(.*)$/;
   const atxHeading = /^ {0,3}#{1,6}(?:[ \t]+|$)/;
   function interruptsParagraph(text) {
     return !text.trim() || atxHeading.test(text) ||
