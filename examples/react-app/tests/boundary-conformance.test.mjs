@@ -6,14 +6,20 @@ import path from 'node:path';
 import { build } from 'vite';
 import { check } from '../../../tools/check-boundaries.cjs';
 
-async function assertConformance(entries, aliases, expectedPrivate, name, expectedError = /shared-must-be-independent|deep-module-import/, expectedMarker = null, entry = null) {
+async function assertConformance(entries, aliases, expectedPrivate, name, expectedError = /shared-must-be-independent|deep-module-import/, expectedMarker = null, entry = null, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'react-vite-boundary-'));
   try {
     const absoluteAliases = Object.fromEntries(Object.entries(aliases)
       .map(([find, target]) => [find, path.resolve(root, target)]));
+    const effectiveAliases = Object.fromEntries(Object.entries(options.effectiveAliases ?? aliases)
+      .map(([find, target]) => [find, path.resolve(root, target)]));
+    const configText = options.dynamicAlias
+      ? 'const actualTarget = ' + JSON.stringify(effectiveAliases['./icon.svg']) +
+        '; export default { resolve: { alias: { "./icon.svg": actualTarget } } };'
+      : 'export default { resolve: { alias: ' + JSON.stringify(effectiveAliases) + ' } };';
     const files = {
       'package.json': '{"type":"module"}',
-      'vite.config.ts': 'export default { resolve: { alias: ' + JSON.stringify(absoluteAliases) + ' } };',
+      'vite.config.ts': configText,
       'architecture.config.json': JSON.stringify({ viteAliases: aliases }),
       'src/shared/ui/check.ts': 'export const checked = true;',
       ...entries,
@@ -27,9 +33,16 @@ async function assertConformance(entries, aliases, expectedPrivate, name, expect
     const checked = check(path.join(root, 'src'));
     let built;
     try {
-      built = await build({ root, configFile: false, resolve: { alias: absoluteAliases },
-        logLevel: 'silent', build: { write: false, assetsInlineLimit: 0,
-          ...(entry ? { rollupOptions: { input: path.join(root, entry) } } : {}) } });
+      built = await build({
+        root,
+        ...(options.loadConfig ? { configFile: path.join(root, 'vite.config.ts') } :
+          { configFile: false, resolve: { alias: absoluteAliases } }),
+        logLevel: 'silent',
+        build: {
+          write: false, assetsInlineLimit: 0,
+          ...(entry ? { rollupOptions: { input: path.join(root, entry) } } : {}),
+        },
+      });
     } catch (error) {
       assert(checked.errors.length > 0, name + ': unresolved Vite imports must fail the checker');
       throw error;
@@ -39,7 +52,8 @@ async function assertConformance(entries, aliases, expectedPrivate, name, expect
     assert.equal(privateEmitted, expectedPrivate, name + ': Vite target');
     if (expectedMarker) assert(built.output.some(item =>
       String(item.type === 'asset' ? item.source : item.code).includes(expectedMarker)), name + ': expected output');
-    if (expectedPrivate) assert.match(checked.errors.join(' '), expectedError, name);
+    if (options.checkerError) assert.match(checked.errors.join(' '), options.checkerError, name);
+    else if (expectedPrivate) assert.match(checked.errors.join(' '), expectedError, name);
     else assert.deepEqual(checked.errors, [], name);
   } finally {
     assert(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep));
@@ -151,4 +165,32 @@ test('HTML alias dispatch agrees with Vite build output', async () => {
     'src/modules/orders/ui/entry.png': 'PRIVATE_TARGET',
     'src/shared/ui/other.png': 'SAFE_ALIAS_IMAGE',
   }, { '/src/modules/orders/ui/entry.png': 'src/shared/ui/other.png' }, false, 'public file precedence');
+});
+
+test('actual Vite config discovery agrees with the architecture policy', async () => {
+  const entries = {
+    'index.html': '<script type="module" src="/src/app/main.ts"></script>',
+    'src/app/main.ts': 'import { asset } from "../shared/ui/view"; console.log(asset);',
+    'src/shared/ui/view.ts': 'import asset from "./icon.svg"; export { asset };',
+    'src/shared/ui/icon.svg': '<svg>SAFE_CONFIG_TARGET</svg>',
+    'src/modules/orders/ui/private.svg': '<svg>PRIVATE_TARGET</svg>',
+  };
+  const privateAlias = { './icon.svg': 'src/modules/orders/ui/private.svg' };
+  const safeAlias = { './icon.svg': 'src/shared/ui/icon.svg' };
+
+  // Existing cases test resolver injection; these load the fixture's actual Vite config.
+  await assertConformance(entries, safeAlias, false, 'matching safe configuration',
+    undefined, 'SAFE_CONFIG_TARGET', null, { loadConfig: true });
+  await assertConformance(entries, privateAlias, true, 'matching forbidden configuration',
+    undefined, null, null, { loadConfig: true });
+  await assertConformance(entries, safeAlias, true, 'mismatched configuration',
+    undefined, null, null, {
+      loadConfig: true, effectiveAliases: privateAlias,
+      checkerError: /vite-alias-target-mismatch/,
+    });
+  await assertConformance(entries, privateAlias, true, 'computed unsupported configuration',
+    undefined, null, null, {
+      loadConfig: true, dynamicAlias: true,
+      checkerError: /unverifiable-vite-alias-target/,
+    });
 });

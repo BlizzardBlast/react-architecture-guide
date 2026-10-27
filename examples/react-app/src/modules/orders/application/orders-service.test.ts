@@ -19,6 +19,23 @@ describe('orders service post-save notification contract', () => {
     expect(events.orderPlaced).toHaveBeenCalledWith(receipt);
   });
 
+  it('returns the committed receipt despite a rejected asynchronous event', async () => {
+    const save = vi.fn(async () => receipt);
+    let rejectEvent!: (reason: Error) => void;
+    const eventDelivery = new Promise<void>((_resolve, reject) => {
+      rejectEvent = reject;
+    });
+    const events: OrderEvents = { orderPlaced: vi.fn(() => eventDelivery) };
+    const repo: OrderRepository = { save, list: async () => [] };
+    const service = createOrdersService(repo, events, 'async-store');
+
+    await expect(service.placeOrder(draft)).resolves.toEqual(receipt);
+    expect(events.orderPlaced).toHaveBeenCalledWith(receipt);
+    rejectEvent(new Error('analytics failed asynchronously'));
+    await Promise.resolve();
+    expect(save).toHaveBeenCalledOnce();
+  });
+
   it('does not notify or report success when persistence fails', async () => {
     const failure = new Error('persistence failed');
     const repo: OrderRepository = {

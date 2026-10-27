@@ -210,7 +210,7 @@ it('releases the save guard and permits retry after a rejected save', async () =
   expect(placeOrder).toHaveBeenCalledTimes(1);
   expect(screen.getByRole('button', { name: /saving/i })).toBeDisabled();
   rejectSave(new Error('Service temporarily unavailable'));
-  expect(await screen.findByRole('alert')).toHaveTextContent('Service temporarily unavailable');
+  expect(await screen.findByRole('alert')).toHaveTextContent('Unable to save the order. Please try again.');
   await waitFor(() => expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled());
   await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
   expect(placeOrder).toHaveBeenCalledTimes(2);
@@ -222,6 +222,11 @@ it.each([
   ['null', null],
   ['object', { reason: 'private transport error' }],
   ['empty Error', new Error('')],
+  ['Error with internal details', new Error('private bearer token=secret')],
+  ['Error with a non-string message', Object.defineProperty(new Error('private'), 'message', { value: null })],
+  ['Error with a throwing message getter', Object.defineProperty(new Error('private'), 'message', {
+    get() { throw new Error('private message getter'); },
+  })],
 ])('handles a %s rejection safely and permits retry', async (_label, rejected) => {
   const placeOrder = vi.fn()
     .mockRejectedValueOnce(rejected)
@@ -234,7 +239,7 @@ it.each([
   expect(await screen.findByRole('alert')).toHaveTextContent(
     "Couldn't save Green tea: Unable to save the order. Please try again.",
   );
-  expect(screen.queryByText(/private transport error|unexpected rejection/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/private transport error|unexpected rejection|bearer token|private message getter/i)).not.toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled());
   await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
   expect(placeOrder).toHaveBeenCalledTimes(2);
@@ -266,7 +271,7 @@ it('keeps a prior product save failure visible after switching products mid-flig
   rerender(view(coffee));
   expect(screen.getByRole('button', { name: /saving/i })).toBeDisabled();
   fail(new Error('Network unavailable'));
-  expect(await screen.findByRole('alert')).toHaveTextContent(/green tea.*network unavailable/i);
+  expect(await screen.findByRole('alert')).toHaveTextContent(/green tea.*unable to save the order/i);
   await waitFor(() => expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled());
   expect(placeOrder).toHaveBeenCalledTimes(1);
 });

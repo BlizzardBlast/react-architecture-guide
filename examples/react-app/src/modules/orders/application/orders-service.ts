@@ -4,9 +4,9 @@ export interface OrderRepository {
   list(): Promise<readonly OrderReceipt[]>;
 }
 export interface OrderEvents {
-  // Best-effort, synchronous notification after persistence; never part of
-  // the order commit. Production-critical delivery needs a durable outbox.
-  orderPlaced(receipt: OrderReceipt): void;
+  // Best-effort notification after persistence, synchronous or asynchronous.
+  // Failures never roll back the committed order; critical delivery needs an outbox.
+  orderPlaced(receipt: OrderReceipt): void | Promise<void>;
 }
 export function createOrdersService(repo: OrderRepository, events: OrderEvents, scopeId: string) {
   return {
@@ -19,9 +19,12 @@ export function createOrdersService(repo: OrderRepository, events: OrderEvents, 
       // The repository commit has succeeded. A failing optional notification
       // must not report an order failure or invite a duplicate retry.
       try {
-        events.orderPlaced(saved);
+        // Attach rejection handling immediately, without delaying order success.
+        // Optional analytics owns any logging; the demo does not report failures
+        // as save errors, even when an implementation returns a Promise.
+        void Promise.resolve(events.orderPlaced(saved)).catch(() => {});
       } catch {
-        // Best-effort demo event: the analytics adapter owns its diagnostics.
+        // Synchronous callbacks can throw before producing a Promise.
       }
       return saved;
     },
