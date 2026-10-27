@@ -57,6 +57,30 @@ it('separates query-cache data when the injected service changes', async () => {
   expect(await screen.findByText('From B — tea')).toBeInTheDocument();
   expect(screen.queryByText('From A — tea')).not.toBeInTheDocument();
 });
+
+it('resets the form across scope and product identities containing delimiters', async () => {
+  const first: OrdersService = {
+    scopeId: 'shop:west', listOrders: async () => [],
+    placeOrder: async draft => ({ ...draft, id: 'first' }),
+  };
+  const second: OrdersService = {
+    scopeId: 'shop', listOrders: async () => [],
+    placeOrder: async draft => ({ ...draft, id: 'second' }),
+  };
+  const tea = { productId: 'tea', productName: 'Tea', priceCents: 250 };
+  const otherTea = { productId: 'west:tea', productName: 'Other tea', priceCents: 250 };
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = (service: OrdersService, selection: typeof tea) => (
+    <QueryClientProvider client={client}><OrderCheckout service={service} selection={selection} /></QueryClientProvider>
+  );
+  const { rerender } = render(view(first, tea));
+  await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
+  rerender(view(first, { ...tea }));
+  expect(screen.getByRole('textbox', { name: /customer name/i })).toHaveValue('Alice');
+  rerender(view(second, otherTea));
+  expect(screen.getByText('Selected: Other tea')).toBeInTheDocument();
+  expect(screen.getByRole('textbox', { name: /customer name/i })).toHaveValue('');
+});
 it('handles history errors and retry without leaking an exception', async () => {
   let calls = 0;
   const service: OrdersService = {

@@ -47,7 +47,7 @@ export function OrderCheckout(props: Props) {
     setSaveError(`Couldn't save ${productName}: ${message}`);
   }
   // Remounting clears previous product's feedback, but not the pending save guard.
-  const key = [props.service.scopeId, props.selection?.productId ?? '', props.selection?.priceCents ?? 0].join(':');
+  const key = JSON.stringify([props.service.scopeId, props.selection?.productId ?? null, props.selection?.priceCents ?? null]);
   return (
     <>
       <CheckoutForm key={key} {...props} isSaving={isSaving} beginSave={beginSave}
