@@ -156,6 +156,8 @@ Ordinary, owned JSON data may be consumed by pure modules. A Vite suffix such as
 
 For an aliased asset import, the pure-layer check classifies the resolved physical target, not the extension in the import spelling. An alias from a JSON-looking request to a stylesheet therefore remains a presentation dependency.
 
+An ordinary import that resolves to source follows source public-entry and self-barrel rules even if its original spelling resembles an asset. Data, URL and worker transformations retain their asset restrictions.
+
 Architecture test fixtures must store their exact declared contents. Valid Vite URL helper fixtures explicitly import `fileURLToPath` from `node:url`; fixture setup must never supply missing imports on their behalf.
 
 ### Nonstandard and CommonJS Vite configurations

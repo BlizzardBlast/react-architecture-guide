@@ -6,7 +6,7 @@ import path from 'node:path';
 import { build } from 'vite';
 import { check } from '../../../tools/check-boundaries.cjs';
 
-async function assertConformance(entries, aliases, expectedPrivate, name, expectedError = /shared-must-be-independent|deep-module-import/, expectedMarker = null) {
+async function assertConformance(entries, aliases, expectedPrivate, name, expectedError = /shared-must-be-independent|deep-module-import/, expectedMarker = null, entry = null) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'react-vite-boundary-'));
   try {
     const absoluteAliases = Object.fromEntries(Object.entries(aliases)
@@ -28,7 +28,8 @@ async function assertConformance(entries, aliases, expectedPrivate, name, expect
     let built;
     try {
       built = await build({ root, configFile: false, resolve: { alias: absoluteAliases },
-        logLevel: 'silent', build: { write: false, assetsInlineLimit: 0 } });
+        logLevel: 'silent', build: { write: false, assetsInlineLimit: 0,
+          ...(entry ? { rollupOptions: { input: path.join(root, entry) } } : {}) } });
     } catch (error) {
       assert(checked.errors.length > 0, name + ': unresolved Vite imports must fail the checker');
       throw error;
@@ -61,6 +62,27 @@ test('pure asset imports use the Vite-resolved target type', async () => {
       ['src/modules/orders/model/' + target]: contents,
     }, { './config.json': 'src/modules/orders/model/' + target }, expectedError,
     target, /pure-layer-static-asset/, marker);
+  }
+});
+
+test('source barrels reached through asset-looking aliases use source ownership rules', async () => {
+  for (const [name, alias, selfImport] of [
+    ['aliased public import', true, false],
+    ['direct public import', false, false],
+    ['aliased self barrel', true, true],
+    ['direct self barrel', false, true],
+  ]) {
+    const marker = selfImport ? 'PRIVATE_TARGET' : 'SAFE_SOURCE';
+    const request = alias ? './public.json' : '../modules/orders';
+    const files = {
+      'index.html': '<script type="module" src="/src/app/main.ts"></script>',
+      'src/app/main.ts': 'import { value } from ' + JSON.stringify(selfImport ? '../modules/orders' : request) + '; console.log(value);',
+      'src/modules/orders/index.ts': 'export const value = ' + JSON.stringify(marker) + ';',
+    };
+    if (selfImport) files['src/modules/orders/ui/consumer.ts'] = 'import { value } from ' +
+      JSON.stringify(alias ? './public.json' : '../index') + '; console.log(value);';
+    await assertConformance(files, alias ? { './public.json': 'src/modules/orders/index.ts' } : {},
+      selfImport, name, /no-self-barrel/, marker, selfImport ? 'src/modules/orders/ui/consumer.ts' : null);
   }
 });
 

@@ -2113,7 +2113,10 @@ function check(srcDir) {
         errors.push(`outside-source-import: ${source.relative} -> ${dep.spec}`);
         continue;
       }
-      checkOwnedDependency(source, dest, policy, errors, { asset: localAsset, isTest });
+      // The request spelling may look like an asset even when an alias resolves
+      // to executable source. Transformed imports remain asset dependencies.
+      const ownershipAsset = localAsset && (!sourceExt.test(target) || transformedImport);
+      checkOwnedDependency(source, dest, policy, errors, { asset: ownershipAsset, isTest });
       // Preserve Vite's asset/execution distinction for mapped #imports,
       // relative imports, and source files transformed through a query.
       if (!dataQuery && (!dep.fromUrl || dep.workerEntry) &&
