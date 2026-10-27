@@ -6,7 +6,8 @@ export interface OrderWriter {
 }
 
 export interface OrderEvents {
-  orderPlaced(receipt: OrderReceipt, draft: OrderDraft): void | Promise<void>;
+  // `void` permits existing synchronous callbacks and async implementations.
+  orderPlaced(receipt: OrderReceipt, draft: OrderDraft): void;
 }
 
 export function createPlaceOrder(writer: OrderWriter, events: OrderEvents) {

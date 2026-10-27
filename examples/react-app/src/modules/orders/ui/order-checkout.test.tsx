@@ -70,6 +70,38 @@ it('handles history errors and retry without leaking an exception', async () => 
   expect(await screen.findByText(/no orders yet/i)).toBeInTheDocument();
 });
 
+it('finishes saving while the order history refresh remains pending', async () => {
+  let releaseRefresh!: (orders: Awaited<ReturnType<OrdersService['listOrders']>>) => void;
+  const refresh = new Promise<Awaited<ReturnType<OrdersService['listOrders']>>>(resolve => { releaseRefresh = resolve; });
+  const listOrders = vi.fn().mockResolvedValueOnce([]).mockReturnValue(refresh);
+  const placeOrder = vi.fn(async (draft: Parameters<OrdersService['placeOrder']>[0]) => ({ ...draft, id: 'saved' }));
+  renderCheckout({ scopeId: 'slow-history', listOrders, placeOrder });
+  await screen.findByText('No orders yet.');
+  await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  await waitFor(() => expect(listOrders).toHaveBeenCalledTimes(2));
+  expect(await screen.findByText('Order saved.', {}, { timeout: 2000 })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled();
+  expect(placeOrder).toHaveBeenCalledOnce();
+  releaseRefresh([]);
+});
+
+it('keeps the saved order successful when history refresh fails and retries', async () => {
+  const listOrders = vi.fn().mockResolvedValueOnce([])
+    .mockRejectedValueOnce(new Error('history unavailable')).mockResolvedValueOnce([]);
+  const placeOrder = vi.fn(async (draft: Parameters<OrdersService['placeOrder']>[0]) => ({ ...draft, id: 'saved' }));
+  renderCheckout({ scopeId: 'failed-refresh', listOrders, placeOrder });
+  await screen.findByText('No orders yet.');
+  await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  expect(await screen.findByText('Order saved.')).toBeInTheDocument();
+  expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load orders");
+  expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled();
+  await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(await screen.findByText('No orders yet.')).toBeInTheDocument();
+  expect(placeOrder).toHaveBeenCalledOnce();
+});
+
 it('clears successful checkout feedback when another product is selected', async () => {
   const service: OrdersService = {
     scopeId: 'selection-switch',

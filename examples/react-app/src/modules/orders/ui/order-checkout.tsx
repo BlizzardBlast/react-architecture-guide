@@ -69,9 +69,10 @@ function CheckoutForm({ service, selection, isSaving, beginSave, finishSave, rep
   const history = useQuery({ queryKey: orderKey, queryFn: service.listOrders });
   const mutation = useMutation({
     mutationFn: service.placeOrder,
-    onSuccess: async () => {
+    onSuccess: () => {
       setCustomerName('');
-      await queryClient.invalidateQueries({ queryKey: orderKey });
+      // A slow history refresh must not keep an already-saved order pending.
+      void queryClient.invalidateQueries({ queryKey: orderKey }).catch(() => {});
     },
     onError: () => reportSaveError(saveFailureMessage, selection?.productName ?? 'product'),
     // Mutation reset does not cancel requests. Release the cross-form guard only

@@ -6,7 +6,8 @@ export interface OrderRepository {
 export interface OrderEvents {
   // Best-effort notification after persistence, synchronous or asynchronous.
   // Failures never roll back the committed order; critical delivery needs an outbox.
-  orderPlaced(receipt: OrderReceipt): void | Promise<void>;
+  // `void` preserves synchronous callbacks with incidental return values.
+  orderPlaced(receipt: OrderReceipt): void;
 }
 export function createOrdersService(repo: OrderRepository, events: OrderEvents, scopeId: string) {
   return {

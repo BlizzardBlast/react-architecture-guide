@@ -1,7 +1,17 @@
 import { expect, it, vi } from 'vitest';
-import { createOrdersService } from '../application/orders-service';
+import { createOrdersService, type OrderEvents } from '../application/orders-service';
 import type { OrderDraft } from '../domain/order';
 import { createOrderAnalytics } from './order-analytics';
+import type { AnalyticsSink } from '../../../shared/lib/analytics';
+
+it('accepts synchronous callbacks that return incidental values', () => {
+  const calls: string[] = [];
+  const sink: AnalyticsSink = { track: name => calls.push(name) };
+  const events: OrderEvents = { orderPlaced: () => calls.push('placed') };
+  sink.track('tracked', {});
+  events.orderPlaced({ customerName: 'Alice', productId: 'tea', priceCents: 250, id: 'saved' });
+  expect(calls).toEqual(['tracked', 'placed']);
+});
 
 it('handles an asynchronous analytics failure after the order is saved', async () => {
   let rejectDelivery!: (reason: Error) => void;
