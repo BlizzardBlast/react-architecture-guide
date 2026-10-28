@@ -17,27 +17,25 @@ interface Props {
 // transport, stack or server details. Field-validation feedback is separate.
 const saveFailureMessage = 'Unable to save the order. Please try again.';
 
-interface SaveGuard {
+interface SaveGate {
   readonly isSaving: boolean;
   readonly beginSave: () => boolean;
   readonly finishSave: () => void;
+}
+
+interface SaveGuard extends SaveGate {
   readonly clearSaveSuccess: () => void;
   readonly reportSaveSuccess: (productName: string) => void;
   readonly reportSaveError: (message: string, productName: string) => void;
 }
 
 export function OrderCheckout(props: Props) {
-  const titleId = useId();
-  // This guard outlives the keyed form and its mutation observer: changing products
-  // must not unlock another save while the first operation remains in flight.
+  // The guard survives product and service changes until the request settles.
   const inFlight = useRef(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [savedProduct, setSavedProduct] = useState<string | null>(null);
   function beginSave() {
     if (inFlight.current) return false;
     inFlight.current = true;
-    setSaveError(null);
     setIsSaving(true);
     return true;
   }
@@ -45,18 +43,31 @@ export function OrderCheckout(props: Props) {
     inFlight.current = false;
     setIsSaving(false);
   }
+  return <ScopedCheckout key={props.service.scopeId} {...props} isSaving={isSaving}
+    beginSave={beginSave} finishSave={finishSave} />;
+}
+
+function ScopedCheckout({ service, selection, isSaving, beginSave, finishSave }: Props & SaveGate) {
+  const titleId = useId();
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savedProduct, setSavedProduct] = useState<string | null>(null);
+  function beginScopedSave() {
+    if (!beginSave()) return false;
+    setSaveError(null);
+    return true;
+  }
   function reportSaveError(message: string, productName: string) {
     // Hook-level callbacks still run after the keyed form unmounts. Keep the
     // error visible even if a user switches to another product mid-request.
     setSaveError(`Couldn't save ${productName}: ${message}`);
   }
   // Remounting clears form state, but not the save guard or completion feedback.
-  const key = JSON.stringify([props.service.scopeId, props.selection?.productId ?? null, props.selection?.priceCents ?? null]);
+  const key = JSON.stringify([selection?.productId ?? null, selection?.priceCents ?? null]);
   return (
     <section aria-labelledby={titleId}>
       <h2 id={titleId}>Place an order</h2>
-      <p role="status">{props.selection ? `Selected: ` + props.selection.productName : 'Select a product first.'}</p>
-      <CheckoutForm key={key} {...props} isSaving={isSaving} beginSave={beginSave}
+      <p role="status">{selection ? `Selected: ` + selection.productName : 'Select a product first.'}</p>
+      <CheckoutForm key={key} service={service} selection={selection} isSaving={isSaving} beginSave={beginScopedSave}
         finishSave={finishSave} clearSaveSuccess={() => setSavedProduct(null)}
         reportSaveSuccess={setSavedProduct} reportSaveError={reportSaveError} />
       <p role="status">{savedProduct !== null && <>Order saved. <span>Product: {savedProduct}</span></>}</p>

@@ -58,6 +58,76 @@ it('separates query-cache data when the injected service changes', async () => {
   expect(screen.queryByText('From A — tea')).not.toBeInTheDocument();
 });
 
+it.each(['success', 'failure'] as const)('clears completed %s feedback when the service scope changes', async outcome => {
+  const first: OrdersService = {
+    scopeId: 'feedback-A', listOrders: async () => [],
+    placeOrder: async draft => {
+      if (outcome === 'failure') throw new Error('failed');
+      return { ...draft, id: 'first' };
+    },
+  };
+  const second: OrdersService = {
+    scopeId: 'feedback-B', listOrders: async () => [],
+    placeOrder: async draft => ({ ...draft, id: 'second' }),
+  };
+  const tea = { productId: 'tea', productName: 'Source A tea', priceCents: 250 };
+  const coffee = { productId: 'coffee', productName: 'Source B coffee', priceCents: 375 };
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = (service: OrdersService, selection: typeof tea) => (
+    <QueryClientProvider client={client}><OrderCheckout service={service} selection={selection} /></QueryClientProvider>
+  );
+  const { rerender } = render(view(first, tea));
+  await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  if (outcome === 'success') expect(await screen.findByText('Order saved.')).toHaveTextContent('Source A tea');
+  else expect(await screen.findByRole('alert')).toHaveTextContent('Source A tea');
+  rerender(view(second, coffee));
+  expect(screen.queryByText('Order saved.')).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  rerender(view(first, tea));
+  expect(screen.queryByText('Order saved.')).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it.each([
+  ['success', false], ['success', true], ['failure', false], ['failure', true],
+] as const)('isolates pending %s feedback after a scope switch (return: %s)', async (outcome, returnToFirst) => {
+  type Receipt = Awaited<ReturnType<OrdersService['placeOrder']>>;
+  let resolve!: (receipt: Receipt) => void;
+  let reject!: (reason: Error) => void;
+  const pending = new Promise<Receipt>((yes, no) => { resolve = yes; reject = no; });
+  const firstSave = vi.fn().mockReturnValueOnce(pending)
+    .mockImplementation(async (draft: Parameters<OrdersService['placeOrder']>[0]) => ({ ...draft, id: 'retry' }));
+  const secondSave = vi.fn(async (draft: Parameters<OrdersService['placeOrder']>[0]) => ({ ...draft, id: 'second' }));
+  const first: OrdersService = { scopeId: 'pending-A', listOrders: async () => [], placeOrder: firstSave };
+  const second: OrdersService = { scopeId: 'pending-B', listOrders: async () => [], placeOrder: secondSave };
+  const tea = { productId: 'tea', productName: 'Source A tea', priceCents: 250 };
+  const coffee = { productId: 'coffee', productName: 'Source B coffee', priceCents: 375 };
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = (service: OrdersService, selection: typeof tea) => (
+    <QueryClientProvider client={client}><OrderCheckout service={service} selection={selection} /></QueryClientProvider>
+  );
+  const { rerender } = render(view(first, tea));
+  await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  rerender(view(second, coffee));
+  if (returnToFirst) rerender(view(first, tea));
+  expect(screen.getByRole('button', { name: /saving/i })).toBeDisabled();
+  await userEvent.click(screen.getByRole('button', { name: /saving/i }));
+  expect(firstSave).toHaveBeenCalledTimes(1);
+  expect(secondSave).not.toHaveBeenCalled();
+  await act(async () => {
+    if (outcome === 'success') resolve({ customerName: 'Alice', productId: 'tea', priceCents: 250, id: 'first' });
+    else reject(new Error('failed'));
+  });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Place order' })).toBeEnabled());
+  expect(screen.queryByText('Order saved.')).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Bob');
+  await userEvent.click(screen.getByRole('button', { name: 'Place order' }));
+  expect(await screen.findByText('Order saved.')).toHaveTextContent(returnToFirst ? 'Source A tea' : 'Source B coffee');
+});
+
 it('resets the form across scope and product identities containing delimiters', async () => {
   const first: OrdersService = {
     scopeId: 'shop:west', listOrders: async () => [],
