@@ -24,7 +24,14 @@ it('composes independent catalog and orders modules through a route', { timeout:
   await router.load();
   render(<RouterProvider router={router} />);
   const queryWait = { timeout: 5_000 };
+  const selectionStatus = screen.getByText('Select a product first.');
+  expect(selectionStatus).toHaveAttribute('role', 'status');
   await userEvent.click(await screen.findByRole('button', { name: /select green tea/i }, queryWait));
+  expect(screen.getByText('Selected: Green tea')).toBe(selectionStatus);
+  await userEvent.click(screen.getByRole('button', { name: /select filter coffee/i }));
+  expect(screen.getByText('Selected: Filter coffee')).toBe(selectionStatus);
+  await userEvent.click(screen.getByRole('button', { name: /select green tea/i }));
+  expect(screen.getByText('Selected: Green tea')).toBe(selectionStatus);
   await userEvent.type(screen.getByRole('textbox', { name: /customer name/i }), 'Alice');
   await userEvent.click(screen.getByRole('button', { name: /^place order$/i }));
   expect(await screen.findByText('Alice — tea', {}, queryWait)).toBeInTheDocument();
