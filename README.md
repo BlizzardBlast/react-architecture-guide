@@ -58,6 +58,7 @@ For complex business workflows, **replace**, rather than combine blindly, the si
 | Pure TypeScript port/adapter example | [Orders example](examples/orders/README.md) |
 | Vite, React, TanStack Router + Query app | [React reference app](examples/react-app/README.md) |
 | Implementation scope and limitations | [Milestone and verification](docs/implementation-milestone.md) |
+| Markdown validator parser evaluation | [Candidate comparison](docs/markdown-parser-evaluation.md) |
 
 ## Local verification
 

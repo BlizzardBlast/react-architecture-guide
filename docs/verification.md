@@ -1,4 +1,12 @@
-# PR #1 local verification — 2026-10-27
+# Verification evidence
+
+## Checkout follow-up — 2026-10-28
+
+On Windows, the in-app browser was exercised against the Vite development server at source revision `86a61a946920ad6f39c1e0fea6ec105654a65efb`. Selecting Green tea updated the selection text; submitting an empty name displayed the validation error; saving a test order displayed `Order saved. Product: Green tea` and added it to history. Selecting Filter coffee preserved the saved product in the feedback, and editing the new order cleared that feedback. These observations cover visible content and the browser accessibility tree, not spoken announcements.
+
+The focused checkout and route Vitest suites passed (29 tests). They include controlled pending-save, product-switch and failure cases; the in-memory demo saves immediately, so those cases were not fault-injected in the browser. Screen-reader speech, including selection, validation, success and failure announcements, remains **NOT TESTED**; a browser accessibility tree does not prove what a screen reader announces.
+
+## PR #1 local verification — 2026-10-27
 
 CR-P1-011's recurring installation and verification blocker was resolved in an earlier candidate. That run reached the public npm registry, generated authentic lockfiles for all three packages, and completed clean installs with Node 24.22.0 and npm 11.19.1 on Windows. The current repair changes no dependencies or lockfiles.
 
