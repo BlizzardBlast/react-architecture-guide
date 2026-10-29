@@ -60,7 +60,7 @@ The prototype is shorter than the current validator, but its behavior depends on
 
 This assessment did not change the production validator or dependency tree. Complete CommonMark/GFM conformance, the advertised Node 22.13 minimum, other operating systems and CI remain unverified.
 
-To reproduce the current follow-up from the repository root on Windows, use a fresh temporary directory:
+To reproduce the current follow-up from the repository root on Windows, use a fresh temporary directory. The 143 tests include the original 142 checks and a counterexample check that asserts the current candidate's known false negative, alongside a normal-link control. If the candidate changes, revisit that expected failure rather than treating it as desired validator behavior.
 
 ```powershell
 $probeDir = Join-Path $env:TEMP ("react-guide-candidate-" + [guid]::NewGuid())
@@ -69,10 +69,12 @@ Copy-Item experiments/markdown-parser/candidate.cjs $probeDir
 Copy-Item experiments/markdown-parser/candidate.cjs (Join-Path $probeDir 'validate-docs.cjs')
 Copy-Item experiments/markdown-parser/candidate.test.cjs $probeDir
 Copy-Item experiments/markdown-parser/independent-render.test.cjs $probeDir
+Copy-Item experiments/markdown-parser/counterexample.test.cjs $probeDir
 Copy-Item tools/validate-docs.test.cjs $probeDir
+Copy-Item tools/validate-docs.cjs (Join-Path $probeDir 'production-validator.cjs')
 npm install --prefix $probeDir --save-exact --ignore-scripts --no-audit --no-fund markdown-it@15.0.3 parse5@8.0.1 commonmark@0.31.2
 Push-Location $probeDir
-try { node --test validate-docs.test.cjs candidate.test.cjs independent-render.test.cjs }
+try { node --test validate-docs.test.cjs candidate.test.cjs independent-render.test.cjs counterexample.test.cjs }
 finally { Pop-Location }
 ```
 
