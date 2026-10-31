@@ -153,7 +153,172 @@ function primitiveLocalBinding(identifier) {
   // No local binding: direct calls may refer to Node's built-in loader.
   return undefined;
 }
-function imports(node, list, options, inJSDoc = false) {
+function workerBindings(sf) {
+  const workerNames = ['Worker', 'SharedWorker'];
+  const isWrapper = node => ts.isParenthesizedExpression(node) || ts.isAsExpression(node) ||
+    ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node);
+  const unwrap = expression => {
+    while (isWrapper(expression)) expression = expression.expression;
+    return expression;
+  };
+  let checker;
+  const localValue = identifier => {
+    if (!checker) {
+      const workerOptions = { noLib: true, noResolve: true, allowJs: true };
+      const host = ts.createCompilerHost(workerOptions);
+      host.getSourceFile = filename => path.resolve(filename) === path.resolve(sf.fileName) ? sf : undefined;
+      checker = ts.createProgram([sf.fileName], workerOptions, host).getTypeChecker();
+    }
+    const symbol = ts.isShorthandPropertyAssignment(identifier.parent)
+      ? checker.getShorthandAssignmentValueSymbol(identifier.parent)
+      : checker.getSymbolAtLocation(identifier);
+    return Boolean(symbol && (symbol.flags & (ts.SymbolFlags.Value | ts.SymbolFlags.Alias)) &&
+      symbol.declarations?.some(declaration => {
+        if (declaration.getSourceFile().isDeclarationFile) return false;
+        for (let current = declaration; current && !ts.isSourceFile(current); current = current.parent) {
+          if (current.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.DeclareKeyword)) return false;
+        }
+        return true;
+      }));
+  };
+  const globalObject = expression => {
+    const value = unwrap(expression);
+    return ts.isIdentifier(value) && ['globalThis', 'window', 'self'].includes(value.text) && !localValue(value);
+  };
+  const globalSource = expression => {
+    const value = unwrap(expression);
+    if (globalObject(value)) return true;
+    if (ts.isSpreadElement(value)) return globalSource(value.expression);
+    if (ts.isArrayLiteralExpression(value)) return value.elements.some(globalSource);
+    return ts.isCallExpression(value) && value.arguments.length === 0 &&
+      ts.isPropertyAccessExpression(value.expression) && value.expression.name.text === 'values' &&
+      globalSource(value.expression.expression);
+  };
+  const globalWorkerMember = expression =>
+    (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) &&
+    workerNames.includes(ts.isPropertyAccessExpression(expression)
+      ? expression.name.text : literalString(expression.argumentExpression)) && globalObject(expression.expression);
+  const workerProperty = key => key && (ts.isComputedPropertyName(key) ||
+    (ts.isIdentifier(key) || ts.isStringLiteral(key)) && workerNames.includes(key.text));
+  const workerPattern = pattern => {
+    if (ts.isObjectBindingPattern(pattern)) {
+      return pattern.elements.some(element => element.dotDotDotToken || workerProperty(element.propertyName || element.name));
+    }
+    if (ts.isObjectLiteralExpression(pattern)) {
+      return pattern.properties.some(property => ts.isSpreadAssignment(property) || workerProperty(property.name));
+    }
+    if (ts.isArrayBindingPattern(pattern) || ts.isArrayLiteralExpression(pattern)) {
+      return pattern.elements.some(workerPattern);
+    }
+    if (ts.isBindingElement(pattern) || ts.isSpreadElement(pattern)) {
+      return workerPattern(ts.isBindingElement(pattern) ? pattern.name : pattern.expression);
+    }
+    if (ts.isBinaryExpression(pattern) && pattern.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      return workerPattern(pattern.left);
+    }
+    return false;
+  };
+  const definitelyDefined = source => {
+    if (!source) return false;
+    const value = unwrap(source);
+    return ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value) ||
+      ts.isFunctionExpression(value) || ts.isArrowFunction(value) || ts.isNewExpression(value) ||
+      ts.isStringLiteral(value) || ts.isNumericLiteral(value) || ts.isNoSubstitutionTemplateLiteral(value) ||
+      [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NullKeyword].includes(value.kind);
+  };
+  const propertyKey = name => {
+    if (name && ts.isComputedPropertyName(name)) {
+      return ts.isStringLiteral(name.expression) || ts.isNumericLiteral(name.expression) ? name.expression.text : undefined;
+    }
+    return name && (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) ? name.text : undefined;
+  };
+  const nativeWorker = Symbol('native worker');
+  const propertyValues = (source, name) => {
+    const key = propertyKey(name);
+    if (!source || key === undefined || !ts.isObjectLiteralExpression(source)) return [undefined];
+    let values = [undefined];
+    const visit = object => {
+      for (const property of object.properties) {
+        if (ts.isSpreadAssignment(property)) {
+          const spread = unwrap(property.expression);
+          if (ts.isObjectLiteralExpression(spread)) visit(spread);
+          else if (globalObject(spread) && workerNames.includes(key)) values = [...values, nativeWorker];
+          else if (!values.includes(undefined)) values = [...values, undefined];
+        } else if (property.name && ts.isComputedPropertyName(property.name) && propertyKey(property.name) === undefined) {
+          if (!values.includes(undefined)) values = [...values, undefined];
+        } else if (propertyKey(property.name) === key) {
+          values = [ts.isPropertyAssignment(property) ? property.initializer : undefined];
+        }
+      }
+    };
+    visit(source);
+    return values;
+  };
+  const workerFromGlobal = (pattern, source) => {
+    if (source === nativeWorker) return true;
+    if (ts.isBindingElement(pattern)) {
+      return Boolean(pattern.initializer && !definitelyDefined(source) && workerFromGlobal(pattern.name, pattern.initializer)) ||
+        workerFromGlobal(pattern.name, source);
+    }
+    if (ts.isBinaryExpression(pattern) && pattern.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      return !definitelyDefined(source) && workerFromGlobal(pattern.left, pattern.right) || workerFromGlobal(pattern.left, source);
+    }
+    const value = source && unwrap(source);
+    if ((ts.isArrayBindingPattern(pattern) || ts.isArrayLiteralExpression(pattern)) &&
+        value && ts.isArrayLiteralExpression(value) &&
+        !pattern.elements.some(element => element.dotDotDotToken || ts.isSpreadElement(element)) &&
+        !value.elements.some(ts.isSpreadElement)) {
+      return pattern.elements.some((element, index) => workerFromGlobal(element, value.elements[index]));
+    }
+    if (value && workerPattern(pattern) && globalSource(value)) return true;
+    if (ts.isObjectBindingPattern(pattern)) {
+      return pattern.elements.some(element => propertyValues(value, element.propertyName || element.name)
+        .some(candidate => workerFromGlobal(element, candidate)));
+    }
+    if (ts.isObjectLiteralExpression(pattern)) {
+      return pattern.properties.some(property =>
+        (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) &&
+        propertyValues(value, property.name).some(candidate => workerFromGlobal(
+          ts.isPropertyAssignment(property) ? property.initializer : property.name, candidate)));
+    }
+    if (ts.isArrayBindingPattern(pattern) || ts.isArrayLiteralExpression(pattern)) {
+      return pattern.elements.some(element => workerFromGlobal(element, undefined));
+    }
+    return false;
+  };
+  const nestedAssignmentDefault = node => {
+    let current = node;
+    while (current.parent && (isWrapper(current.parent) || ts.isPropertyAssignment(current.parent) ||
+        ts.isArrayLiteralExpression(current.parent) || ts.isObjectLiteralExpression(current.parent) ||
+        ts.isSpreadElement(current.parent) || ts.isSpreadAssignment(current.parent))) current = current.parent;
+    return ts.isBinaryExpression(current.parent) && current.parent.left === current &&
+      current.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken ||
+      ts.isForOfStatement(current.parent) && current.parent.initializer === current;
+  };
+  const workerFromIterable = (pattern, source) => {
+    const value = unwrap(source);
+    if (ts.isArrayLiteralExpression(value)) {
+      return value.elements.some(element => ts.isSpreadElement(element)
+        ? workerFromIterable(pattern, element.expression) : workerFromGlobal(pattern, element));
+    }
+    if (ts.isCallExpression(value) && value.arguments.length === 0 &&
+        ts.isPropertyAccessExpression(value.expression) && value.expression.name.text === 'values') {
+      return workerFromIterable(pattern, value.expression.expression);
+    }
+    return workerFromGlobal(pattern, value);
+  };
+  const parentAfterWrappers = expression => {
+    let current = expression;
+    while (current.parent && isWrapper(current.parent) && current.parent.expression === current) current = current.parent;
+    return current.parent;
+  };
+  const directConstructor = expression => {
+    const parent = parentAfterWrappers(expression);
+    return ts.isNewExpression(parent) && unwrap(parent.expression) === expression;
+  };
+  return { workerNames, localValue, globalWorkerMember, workerFromGlobal, workerFromIterable, parentAfterWrappers, directConstructor, nestedAssignmentDefault, unwrap };
+}
+function imports(node, list, options, bindings, inJSDoc = false) {
   if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
     const spec = literalString(node.argument.literal);
     if (spec) list.push({ spec, runtime: false, line: node.getStart() });
@@ -164,8 +329,46 @@ function imports(node, list, options, inJSDoc = false) {
   }
   // Documentation contains type edges, never executable loader references.
   if (inJSDoc) {
-    ts.forEachChild(node, child => imports(child, list, options, true));
+    ts.forEachChild(node, child => imports(child, list, options, bindings, true));
     return;
+  }
+  const { workerNames, localValue, globalWorkerMember, workerFromGlobal, workerFromIterable, parentAfterWrappers, directConstructor, nestedAssignmentDefault, unwrap } = bindings;
+  if (ts.isIdentifier(node) && workerNames.includes(node.text) && !localValue(node) &&
+      (ts.isInExpressionContext(node) || ts.isShorthandPropertyAssignment(node.parent)) &&
+      !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
+      !(ts.isPropertyAssignment(node.parent) && node.parent.name === node) &&
+      !directConstructor(node) && !ts.isTypeOfExpression(parentAfterWrappers(node))) {
+    list.push({ unsupported: 'worker-alias', line: node.getStart() });
+  }
+  if (globalWorkerMember(node) && !directConstructor(node) &&
+      !ts.isTypeOfExpression(parentAfterWrappers(node))) {
+    list.push({ unsupported: 'worker-alias', line: node.getStart() });
+  }
+  if (ts.isVariableDeclaration(node) && node.initializer && workerFromGlobal(node.name, node.initializer)) {
+    list.push({ unsupported: 'worker-alias', line: node.getStart() });
+  }
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      !nestedAssignmentDefault(node) && workerFromGlobal(unwrap(node.left), node.right)) {
+    list.push({ unsupported: 'worker-alias', line: node.getStart() });
+  }
+  if (ts.isForOfStatement(node) &&
+      (ts.isVariableDeclarationList(node.initializer)
+        ? node.initializer.declarations.some(declaration => workerFromIterable(declaration.name, node.expression))
+        : workerFromIterable(unwrap(node.initializer), node.expression))) {
+    list.push({ unsupported: 'worker-alias', line: node.getStart() });
+  }
+  if (ts.isNewExpression(node)) {
+    const callee = unwrap(node.expression);
+    const globalMember = globalWorkerMember(callee);
+    if (globalMember || ts.isIdentifier(callee) && workerNames.includes(callee.text) && !localValue(callee)) {
+      const target = node.arguments?.[0];
+      const spec = target && ts.isNewExpression(target) && ts.isIdentifier(target.expression) &&
+        target.expression.text === 'URL' && target.arguments?.length === 2 &&
+        isImportMetaUrl(target.arguments[1]) ? literalString(target.arguments[0]) : null;
+      if (globalMember || callee !== node.expression || !spec || /^(?:[a-z][a-z\d+.-]*:|\/\/|[?#])/i.test(spec)) {
+        list.push({ unsupported: 'worker-entry', line: node.getStart() });
+      }
+    }
   }
   // Vite transforms statically analyzable new URL(...) references into bundled
   // assets or worker entrypoints; they need the same ownership validation.
@@ -179,7 +382,7 @@ function imports(node, list, options, inJSDoc = false) {
       const parent = node.parent;
       const workerEntry = Boolean(parent && ts.isNewExpression(parent) &&
         ts.isIdentifier(parent.expression) &&
-        ['Worker', 'SharedWorker'].includes(parent.expression.text) &&
+        workerNames.includes(parent.expression.text) && !localValue(parent.expression) &&
         parent.arguments?.[0] === node);
       list.push({ spec, runtime: workerEntry, fromUrl: true, workerEntry, line: node.getStart() });
     }
@@ -293,7 +496,7 @@ function imports(node, list, options, inJSDoc = false) {
     list.push({ unsupported: 'indirect-module-require', line: node.getStart() });
   }
   if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) &&
-      ts.isIdentifier(node.initializer) && node.initializer.text === 'module' &&
+      node.initializer && ts.isIdentifier(node.initializer) && node.initializer.text === 'module' &&
       node.name.elements.some(e =>
         (e.propertyName?.text || e.name.getText()) === 'require')) {
     list.push({ unsupported: 'indirect-module-require', line: node.getStart() });
@@ -314,8 +517,8 @@ function imports(node, list, options, inJSDoc = false) {
       list.push({ unsupported: 'node-create-require', line: node.getStart() });
     }
   }
-  for (const doc of node.jsDoc || []) imports(doc, list, options, true);
-  ts.forEachChild(node, child => imports(child, list, options));
+  for (const doc of node.jsDoc || []) imports(doc, list, options, bindings, true);
+  ts.forEachChild(node, child => imports(child, list, options, bindings));
 }
 function configFor(dir) {
   const file = ts.findConfigFile(dir, ts.sys.fileExists, 'tsconfig.json');
@@ -1779,7 +1982,7 @@ function check(srcDir) {
       errors.push(`syntax-error: ${path.relative(root, file)}:${location.line + 1}:${location.character + 1}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}`);
     }
     const dependencies = [];
-    imports(sf, dependencies, options);
+    imports(sf, dependencies, options, workerBindings(sf));
     for (const dep of dependencies) {
       const source = actual;
       if (dep.unsupported) {

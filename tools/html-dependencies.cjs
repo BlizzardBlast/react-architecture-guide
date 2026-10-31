@@ -22,7 +22,7 @@ const nativeResources = new Map([
   ['use', ['href', 'xlink:href']],
   ['feimage', ['href', 'xlink:href']],
 ]);
-const dangerousScheme = /^(?:javascript|vbscript|data:text\/html|data:image\/svg\+xml):/i;
+const dangerousScheme = /^(?:(?:javascript|vbscript):|data:(?:text\/html|image\/svg\+xml)(?:[;,]|$))/i;
 
 function scanHtml(html) {
   const errors = [], references = [];
