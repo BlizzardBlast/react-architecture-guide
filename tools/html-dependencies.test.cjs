@@ -80,6 +80,22 @@ test('executable HTML and inline styling fail closed', () => {
   }
 });
 
+test('active data URLs are rejected while ordinary image data remains allowed', () => {
+  for (const url of [
+    'data:text/html,<script>alert(1)</script>',
+    'DATA:text/html;charset=utf-8,%3Cscript%3E',
+    'data:image/svg+xml,<svg/>',
+    'data:image/svg+xml;base64,PHN2Zy8+',
+  ]) {
+    for (const tag of ['<a href="URL">open</a>', '<img src="URL" alt="">']) {
+      assert.match(scanHtml(tag.replace('URL', url)).errors.join(' '), /unsupported-vite-html-url/, url);
+    }
+  }
+  assert.match(scanHtml('<a href="data&#58;text/html;base64,PHNjcmlwdD4=">open</a>').errors.join(' '),
+    /unsupported-vite-html-url/);
+  assert.deepEqual(scanHtml('<img src="data:image/png;base64,iVBORw0KGgo" alt="">').errors, []);
+});
+
 test('inert JSON and actual HTML comments cannot generate source dependencies', () => {
   const text = '<script type="application/json">{"text":"<script>"}' +
     '</script><!-- <script type="module" src="/hidden.ts"></script> -->' + main;

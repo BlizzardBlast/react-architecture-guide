@@ -107,6 +107,8 @@ Vite can compile variable dynamic `import()` expressions into module dependencie
 
 For Vite's `new URL('./asset.ext', import.meta.url)` and `new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })` syntax, the checker records statically specified local URLs as dependencies. Both must pass ownership, pure-layer and cross-module checks. A standalone `new URL()` reference is not an executable source-module import and does not create a runtime-cycle edge; a `Worker` or `SharedWorker` entrypoint does. Dynamic URL targets fail closed. Generic external URLs are not treated as local source dependencies.
 
+Native `Worker` and `SharedWorker` constructors must use a literal local `new URL(..., import.meta.url)` entrypoint. Direct strings, dynamic or external targets, parenthesized constructor names, global-object constructor forms, and aliases of native constructors fail closed when their runtime resolution is not verified. Local bindings and Vite `?worker` imports are distinguished from native constructors. This source analysis does not prove arbitrary reflective lookup or aliases of global objects.
+
 Local URL names do not require a `./` prefix: `new URL('icon.svg', import.meta.url)` resolves beside its importer after verified Vite aliases are applied. TypeScript `paths` cannot redirect that URL to a different file. External schemes, protocol-relative URLs and same-document query/fragment references do not create local asset edges.
 
 Vite's URL transform resolves explicitly dot-relative `new URL('./icon.svg', import.meta.url)` references directly beside the importer, bypassing aliases. Root-absolute and other local URL names retain Vite alias precedence.
@@ -269,15 +271,15 @@ Static source-root coverage does not prove that arbitrary `root`, `build.rollupO
 
 Markdown reference-definition discovery now masks multiline inline-code spans before indexing definitions. Phantom definitions inside code no longer suppress actual HTML-comment delimiters, while valid definitions outside a completed code span remain active. This is a restricted CommonMark subset, not a replacement for a conformant token stream.
 
-### Post-source Vite injection and executable HTML (review #5636476418)
+### Post-source Vite injection and executable HTML
 
 Static AST import checking cannot detect dependencies inserted **after** collection. To avoid false architectural passes, nonempty/computed `esbuild` and `css` Vite option values are unsupported, including `jsxInject` and preprocessor `additionalData`. Inert empty option objects and `esbuild: false` remain accepted. A dedicated resolved/transformed Vite module graph verification is required to support broader configuration safely.
 
 The bounded `index.html` checker treats scripts and styles as dependency-bearing code: `on*` event handlers, `style=` attributes, inline `<style>` elements, `srcdoc`, executable/obfuscated URI attribute values, `meta` refresh and import maps fail closed because the checker does not extract their runtime imports/assets. This applies even when static external module `src` is safe. Prefer `<script type="module" src="/src/main.tsx">` and a linked stylesheet in the checked source tree. URLs containing HTML character references are intentionally unsupported by the bounded checker; resolve those with a conforming tokenizer and real bundler tests rather than trusting partial entity decoding. Inline JSON data script types remain recognized as non-executable controls.
 
-The validator is a restricted static grammar: it does **not** claim full HTML5 parsing, plugin behavior, source transformation or production bundler graph equivalence. Keep the actual integrated build, security and browser/accessibility checks mandatory.
+The checker uses an HTML5 parser but supports a restricted static HTML grammar; it does **not** prove arbitrary plugin behavior, source transformation or production bundler graph equivalence. Keep the actual integrated build, security and browser/accessibility checks mandatory.
 
-### HTML5 source coverage and default Vite public files (review #5636660964)
+### HTML5 source coverage and default Vite public files
 
 The HTML checker now consumes a single **parse5** HTML5 DOM with parser diagnostics. Do not strip comments or extract script tags using independent regular expressions. HTML RCDATA elements such as `title` and `textarea` handle `<!--` as text; live script and style elements that follow their end tags must still be evaluated. Quoted `>` is valid within HTML attributes and does not end a start tag.
 
@@ -293,7 +295,7 @@ Vite serves additional HTML documents inside its project root during development
 
 Vite's supported HTML resource attributes include `<link imagesrcset>` as well as `<meta content>` for explicit recognized `name` and `property` variants. The checked parser expands responsive candidates and recognized metadata image/media URLs, then applies the standard physical-file source scope and module privacy rules. It does not interpret ordinary meta descriptions or generic content attributes as imports. Unsupported responsive-candidate grammar fails closed. These source checks remain separate from required final bundler validation.
 
-### Root-relative HTML exclusions and dependency-bearing external CSS (review #5636815429)
+### Root-relative HTML exclusions and dependency-bearing external CSS
 
 The secondary-HTML discovery step runs recursively over the Vite project root, excluding only **root-level** repository metadata, third-party `node_modules`, and `public/` when separately audited. It must not exclude nested `docs/public`, `pages/dist`, `site/build` or other HTML-bearing paths merely because their directory names resemble generated output. Symlinked directories and HTML documents fail closed; unresolved/dangling symlinks produce a structured diagnostic rather than a filesystem exception. A resolved symlink to an ordinary non-HTML file can remain in scope without creating a false HTML dependency.
 
@@ -307,7 +309,7 @@ A local stylesheet's `@import`, `@use` or `@forward` directive is a dependency-b
 
 Path resolution of TypeScript/JavaScript and stylesheet files is fail-closed. Dangling/inaccessible source or style symlinks produce explicit `unresolved-source-symlink` / `unresolved-stylesheet-symlink` diagnostics rather than crashing the checker. Already verified same-owner symlinks and outside-source/ownership protections remain in effect.
 
-### Exhaustive owned source paths and Vite root-served files (review #5636952721)
+### Exhaustive owned source paths and Vite root-served files
 
 The `src/` tree contains the checker’s first-party source and stylesheet graph. Do not skip `dist/`, `build/`, `coverage/` or `node_modules/` by basename anywhere below `src/`: these may be ordinary reachable paths, and a skipped nested file can introduce transitive private-module imports. All supported JS/TS and CSS/Sass/Less files under `src/` are included in the owning graph regardless of the directory name. Git metadata is not application source.
 
@@ -321,7 +323,7 @@ For a JS/TS import to count as a third-party package outside the owned `src/` gr
 
 To prevent generated production HTML from becoming an unverified dev-served page, the reference application's supported `npm run build` uses Vite's `--outDir ../../.vite-build/react-app --emptyOutDir`; `npm run preview` uses the matching output. The generated directory lies outside `examples/react-app`, the Vite project root. The checker **continues rejecting** unexpected root-level `dist/**/*.html` and `build/**/*.html` under that project. Changing the build script/output or introducing nonstandard served roots requires separate review and a real Vite dev/build test.
 
-### Linked workspace package resolution — CR-P1-003
+### Linked workspace package resolution
 
 Installed bare imports may resolve through symlinks to workspace packages outside the checked `src/` tree. With TypeScript's default `preserveSymlinks: false`, `resolvedModule.resolvedFileName` is the physical workspace file, while `resolvedModule.originalPath` retains the installed logical path under an ancestor `node_modules/`. With `preserveSymlinks: true`, the installed path is the resolved filename itself. The checker now validates that the logical path is under an importer's ancestor `node_modules/` **and** that it resolves to the same physical file before treating the bare import as a third-party package. Relative, aliased and unrelated `vendor/node_modules` paths are still rejected or checked as owned source. Scoped-package and real-symlink fixtures cover both modes; these do not automatically certify any workspace package's internal architecture or runtime safety.
 

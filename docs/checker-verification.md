@@ -32,7 +32,7 @@ This is the **implementation-specific verification matrix** for the architecture
 - [ ] Include Vite-recognized `link.imagesrcset` candidates and allowed `meta[content]` image/media variants in the same physical ownership checks applied to `img.srcset`.
 - [ ] Reject unaudited secondary HTML pages accessible in Vite dev, including sibling and nested `.html`/`.htm`; separately audit `public/` assets.
 - [ ] Keep existing pre-refactor architecture fixtures aligned with precise error names, without weakening genuinely invalid-input tests.
-- [ ] Verify actual worker/main builds and dev-server HTML behavior as part of the outstanding complete quality and security gates.
+- [ ] Verify actual worker/main builds and dev-server HTML behavior as part of the quality and security checks.
 
 ### Nested HTML exclusions, CSS entrypoint ownership and symlink failures
 
@@ -83,7 +83,7 @@ This is the **implementation-specific verification matrix** for the architecture
 - [ ] Vite config imports only trusted integration modules, and unknown property initializers, computed test settings or resolution options fail closed.
 - [ ] Nearest-package self-name `exports` and `#imports` conditionals cannot disguise a CSS runtime target as an owned TypeScript declaration.
 - [ ] Automatically discovered PostCSS configuration (from project or ancestor files/package metadata) is rejected unless the transformed CSS graph is independently verified.
-- [ ] The authentic registry-backed lockfiles, pinned suites, two actual Vite builds, dependency audits and browser/accessibility checks are mandatory before merge.
+- [ ] Run clean installs from the lockfiles, the pinned suites, repeated Vite builds, dependency audits and browser/accessibility checks when validating changes.
 
 ### Type-only and token-boundary regression assurance
 

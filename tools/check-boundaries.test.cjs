@@ -874,6 +874,166 @@ test('same-module Vite workers remain valid', () => withFixture({
   'modules/orders/ui/worker.ts': 'export const answer = 42;',
 }, result => assert.deepEqual(result.errors, [])));
 
+test('unverified worker constructor URLs fail closed', () => {
+  for (const constructor of ['Worker', 'SharedWorker', 'window.Worker', 'globalThis["SharedWorker"]', '(Worker)', '(self.Worker)']) {
+    for (const target of ['"/src/modules/orders/ui/worker.js"', 'workerPath', 'new URL("./worker.js", base)', 'new URL("https://example.com/worker.js", import.meta.url)']) {
+      withFixture({
+        'shared/ui/panel.js': `export const worker = new ${constructor}(${target}, { type: "module" });`,
+        'modules/orders/ui/worker.js': 'import "../../../shared/ui/panel.js";',
+      }, result => assert.match(result.errors.join(' '), /unsupported-worker-entry/, constructor + ': ' + target));
+    }
+  }
+  withFixture({
+    'modules/orders/ui/a.js': 'export const worker = new (Worker)(new URL("./b.js", import.meta.url));',
+    'modules/orders/ui/b.js': 'import "./a.js";',
+  }, result => assert.match(result.errors.join(' '), /unsupported-worker-entry/));
+  withFixture({
+    'shared/ui/panel.ts': 'export const worker = new (Worker as typeof Worker)("/src/modules/orders/ui/worker.js");',
+    'modules/orders/ui/worker.js': 'export const value = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-worker-entry/));
+});
+
+test('Vite worker imports retain their ownership checks when instantiated', () => {
+  withFixture({
+    'modules/orders/ui/panel.ts': 'import OrderWorker from "./worker.ts?worker"; export const worker = new OrderWorker();',
+    'modules/orders/ui/worker.ts': 'export const answer = 42;',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    'shared/ui/panel.ts': 'import OrderWorker from "../../modules/orders/ui/worker.ts?worker"; export const worker = new OrderWorker();',
+    'modules/orders/ui/worker.ts': 'export const answer = 42;',
+  }, result => assert.match(result.errors.join(' '), /shared-must-be-independent/));
+});
+
+test('native worker constructor aliases fail closed', () => {
+  for (const alias of [
+    'const BackgroundWorker = Worker;',
+    'const BackgroundWorker = globalThis.Worker;',
+    'const { Worker: BackgroundWorker } = globalThis;',
+    'const BackgroundWorker = self["SharedWorker"];',
+    'const { ["Worker"]: BackgroundWorker } = globalThis;',
+    'const { Worker: BackgroundWorker } = { Worker };',
+    'const BackgroundWorker = Wor\\u006ber;',
+    'const BackgroundWorker = (globalThis as typeof globalThis).Worker;',
+    'const BackgroundWorker = new Proxy(Worker, {});',
+    'const BackgroundWorker = new Proxy(globalThis.Worker, {});',
+  ]) withFixture({
+    'shared/ui/panel.ts': `${alias} export const worker = new BackgroundWorker("/src/modules/orders/ui/worker.js");`,
+    'modules/orders/ui/worker.js': 'import "../../../shared/ui/panel";',
+  }, result => assert.match(result.errors.join(' '), /unsupported-worker/, alias));
+  withFixture({
+    'modules/orders/ui/a.ts': 'const BackgroundWorker = Worker; export const worker = new BackgroundWorker(new URL("./b.ts", import.meta.url));',
+    'modules/orders/ui/b.ts': 'import "./a";',
+  }, result => assert.match(result.errors.join(' '), /unsupported-worker|runtime-cycle/));
+});
+
+test('native worker aliases from destructuring assignments fail closed', () => {
+  for (const assignment of [
+    'let BackgroundWorker; ({ Worker: BackgroundWorker } = globalThis);',
+    'let Worker; ({ Worker } = globalThis);',
+    'let BackgroundWorker; ({ ["SharedWorker"]: BackgroundWorker } = window);',
+    'let rest; ({ ...rest } = self);',
+    'let BackgroundWorker; ({ Worker: BackgroundWorker } = (globalThis as typeof globalThis));',
+    'for (const { Worker: BackgroundWorker } of [globalThis]) { new BackgroundWorker("/src/modules/orders/ui/worker.js"); }',
+    'let Worker; for ({ Worker } of [window]) { new Worker("/src/modules/orders/ui/worker.js"); }',
+    'const [{ Worker: BackgroundWorker }] = [globalThis]; new BackgroundWorker("/src/modules/orders/ui/worker.js");',
+    'let BackgroundWorker; ([{ Worker: BackgroundWorker }] = [globalThis]); new BackgroundWorker("/src/modules/orders/ui/worker.js");',
+    'for (const { Worker: BackgroundWorker } of [globalThis].values()) { new BackgroundWorker("/src/modules/orders/ui/worker.js"); }',
+    'for (const { Worker: BackgroundWorker } of [...[globalThis]]) { new BackgroundWorker("/src/modules/orders/ui/worker.js"); }',
+  ]) withFixture({
+    'shared/ui/panel.ts': assignment + ' export const panel = true;',
+    'modules/orders/ui/worker.js': 'import "../../../shared/ui/panel.js";',
+  }, result => assert.match(result.errors.join(' '), /unsupported-worker-alias/, assignment));
+  withFixture({
+    'shared/ui/panel.js': 'let document; ({ document } = globalThis); export const panel = document;',
+  }, result => assert.deepEqual(result.errors, []));
+  withFixture({
+    'shared/ui/panel.js': 'function f(globalThis) { let Worker; ({ Worker } = globalThis); return Worker; } export { f };',
+  }, result => assert.deepEqual(result.errors, []));
+});
+
+test('nested object destructuring detects native worker sources and defaults', () => {
+  for (const source of [
+    'const { box: { Worker: W } = globalThis } = {}; new W("/worker.js");',
+    'let W; ({ box: { Worker: W } = globalThis } = {}); new W("/worker.js");',
+    'for (const { box: { Worker: W } = globalThis } of [{}]) new W("/worker.js");',
+    'let W; for ({ box: { Worker: W } = globalThis } of [{}]) new W("/worker.js");',
+    'const { box: { Worker: W } } = { box: globalThis }; new W("/worker.js");',
+    'const { ["box"]: { Worker: W } } = { ["box"]: globalThis }; new W("/worker.js");',
+    'const { box: { Worker: W } } = { box: globalThis, ...other }; new W("/worker.js");',
+    'const holder = { value: ({ Worker: W } = globalThis) };',
+    'const [{ Worker: W } = globalThis] = [undefined]; new W("/worker.js");',
+    'const [{ Worker: W } = globalThis] = []; new W("/worker.js");',
+    'function f(box) { const { box: { Worker: W } = globalThis } = box; return new W("/worker.js"); }',
+  ]) withFixture({ 'shared/ui/panel.js': source }, result =>
+    assert.match(result.errors.join(' '), /unsupported-worker-alias/, source));
+});
+
+test('object spreads retain native worker sources through destructuring', () => {
+  for (const source of [
+    'const { box: { Worker: W } } = { ...{ box: globalThis } }; new W("/worker.js");',
+    'let W; ({ box: { Worker: W } } = { ...{ box: globalThis } }); new W("/worker.js");',
+    'for (const { box: { Worker: W } } of [{ ...{ box: globalThis } }]) new W("/worker.js");',
+    'const { box: { Worker: W } } = { ...{ ...{ box: globalThis } } }; new W("/worker.js");',
+    'const { box: { Worker: W } } = { box: globalThis, ...{} }; new W("/worker.js");',
+    'const { Worker: W } = { ...globalThis }; new W("/worker.js");',
+    'const { box: { SharedWorker: W } } = { box: { ...self } }; new W("/worker.js");',
+    'let Worker; ({ Worker } = { ...globalThis }); new Worker("/worker.js");',
+    'let Worker; for ({ Worker } of [{ ...globalThis }]) new Worker("/worker.js");',
+  ]) withFixture({ 'shared/ui/panel.js': source }, result =>
+    assert.match(result.errors.join(' '), /unsupported-worker-alias/, source));
+  for (const source of [
+    'const { box: { Worker: W } } = { ...{ box: { Worker: LocalWorker } } }; new W();',
+    'const { box: { Worker: W } } = { ...{ box: globalThis }, box: { Worker: LocalWorker } }; new W();',
+    'const { box: { Worker: W } } = { box: globalThis, ...{ box: { Worker: LocalWorker } } }; new W();',
+    'const { Worker: W } = { ...globalThis, Worker: LocalWorker }; new W();',
+  ]) withFixture({ 'shared/ui/panel.js': 'class LocalWorker {} ' + source }, result =>
+    assert.deepEqual(result.errors, [], source));
+});
+
+test('unreachable destructuring defaults do not impersonate native workers', () => {
+  for (const source of [
+    'class LocalWorker {} const [{ Worker: W } = globalThis] = [{ Worker: LocalWorker }]; new W();',
+    'class LocalWorker {} let W; ([{ Worker: W } = globalThis] = [{ Worker: LocalWorker }]); new W();',
+    'class LocalWorker {} for (const { box: { Worker: W } = globalThis } of [{ box: { Worker: LocalWorker } }]) new W();',
+    'class LocalWorker {} let W; for ({ box: { Worker: W } = globalThis } of [{ box: { Worker: LocalWorker } }]) new W();',
+    'class LocalWorker {} const { box: { Worker: W } = globalThis } = { box: globalThis, box: { Worker: LocalWorker } }; new W();',
+  ]) withFixture({ 'shared/ui/panel.js': source }, result => assert.deepEqual(result.errors, [], source));
+});
+
+test('destructuring loop declarations do not crash the checker', () => {
+  for (const source of [
+    'for (const { x } of [{ x: 1 }]) console.log(x);',
+    'for (const { length } in { a: 1 }) console.log(length);',
+    'for (const [x] of [[1]]) console.log(x);',
+    'for (const { Worker } of [{ Worker: "Alice" }]) console.log(Worker);',
+    'for (const { document } of [globalThis]) console.log(document);',
+    'const [{ Worker }] = [{ Worker: "Alice" }]; console.log(Worker);',
+    'class LocalWorker {} const [root, { Worker }] = [globalThis, { Worker: LocalWorker }]; console.log(root, Worker);',
+  ]) withFixture({ 'shared/ui/panel.ts': source }, result => assert.deepEqual(result.errors, [], source));
+});
+
+test('local Worker bindings do not impersonate native workers', () => {
+  for (const source of [
+    'class Worker { constructor(name: string) {} } export const employee = new Worker("Alice");',
+    'import Worker from "./worker.ts?worker"; export const worker = new Worker();',
+    'function make(Worker: typeof LocalWorker) { return new Worker("Alice"); } class LocalWorker { constructor(name: string) {} } export { make };',
+    'export type BackgroundWorker = Worker;',
+    'class Wor\\u006ber { constructor(name: string) {} } export const employee = new Wor\\u006ber("Alice");',
+    'class Worker {} const constructors = { Worker }; export const value = constructors;',
+    'function make(window: { Worker: new (name: string) => object }) { return new window.Worker("Alice"); } export { make };',
+    'export const supported = typeof Worker !== "undefined";',
+    'export const supported = typeof (globalThis.Worker) !== "undefined";',
+  ]) withFixture({
+    'modules/orders/ui/panel.ts': source,
+    'modules/orders/ui/worker.ts': 'export const answer = 42;',
+  }, result => assert.deepEqual(result.errors, [], source));
+});
+
+test('active HTML data URLs fail the architecture check', () => withFixture({
+  '../index.html': '<a href="data:text/html,%3Cscript%3E">open</a>',
+  'app/main.ts': 'export const main = true;',
+}, result => assert.match(result.errors.join(' '), /unsupported-vite-html-url/)));
+
 test('new URL static assets respect ownership and pure-layer restrictions', () => {
   withFixture({
     'modules/orders/ui/panel.ts': 'export const icon = new URL("./assets/logo.svg", import.meta.url);',
