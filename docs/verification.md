@@ -10,6 +10,8 @@ The focused checkout and route Vitest suites passed (29 tests). They include con
 
 ## Local verification — 2026-10-27
 
+These results were recorded during the PR #1 repair, which began at `bc45e4a9b3f54c4e5b4aabd38de955a67e8f5034` against base `5154e7d7150c34d5459cc616f309fb9d01b7f1aa`. These identify the starting context, not the exact final tested working tree. The [original verification record](https://github.com/BlizzardBlast/react-architecture-guide/blob/c9ce4a953b64e0a34a182239680b84851129497f/docs/verification.md) retains the repair and evidence details.
+
 The recorded Windows runs used Node 22.13.0 and Node 24.22.0. Clean registry-backed installations were performed for all three packages; the Node 24.22.0 installation used npm 11.19.1.
 
 | Observed command/check | Result |

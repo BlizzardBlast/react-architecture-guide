@@ -83,7 +83,7 @@ This is the **implementation-specific verification matrix** for the architecture
 - [ ] Vite config imports only trusted integration modules, and unknown property initializers, computed test settings or resolution options fail closed.
 - [ ] Nearest-package self-name `exports` and `#imports` conditionals cannot disguise a CSS runtime target as an owned TypeScript declaration.
 - [ ] Automatically discovered PostCSS configuration (from project or ancestor files/package metadata) is rejected unless the transformed CSS graph is independently verified.
-- [ ] Run clean installs from the lockfiles, the pinned suites, repeated Vite builds, dependency audits and browser/accessibility checks when validating changes.
+- [ ] Before merge, complete clean installs from registry-backed lockfiles, run the pinned suites and two consecutive Vite builds, and pass dependency audits and browser/accessibility smoke checks.
 
 ### Type-only and token-boundary regression assurance
 
