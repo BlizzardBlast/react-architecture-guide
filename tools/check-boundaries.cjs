@@ -186,12 +186,42 @@ function workerBindings(sf) {
         return true;
       }));
   };
+  // TypeScript binds references to a locally declared 'globalThis' to a
+  // transient symbol without declarations in noLib programs. Resolve lexical
+  // shadowing rather than treating that absence as proof of the browser global.
+  const bindingHasName = (name, binding) => {
+    if (ts.isIdentifier(binding)) return binding.text === name;
+    if (ts.isBindingElement(binding)) return bindingHasName(name, binding.name);
+    if (ts.isObjectBindingPattern(binding) || ts.isArrayBindingPattern(binding)) {
+      return binding.elements.some(element => element && bindingHasName(name, element));
+    }
+    return false;
+  };
+  const shadowsGlobal = identifier => {
+    const name = identifier.text;
+    for (let parent = identifier.parent; parent; parent = parent.parent) {
+      if (ts.isFunctionLike(parent) &&
+          parent.parameters.some(parameter => bindingHasName(name, parameter.name))) return true;
+      if (ts.isCatchClause(parent) && parent.variableDeclaration &&
+          bindingHasName(name, parent.variableDeclaration.name)) return true;
+      if (!ts.isBlock(parent) && !ts.isSourceFile(parent)) continue;
+      for (const statement of parent.statements) {
+        if (ts.isVariableStatement(statement) && statement.declarationList.declarations
+          .some(declaration => bindingHasName(name, declaration.name))) return true;
+        if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+            statement.name?.text === name) return true;
+      }
+    }
+    return false;
+  };
   // Follow only directly initialized, immutable local aliases. Arbitrary
   // assignments and reflective lookups are not certified by this static graph.
   const globalObject = (expression, seen = new Set()) => {
     const value = unwrap(expression);
     if (!ts.isIdentifier(value)) return false;
-    if (['globalThis', 'window', 'self'].includes(value.text)) return !localValue(value);
+    if (['globalThis', 'window', 'self'].includes(value.text)) {
+      return !localValue(value) && !shadowsGlobal(value);
+    }
     const symbol = localSymbol(value);
     const declaration = symbol?.declarations?.length === 1 ? symbol.declarations[0] : undefined;
     if (!declaration || !ts.isVariableDeclaration(declaration) ||

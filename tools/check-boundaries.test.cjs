@@ -944,6 +944,7 @@ test('constant aliases of global objects cannot hide native Worker constructors'
     'class LocalWorker {} const scope = { Worker: LocalWorker }; const W = scope.Worker; new W();',
     'class LocalWorker {} const globalThis = { Worker: LocalWorker }; const scope = globalThis; const { Worker: W } = scope; new W();',
     'class LocalWorker {} const scope = { Worker: LocalWorker }; const { Worker: W } = scope; new W();',
+    'class LocalWorker {} function make(globalThis: { Worker: typeof LocalWorker }) { const scope = globalThis; const W = scope.Worker; return new W(); }',
   ]) withFixture({ 'modules/orders/ui/panel.ts': source },
     result => assert.deepEqual(result.errors, [], source));
 });
