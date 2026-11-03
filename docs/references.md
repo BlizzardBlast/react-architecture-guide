@@ -21,6 +21,9 @@ The supplied PDF is **not republished** here.
 - [Next.js App Router — Project Organization](https://nextjs.org/docs/app/getting-started/project-structure)
 - [Bulletproof React](https://github.com/alan2207/bulletproof-react)
 - [dependency-cruiser](https://github.com/sverweij/dependency-cruiser)
+- [Evil Martians — How to make postMessage type-safe in under 350 bytes](https://evilmartians.com/chronicles/how-to-make-postmessage-type-safe-in-under-350-bytes) — directional contracts and transport/RPC separation; not a blanket dependency mandate.
+- [typed-channel](https://github.com/psd-coder/typed-channel) — an optional lightweight implementation; typed calls do not provide runtime validation or origin authentication.
+- [MDN — Window.postMessage](https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage) — source/origin checks and restrictive target origins.
 
 ## Choices made by this guide
 

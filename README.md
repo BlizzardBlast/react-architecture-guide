@@ -49,6 +49,7 @@ For complex business workflows, **replace**, rather than combine blindly, the si
 | SOLID in React | [SOLID guidance](docs/solid-in-react.md) |
 | Hooks, caching and React Compiler | [React practices](docs/react-practices.md) |
 | Shared UI responsiveness and interaction benchmarks | [Interaction performance contracts](docs/interaction-performance.md) |
+| Type-safe Web Worker, iframe and tab messages | [Cross-context messaging](docs/cross-context-messaging.md) |
 | Incremental adoption | [Adoption](docs/adoption.md) |
 | Quality and code review | [Review checklist](docs/quality-and-review.md) |
 | Checker-specific verification and regression cases | [Checker verification matrix](docs/checker-verification.md) |
