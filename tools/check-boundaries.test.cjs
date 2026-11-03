@@ -926,6 +926,28 @@ test('native worker constructor aliases fail closed', () => {
   }, result => assert.match(result.errors.join(' '), /unsupported-worker|runtime-cycle/));
 });
 
+test('constant aliases of global objects cannot hide native Worker constructors', () => {
+  for (const source of [
+    'const scope = globalThis; const { Worker: W } = scope; new W("/src/modules/orders/ui/worker.js");',
+    'const scope = window; const W = scope.Worker; new W("/src/modules/orders/ui/worker.js");',
+    'const scope = self; const W = scope["SharedWorker"]; new W("/src/modules/orders/ui/worker.js");',
+    'const scope = (globalThis as typeof globalThis); const W = scope.Worker; new W("/src/modules/orders/ui/worker.js");',
+    'const root = globalThis; const scope = root; const { Worker: W } = scope; new W("/src/modules/orders/ui/worker.js");',
+    'const scope = globalThis; const { Worker: W } = { ...scope }; new W("/src/modules/orders/ui/worker.js");',
+    'const scope = globalThis; let W; ({ Worker: W } = scope); new W("/src/modules/orders/ui/worker.js");',
+    'const scope = globalThis; new scope.Worker("/src/modules/orders/ui/worker.js");',
+  ]) withFixture({
+    'shared/ui/panel.ts': source,
+    'modules/orders/ui/worker.js': 'export const worker = 1;',
+  }, result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
+  for (const source of [
+    'class LocalWorker {} const scope = { Worker: LocalWorker }; const W = scope.Worker; new W();',
+    'class LocalWorker {} const globalThis = { Worker: LocalWorker }; const scope = globalThis; const { Worker: W } = scope; new W();',
+    'class LocalWorker {} const scope = { Worker: LocalWorker }; const { Worker: W } = scope; new W();',
+  ]) withFixture({ 'modules/orders/ui/panel.ts': source },
+    result => assert.deepEqual(result.errors, [], source));
+});
+
 test('native worker aliases from destructuring assignments fail closed', () => {
   for (const assignment of [
     'let BackgroundWorker; ({ Worker: BackgroundWorker } = globalThis);',

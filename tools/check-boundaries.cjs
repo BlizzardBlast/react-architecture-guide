@@ -162,16 +162,21 @@ function workerBindings(sf) {
     return expression;
   };
   let checker;
-  const localValue = identifier => {
+  // A single checker per source file keeps binding resolution consistent and
+  // avoids repeatedly rebuilding its program for every Worker-like expression.
+  const localSymbol = identifier => {
     if (!checker) {
       const workerOptions = { noLib: true, noResolve: true, allowJs: true };
       const host = ts.createCompilerHost(workerOptions);
       host.getSourceFile = filename => path.resolve(filename) === path.resolve(sf.fileName) ? sf : undefined;
       checker = ts.createProgram([sf.fileName], workerOptions, host).getTypeChecker();
     }
-    const symbol = ts.isShorthandPropertyAssignment(identifier.parent)
+    return ts.isShorthandPropertyAssignment(identifier.parent)
       ? checker.getShorthandAssignmentValueSymbol(identifier.parent)
       : checker.getSymbolAtLocation(identifier);
+  };
+  const localValue = identifier => {
+    const symbol = localSymbol(identifier);
     return Boolean(symbol && (symbol.flags & (ts.SymbolFlags.Value | ts.SymbolFlags.Alias)) &&
       symbol.declarations?.some(declaration => {
         if (declaration.getSourceFile().isDeclarationFile) return false;
@@ -181,9 +186,20 @@ function workerBindings(sf) {
         return true;
       }));
   };
-  const globalObject = expression => {
+  // Follow only directly initialized, immutable local aliases. Arbitrary
+  // assignments and reflective lookups are not certified by this static graph.
+  const globalObject = (expression, seen = new Set()) => {
     const value = unwrap(expression);
-    return ts.isIdentifier(value) && ['globalThis', 'window', 'self'].includes(value.text) && !localValue(value);
+    if (!ts.isIdentifier(value)) return false;
+    if (['globalThis', 'window', 'self'].includes(value.text)) return !localValue(value);
+    const symbol = localSymbol(value);
+    const declaration = symbol?.declarations?.length === 1 ? symbol.declarations[0] : undefined;
+    if (!declaration || !ts.isVariableDeclaration(declaration) ||
+        !ts.isIdentifier(declaration.name) || !declaration.initializer ||
+        !ts.isVariableDeclarationList(declaration.parent) ||
+        !(declaration.parent.flags & ts.NodeFlags.Const) || seen.has(declaration)) return false;
+    seen.add(declaration);
+    return globalObject(declaration.initializer, seen);
   };
   const globalSource = expression => {
     const value = unwrap(expression);
