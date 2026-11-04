@@ -1140,6 +1140,57 @@ test('literal asterisk property writes are distinct from dynamic unknown writes'
     result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
 });
 
+test('unknown Worker receivers remain unsafe through direct const aliases', () => {
+  for (const extension of ['js', 'ts']) {
+    for (const [source, constructor] of [
+      [
+        'const key="status"; const holder={root:globalThis,[key]:1}; const source=holder.root; new source.Worker("/private.js");',
+        'new source.Worker'
+      ],
+      [
+        'const holder={root:globalThis,...getOptions()}; const source=holder.root; new source.Worker("/private.js");',
+        'new source.Worker'
+      ],
+      [
+        'const key="status"; const holder={root:globalThis,[key]:1}; const source=holder.root; const chained=source; new chained.Worker("/private.js");',
+        'new chained.Worker'
+      ],
+    ]) {
+      const filename = 'shared/ui/panel.' + extension;
+      withFixture({ [filename]: source }, result => {
+        const offset = source.indexOf(constructor);
+        assert.ok(offset >= 0);
+        assert.ok(result.errors.some(error => error.includes(
+          'unsupported-worker-entry: ' + filename + ' at offset ' + offset + ';'
+        )), source + '\\n' + result.errors.join('\\n'));
+      });
+    }
+  }
+  for (const source of [
+    'class LocalWorker{} const holder={root:{Worker:LocalWorker}}; const source=holder.root; new source.Worker();',
+    'const holder={root:{Worker:class LocalWorker{}}}; const source=holder.root; const chained=source; new chained.Worker();',
+    'class LocalWorker{} function create(source){return new source.Worker();}',
+  ]) withFixture({ 'modules/orders/ui/panel.js': source },
+    result => assert.deepEqual(result.errors, [], source));
+});
+
+test('inline local Worker class and function expressions shadow inherited native constructors', () => {
+  for (const source of [
+    'const holder={Worker:class LocalWorker{}}; new holder.Worker();',
+    'const holder={Worker:function LocalWorker(){}}; new holder.Worker();',
+    'const holder={__proto__:globalThis,Worker:class LocalWorker{}}; new holder.Worker();',
+    'const holder={__proto__:window,Worker:function LocalWorker(){}}; new holder.Worker();',
+    'const holder={__proto__:{Worker:class LocalWorker{}}}; new holder.Worker();',
+    'const holder={__proto__:{Worker:function LocalWorker(){}}}; new holder.Worker();',
+  ]) withFixture({ 'modules/orders/ui/panel.js': source },
+    result => assert.deepEqual(result.errors, [], source));
+  for (const source of [
+    'const holder={__proto__:globalThis,Worker:globalThis.Worker}; new holder.Worker("/private.js");',
+    'const holder={Worker:globalThis.Worker}; new holder.Worker("/private.js");',
+  ]) withFixture({ 'shared/ui/panel.js': source },
+    result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
+});
+
 test('native worker aliases from destructuring assignments fail closed', () => {
   for (const assignment of [
     'let BackgroundWorker; ({ Worker: BackgroundWorker } = globalThis);',

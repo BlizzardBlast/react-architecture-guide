@@ -475,6 +475,13 @@ function workerProvenance(sf, workerNames, unwrap) {
     const value = literalProperty(object, key, seen);
     return value === absentProperty || value === unknownProperty ? undefined : value;
   };
+  // Local constructor expressions are not global browser Workers, even when
+  // stored as an own property of an object with a global prototype.
+  const localWorkerConstructor = expression => {
+    const value = unwrap(expression);
+    return ts.isClassExpression(value) || ts.isFunctionExpression(value) ||
+      ts.isIdentifier(value) && localValue(value);
+  };
   // Literal own properties and prototype inheritance are different sources.
   // Follow inspectable prototype chains with an explicit cycle guard.
   const inheritedWorkerMember = member => {
@@ -491,9 +498,9 @@ function workerProvenance(sf, workerNames, unwrap) {
       const own = literalProperty(current, key, new Set());
       if (own === unknownProperty) return true;
       if (own !== absentProperty) {
-        const value = unwrap(own);
-        // A known local Worker constructor shadows any inherited native one.
-        return !(ts.isIdentifier(value) && localValue(value));
+        // Identifiers with proven local values and inline class/function
+        // expressions shadow inherited native Worker constructors.
+        return !localWorkerConstructor(own);
       }
       for (const property of current.properties) {
         if (!ts.isPropertyAssignment(property) || !property.name ||
@@ -520,15 +527,21 @@ function workerProvenance(sf, workerNames, unwrap) {
     const name = ts.isPropertyAccessExpression(member)
       ? member.name.text : literalString(member.argumentExpression);
     if (!workerNames.includes(name)) return false;
-    const ambiguous = expression => {
+    const ambiguous = (expression, seen = new Set()) => {
       const value = unwrap(expression);
+      if (ts.isIdentifier(value)) {
+        // Unknown provenance must survive a direct const alias and any
+        // further const aliases, not just an inline chain of member accesses.
+        const initializer = constInitializer(value, seen);
+        return Boolean(initializer && ambiguous(initializer, seen));
+      }
       if (!(ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value))) return false;
       const root = resolveStaticObject(value.expression, new Set());
       const name = ts.isPropertyAccessExpression(value)
         ? value.name.text : literalString(value.argumentExpression);
       if (root && (name === null ||
           literalProperty(root, name, new Set()) === unknownProperty)) return true;
-      return ambiguous(value.expression);
+      return ambiguous(value.expression, seen);
     };
     return ambiguous(member.expression);
   };
