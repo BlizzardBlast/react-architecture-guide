@@ -155,6 +155,191 @@ function primitiveLocalBinding(identifier) {
 }
 // Resolve native Worker roots separately from extraction of dependency edges.
 // This avoids conflating symbol provenance with import graph bookkeeping.
+// Track writes to statically known object-property paths. Immutable bindings
+// do not imply immutable objects; a path is untrusted if a write could alter
+// that path or an ancestor. Keep this analysis independent of Worker policy.
+function workerMutationPaths(sf, localSymbol, unwrap) {
+  const rootDeclaration = expression => {
+    let node = unwrap(expression);
+    while (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      node = unwrap(node.expression);
+    }
+    if (!ts.isIdentifier(node)) return undefined;
+    // JS binding symbols can carry synthetic Identifier declarations.
+    const declarations = localSymbol(node)?.declarations?.filter(ts.isVariableDeclaration);
+    return declarations?.length === 1 ? declarations[0] : undefined;
+  };
+  const memberKey = node => {
+    if (ts.isPropertyAccessExpression(node)) return node.name.text;
+    const arg = unwrap(node.argumentExpression);
+    return ts.isStringLiteral(arg) || ts.isNumericLiteral(arg) ||
+      ts.isNoSubstitutionTemplateLiteral(arg) ? arg.text : '*';
+  };
+  const reference = expression => {
+    let node = unwrap(expression);
+    const path = [];
+    while (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      path.unshift(memberKey(node));
+      node = unwrap(node.expression);
+    }
+    const declaration = ts.isIdentifier(node) ? rootDeclaration(node) : undefined;
+    return declaration ? { declaration, path } : undefined;
+  };
+  let changes;
+  const mutations = () => {
+    if (changes) return changes;
+    const paths = new Map(), aliases = [];
+    changes = paths;
+    const add = (declaration, given) => {
+      if (!declaration) return false;
+      // Prevent pathological alias cycles from creating unbounded path arrays.
+      const path = given.length > 12 ? ['*'] : given;
+      let entries = paths.get(declaration);
+      if (!entries) { entries = new Map(); paths.set(declaration, entries); }
+      const encoded = JSON.stringify(path);
+      if (entries.has(encoded)) return false;
+      if (entries.size >= 128) {
+        if (entries.has('["*"]')) return false;
+        entries.clear();
+        entries.set('["*"]', ['*']);
+        return true;
+      }
+      entries.set(encoded, path);
+      return true;
+    };
+    const record = (target, suffix = []) => {
+      const found = reference(target);
+      if (found) add(found.declaration, [...found.path, ...suffix]);
+    };
+    const assignmentTargets = target => {
+      const node = unwrap(target);
+      if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+        record(node);
+      } else if (ts.isArrayLiteralExpression(node) || ts.isArrayBindingPattern(node)) {
+        for (const item of node.elements) {
+          if (ts.isOmittedExpression(item)) continue;
+          assignmentTargets(ts.isSpreadElement(item) ? item.expression :
+            ts.isBindingElement(item) ? item.name : item);
+        }
+      } else if (ts.isObjectLiteralExpression(node)) {
+        for (const property of node.properties) {
+          if (ts.isPropertyAssignment(property)) assignmentTargets(property.initializer);
+          else if (ts.isSpreadAssignment(property)) assignmentTargets(property.expression);
+        }
+      } else if (ts.isObjectBindingPattern(node)) {
+        for (const element of node.elements) assignmentTargets(element.name);
+      } else if (ts.isBinaryExpression(node) &&
+                 node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        assignmentTargets(node.left);
+      }
+    };
+    const literalName = expr => {
+      const node = expr && unwrap(expr);
+      return node && (ts.isStringLiteral(node) || ts.isNumericLiteral(node) ||
+        ts.isNoSubstitutionTemplateLiteral(node)) ? node.text : '*';
+    };
+    const changedByCall = node => {
+      if (!ts.isPropertyAccessExpression(node.expression) ||
+          !ts.isIdentifier(node.expression.expression)) return;
+      const owner = node.expression.expression.text, method = node.expression.name.text;
+      const objectCall = owner === 'Object' &&
+        ['assign', 'defineProperty', 'defineProperties', 'setPrototypeOf'].includes(method);
+      const reflectCall = owner === 'Reflect' &&
+        ['set', 'defineProperty', 'deleteProperty', 'setPrototypeOf'].includes(method);
+      if (!objectCall && !reflectCall || !node.arguments.length) return;
+      const target = node.arguments[0];
+      const markObject = source => {
+        const value = unwrap(source);
+        if (!ts.isObjectLiteralExpression(value)) { record(target, ['*']); return; }
+        for (const property of value.properties) {
+          if (ts.isSpreadAssignment(property)) { record(target, ['*']); continue; }
+          const name = property.name;
+          if (name && (ts.isIdentifier(name) || ts.isStringLiteral(name) ||
+              ts.isNumericLiteral(name))) record(target, [name.text]);
+          else if (name && ts.isComputedPropertyName(name))
+            record(target, [literalName(name.expression)]);
+          else record(target, ['*']);
+        }
+      };
+      if (method === 'assign') {
+        for (const source of node.arguments.slice(1)) markObject(source);
+      } else if (method === 'defineProperties') {
+        if (node.arguments[1]) markObject(node.arguments[1]);
+        else record(target, ['*']);
+      } else if (['set', 'defineProperty', 'deleteProperty'].includes(method)) {
+        record(target, [literalName(node.arguments[1])]);
+      } else {
+        record(target, ['*']);
+      }
+    };
+    const visit = node => {
+      if (ts.isBinaryExpression(node) && ts.isAssignmentOperator(node.operatorToken.kind)) {
+        assignmentTargets(node.left);
+      }
+      if ((ts.isForOfStatement(node) || ts.isForInStatement(node)) &&
+          !ts.isVariableDeclarationList(node.initializer)) assignmentTargets(node.initializer);
+      if (ts.isDeleteExpression(node) ||
+          (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+          [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator)) {
+        assignmentTargets(ts.isDeleteExpression(node) ? node.expression : node.operand);
+      }
+      if (ts.isCallExpression(node)) changedByCall(node);
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
+          node.initializer && ts.isVariableDeclarationList(node.parent) &&
+          (node.parent.flags & ts.NodeFlags.Const)) {
+        const initializer = unwrap(node.initializer);
+        if (ts.isIdentifier(initializer) ||
+            ts.isPropertyAccessExpression(initializer) ||
+            ts.isElementAccessExpression(initializer)) {
+          const source = reference(initializer);
+          if (source) aliases.push({ dest: node, ...source, spread: false });
+        } else if (ts.isObjectLiteralExpression(initializer)) {
+          for (const property of initializer.properties) {
+            if (!ts.isSpreadAssignment(property)) continue;
+            const source = reference(property.expression);
+            if (source) aliases.push({ dest: node, ...source, spread: true });
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    // Propagate conservatively across const references and shallow spreads.
+    // Path prefixes preserve valid unrelated-field writes.
+    const matchesPrefix = (path, prefix) =>
+      prefix.every((key, i) => key === '*' || path[i] === key);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const alias of aliases) {
+        for (const path of [...(paths.get(alias.dest)?.values() || [])]) {
+          changed = add(alias.declaration, alias.spread ? path :
+            [...alias.path, ...path]) || changed;
+        }
+        for (const path of [...(paths.get(alias.declaration)?.values() || [])]) {
+          if (alias.spread) {
+            changed = add(alias.dest, path) || changed;
+          } else if (path.length <= alias.path.length &&
+                     matchesPrefix(alias.path, path)) {
+            changed = add(alias.dest, ['*']) || changed;
+          } else if (matchesPrefix(path, alias.path)) {
+            changed = add(alias.dest, path.slice(alias.path.length)) || changed;
+          }
+        }
+      }
+    }
+    return changes;
+  };
+  const possiblyMutated = expression => {
+    const value = reference(expression);
+    if (!value) return false;
+    const writes = mutations().get(value.declaration);
+    return Boolean(writes && [...writes.values()].some(path =>
+      path.length <= value.path.length && path.every((key, i) =>
+        key === '*' || value.path[i] === '*' || key === value.path[i])));
+  };
+  return { rootDeclaration, possiblyMutated };
+}
 function workerProvenance(sf, workerNames, unwrap) {
   let checker;
   // A single checker per source file keeps binding resolution consistent and
@@ -209,105 +394,19 @@ function workerProvenance(sf, workerNames, unwrap) {
     }
     return false;
   };
-  // A const binding does not make its referenced object immutable. Track
-  // writes and simple aliases so a later Worker property read cannot be
-  // certified from a stale object initializer.
-  const rootDeclaration = expression => {
-    let node = unwrap(expression);
-    while (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
-      node = unwrap(node.expression);
-    }
-    if (!ts.isIdentifier(node)) return undefined;
-    // The compiler may attach a synthetic Identifier declaration alongside
-    // the real VariableDeclaration, particularly for JS source files. Count
-    // only variable declarations, while rejecting genuinely ambiguous ones.
-    const declarations = localSymbol(node)?.declarations?.filter(ts.isVariableDeclaration);
-    return declarations?.length === 1 ? declarations[0] : undefined;
-  };
-  let modifiedDeclarations;
-  const mutatedRoots = () => {
-    if (modifiedDeclarations) return modifiedDeclarations;
-    const modified = new Set();
-    const aliases = [];
-    modifiedDeclarations = modified;
-    const visit = node => {
-      if (ts.isBinaryExpression(node) && ts.isAssignmentOperator(node.operatorToken.kind) &&
-          (ts.isPropertyAccessExpression(unwrap(node.left)) ||
-            ts.isElementAccessExpression(unwrap(node.left)))) {
-        const declaration = rootDeclaration(node.left);
-        if (declaration) modified.add(declaration);
-      }
-      if (ts.isDeleteExpression(node) ||
-          (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
-            [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator)) {
-        const target = ts.isDeleteExpression(node) ? node.expression : node.operand;
-        if (ts.isPropertyAccessExpression(unwrap(target)) ||
-            ts.isElementAccessExpression(unwrap(target))) {
-          const declaration = rootDeclaration(target);
-          if (declaration) modified.add(declaration);
-        }
-      }
-      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
-          ts.isIdentifier(node.expression.expression) &&
-          (node.expression.expression.text === 'Object' &&
-            ['assign', 'defineProperty', 'defineProperties', 'setPrototypeOf'].includes(node.expression.name.text) ||
-            node.expression.expression.text === 'Reflect' &&
-            ['set', 'defineProperty', 'deleteProperty', 'setPrototypeOf'].includes(node.expression.name.text))) {
-        const declaration = node.arguments.length ? rootDeclaration(node.arguments[0]) : undefined;
-        if (declaration) modified.add(declaration);
-      }
-      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
-          ts.isVariableDeclarationList(node.parent) &&
-          Boolean(node.parent.flags & ts.NodeFlags.Const)) {
-        const value = unwrap(node.initializer);
-        if (ts.isIdentifier(value) || ts.isPropertyAccessExpression(value) ||
-            ts.isElementAccessExpression(value)) {
-          const original = rootDeclaration(value);
-          if (original) aliases.push([node, original]);
-        } else if (ts.isObjectLiteralExpression(value)) {
-          for (const entry of value.properties) {
-            if (ts.isSpreadAssignment(entry)) {
-              const original = rootDeclaration(entry.expression);
-              if (original) aliases.push([node, original]);
-            }
-          }
-        }
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sf);
-    // Conservatively propagate changes in either direction along known aliases.
-    // Shallow spreads can share nested object references, even if their outer
-    // properties are distinct.
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const [left, right] of aliases) {
-        if (modified.has(left) !== modified.has(right)) {
-          modified.add(left);
-          modified.add(right);
-          changed = true;
-        }
-      }
-    }
-    return modified;
-  };
+  const { rootDeclaration, possiblyMutated } =
+    workerMutationPaths(sf, localSymbol, unwrap);
   const unstableWorkerMember = member => {
     if (!(ts.isPropertyAccessExpression(member) || ts.isElementAccessExpression(member))) return false;
     const key = ts.isPropertyAccessExpression(member)
       ? member.name.text : literalString(member.argumentExpression);
-    if (!workerNames.includes(key)) return false;
-    const declaration = rootDeclaration(member.expression);
-    return Boolean(declaration && mutatedRoots().has(declaration));
+    return workerNames.includes(key) && possiblyMutated(member);
   };
-  // Follow a literal only when its const binding and known aliases have no
-  // property mutations in the checked source file.
   const constInitializer = (identifier, seen) => {
     const declaration = rootDeclaration(identifier);
     if (!declaration || !ts.isIdentifier(declaration.name) || !declaration.initializer ||
         !ts.isVariableDeclarationList(declaration.parent) ||
-        !(declaration.parent.flags & ts.NodeFlags.Const) || seen.has(declaration) ||
-        mutatedRoots().has(declaration)) return undefined;
+        !(declaration.parent.flags & ts.NodeFlags.Const) || seen.has(declaration)) return undefined;
     seen.add(declaration);
     return declaration.initializer;
   };
@@ -355,6 +454,9 @@ function workerProvenance(sf, workerNames, unwrap) {
     return absentProperty;
   };
   const inspectMember = (member, seen) => {
+    // Do not read through the original literal when a write may have replaced
+    // this property or one of its parent objects.
+    if (possiblyMutated(member)) return undefined;
     const key = ts.isPropertyAccessExpression(member)
       ? member.name.text : literalString(member.argumentExpression);
     if (key === null || key === undefined) return undefined;

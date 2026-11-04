@@ -1003,6 +1003,46 @@ test('literal-object spreads preserve native Worker provenance and local classes
     result => assert.deepEqual(result.errors, [], source));
 });
 
+test('object/array destructuring writes invalidate native Worker holder provenance', () => {
+  for (const [ext, assignment] of [
+    ['js', '({ root: holder.root } = { root: globalThis });'],
+    ['js', '([holder.root] = [globalThis]);'],
+    ['ts', '({ root: holder.root } = { root: globalThis });'],
+    ['ts', '([holder.root] = [globalThis]);'],
+    ['js', 'for ({ root: holder.root } of [{root: self}]) {}'],
+    ['js', '({ root: [holder.root] } = { root: [globalThis] });'],
+    ['js', '({ root: holder["root"] } = { root: globalThis });'],
+    ['js', '({ root: holder.root = globalThis } = {});'],
+  ]) {
+    const source = 'class LocalWorker {} const holder = {root:{Worker:LocalWorker}}; ' +
+      assignment + ' new holder.root.Worker("/worker.js");';
+    withFixture({ ['shared/ui/panel.' + ext]: source },
+      result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
+  }
+});
+
+test('unrelated property changes preserve known local Worker classes', () => {
+  for (const source of [
+    'class LocalWorker {} const holder = {Worker:LocalWorker,status:"idle"}; holder.status = "ready"; new holder.Worker();',
+    'class LocalWorker {} const holder = {root:{Worker:LocalWorker,status:"idle"}}; holder.root.status = "ready"; new holder.root.Worker();',
+    'class LocalWorker {} const holder = {Worker:LocalWorker,status:"idle"}; Object.assign(holder,{status:"ready"}); new holder.Worker();',
+    'class LocalWorker {} const holder = {Worker:LocalWorker,status:"idle"}; Reflect.set(holder,"status","ready"); new holder.Worker();',
+    'class LocalWorker {} const holder = {Worker:LocalWorker,status:"idle"}; const alias = holder; alias.status = "ready"; new holder.Worker();',
+  ]) withFixture({ 'modules/orders/ui/panel.js': source },
+    result => assert.deepEqual(result.errors, [], source));
+});
+
+test('dynamic and alias property writes remain conservative for Worker members', () => {
+  for (const source of [
+    'class LocalWorker {} const holder = {Worker:LocalWorker,status:"idle"}; holder[key] = globalThis.Worker; new holder.Worker();',
+    'class LocalWorker {} const holder = {root:{Worker:LocalWorker}}; const alias = holder.root; alias.Worker = globalThis.Worker; new holder.root.Worker();',
+    'class LocalWorker {} const holder = {Worker:LocalWorker,status:"idle"}; Object.assign(holder,unknown); new holder.Worker();',
+    'class LocalWorker {} const holder = {Worker:LocalWorker,status:"idle"}; Reflect.set(holder,key,globalThis.Worker); new holder.Worker();',
+    'class LocalWorker {} const holder = {root:{Worker:LocalWorker}}; ({root:holder.root} = {root:window}); new holder.root.Worker();',
+  ]) withFixture({ 'shared/ui/panel.js': source },
+    result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
+});
+
 test('native worker aliases from destructuring assignments fail closed', () => {
   for (const assignment of [
     'let BackgroundWorker; ({ Worker: BackgroundWorker } = globalThis);',
