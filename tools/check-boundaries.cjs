@@ -218,9 +218,11 @@ function workerProvenance(sf, workerNames, unwrap) {
       node = unwrap(node.expression);
     }
     if (!ts.isIdentifier(node)) return undefined;
-    const declarations = localSymbol(node)?.declarations;
-    return declarations?.length === 1 && ts.isVariableDeclaration(declarations[0])
-      ? declarations[0] : undefined;
+    // The compiler may attach a synthetic Identifier declaration alongside
+    // the real VariableDeclaration, particularly for JS source files. Count
+    // only variable declarations, while rejecting genuinely ambiguous ones.
+    const declarations = localSymbol(node)?.declarations?.filter(ts.isVariableDeclaration);
+    return declarations?.length === 1 ? declarations[0] : undefined;
   };
   let modifiedDeclarations;
   const mutatedRoots = () => {

@@ -980,6 +980,14 @@ test('mutable property writes invalidate tracked const Worker holders', () => {
     result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
 });
 
+test('mutable Worker aliases are recognized in both JavaScript and TypeScript sources', () => {
+  for (const extension of ['js', 'ts']) withFixture({
+    ['shared/ui/panel.' + extension]:
+      'class LocalWorker {} const holder = { root: { Worker: LocalWorker } };' +
+      'holder.root = globalThis; new holder.root.Worker("/worker.js");',
+  }, result => assert.match(result.errors.join(' '), /unsupported-worker/));
+});
+
 test('literal-object spreads preserve native Worker provenance and local classes', () => {
   for (const source of [
     'const holder = { root: globalThis }; const copy = { ...holder }; new copy.root.Worker("/worker.js");',
