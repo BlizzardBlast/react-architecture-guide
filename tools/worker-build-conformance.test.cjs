@@ -17,8 +17,19 @@ function buildWorkerFixture(mainPath, source) {
   };
   try {
     write('package.json', JSON.stringify({ private: true, type: 'module' }));
-    write('index.html', '<!doctype html><script type="module" src="/src/' + mainPath + '"></script>');
+    // The HTML entry is always app-owned. Modules are consumed through their
+    // public API; testing private module imports directly from HTML would
+    // correctly fail the unrelated deep-import architecture rule.
+    write('index.html', '<!doctype html><script type="module" src="/src/app/main.js"></script>');
     write('src/' + mainPath, source);
+    if (mainPath.startsWith('modules/orders/')) {
+      write('src/modules/orders/index.js', 'export { background } from "./ui/main.js";');
+      write('src/app/main.js',
+        'import { background } from "../modules/orders/index.js"; console.log(background);');
+    } else {
+      write('src/app/main.js',
+        'import { background } from "../shared/ui/main.js"; console.log(background);');
+    }
     write('src/modules/orders/ui/worker.js', 'self.onmessage = () => self.postMessage("ready");');
     const checked = check(path.join(root, 'src'));
     assert.ok(fs.existsSync(viteCli), 'Install the React example dependencies before running the Vite conformance suite');

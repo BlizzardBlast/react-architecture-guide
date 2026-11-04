@@ -227,17 +227,27 @@ function workerProvenance(sf, workerNames, unwrap) {
     return ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)
       ? name.text : undefined;
   };
+  // Resolve a literal holder through const aliases and further literal
+  // property accesses, without evaluating functions or dynamic getters.
+  const resolveStaticObject = (expression, seen) => {
+    const value = unwrap(expression);
+    if (ts.isObjectLiteralExpression(value)) return value;
+    if (ts.isIdentifier(value)) {
+      const initializer = constInitializer(value, seen);
+      return initializer ? resolveStaticObject(initializer, seen) : undefined;
+    }
+    if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
+      const member = inspectMember(value, seen);
+      return member ? resolveStaticObject(member, seen) : undefined;
+    }
+    return undefined;
+  };
   const inspectMember = (member, seen) => {
     const key = ts.isPropertyAccessExpression(member)
       ? member.name.text : literalString(member.argumentExpression);
     if (key === null || key === undefined) return undefined;
-    let object = unwrap(member.expression);
-    while (ts.isIdentifier(object)) {
-      const initializer = constInitializer(object, seen);
-      if (!initializer) return undefined;
-      object = unwrap(initializer);
-    }
-    if (!ts.isObjectLiteralExpression(object)) return undefined;
+    const object = resolveStaticObject(member.expression, seen);
+    if (!object) return undefined;
     // Examine the last matching property: later declarations override earlier
     // ones. Unknown computed keys and non-literal spreads are not certified.
     for (let i = object.properties.length - 1; i >= 0; i--) {
