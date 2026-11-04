@@ -155,6 +155,33 @@ function primitiveLocalBinding(identifier) {
 }
 // Resolve native Worker roots separately from extraction of dependency edges.
 // This avoids conflating symbol provenance with import graph bookkeeping.
+// Destructured const values are binding elements, not variable declarations.
+// Resolve the statically inspectable source path for both provenance and writes.
+function constDestructuringOrigin(declaration) {
+  if (!ts.isBindingElement(declaration)) return undefined;
+  const accesses = [];
+  let element = declaration;
+  while (ts.isBindingElement(element)) {
+    if (element.dotDotDotToken) return undefined;
+    const pattern = element.parent;
+    if (ts.isObjectBindingPattern(pattern)) {
+      const name = element.propertyName || element.name;
+      const actual = ts.isComputedPropertyName(name) ? name.expression : name;
+      if (!(ts.isIdentifier(actual) || ts.isStringLiteral(actual) ||
+            ts.isNumericLiteral(actual) || ts.isNoSubstitutionTemplateLiteral(actual))) return undefined;
+      accesses.unshift({ kind: 'object', key: actual.text, fallback: element.initializer });
+    } else if (ts.isArrayBindingPattern(pattern)) {
+      const index = pattern.elements.indexOf(element);
+      if (index < 0) return undefined;
+      accesses.unshift({ kind: 'array', key: String(index), fallback: element.initializer });
+    } else return undefined;
+    element = pattern.parent;
+  }
+  if (!ts.isVariableDeclaration(element) || !element.initializer ||
+      !ts.isVariableDeclarationList(element.parent) ||
+      !(element.parent.flags & ts.NodeFlags.Const)) return undefined;
+  return { initializer: element.initializer, accesses };
+}
 // Track writes to statically known object-property paths. Immutable bindings
 // do not imply immutable objects; a path is untrusted if a write could alter
 // that path or an ancestor. Keep this analysis independent of Worker policy.
@@ -170,7 +197,8 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
     }
     if (!ts.isIdentifier(node)) return undefined;
     // JS binding symbols can carry synthetic Identifier declarations.
-    const declarations = localSymbol(node)?.declarations?.filter(ts.isVariableDeclaration);
+    const declarations = localSymbol(node)?.declarations?.filter(declaration =>
+      ts.isVariableDeclaration(declaration) || ts.isBindingElement(declaration));
     return declarations?.length === 1 ? declarations[0] : undefined;
   };
   const memberKey = node => {
@@ -276,6 +304,75 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         record(target, [unknownKey]);
       }
     };
+    // Choose literal object/array elements before falling back to a holder
+    // property path, so a binding from [holder.root] aliases holder.root itself.
+    const literalFor = (expression, seen) => {
+      let node = unwrap(expression);
+      while (ts.isIdentifier(node)) {
+        const binding = rootDeclaration(node);
+        if (!binding || !ts.isVariableDeclaration(binding) || !binding.initializer ||
+            !ts.isVariableDeclarationList(binding.parent) ||
+            !(binding.parent.flags & ts.NodeFlags.Const) || seen.has(binding)) break;
+        seen.add(binding);
+        node = unwrap(binding.initializer);
+      }
+      return node;
+    };
+    const selectLiteral = (expression, access) => {
+      const literal = literalFor(expression, new Set());
+      if (access.kind === 'array' && ts.isArrayLiteralExpression(literal)) {
+        if (literal.elements.some(ts.isSpreadElement)) return undefined;
+        const selected = literal.elements[Number(access.key)];
+        return selected && !ts.isOmittedExpression(selected) ? selected : access.fallback;
+      }
+      if (access.kind === 'object' && ts.isObjectLiteralExpression(literal)) {
+        for (let i = literal.properties.length - 1; i >= 0; i--) {
+          const property = literal.properties[i];
+          if (ts.isSpreadAssignment(property)) return undefined;
+          if (property.name && ts.isComputedPropertyName(property.name) &&
+              !(ts.isStringLiteral(property.name.expression) ||
+                ts.isNumericLiteral(property.name.expression) ||
+                ts.isNoSubstitutionTemplateLiteral(property.name.expression))) return undefined;
+          const name = property.name && (ts.isComputedPropertyName(property.name)
+            ? property.name.expression : property.name);
+          if (name?.text !== access.key) continue;
+          if (ts.isPropertyAssignment(property)) return property.initializer;
+          if (ts.isShorthandPropertyAssignment(property)) return property.name;
+          return undefined;
+        }
+        return access.fallback;
+      }
+      return undefined;
+    };
+    const extractedAlias = declaration => {
+      const origin = constDestructuringOrigin(declaration);
+      if (!origin) return undefined;
+      let expression = origin.initializer, fallback;
+      for (let i = 0; i <= origin.accesses.length; i++) {
+        const original = reference(expression);
+        if (original) fallback = {
+          ...original,
+          path: [...original.path, ...origin.accesses.slice(i).map(access => access.key)],
+        };
+        if (i === origin.accesses.length) break;
+        const selected = selectLiteral(expression, origin.accesses[i]);
+        if (!selected) break;
+        expression = selected;
+      }
+      return reference(expression) || fallback;
+    };
+    const recordDestructuredAliases = pattern => {
+      if (ts.isBindingElement(pattern)) {
+        if (ts.isIdentifier(pattern.name)) {
+          const source = extractedAlias(pattern);
+          if (source) aliases.push({ dest: pattern, ...source, spread: false });
+        } else recordDestructuredAliases(pattern.name);
+      } else if (ts.isObjectBindingPattern(pattern) || ts.isArrayBindingPattern(pattern)) {
+        for (const element of pattern.elements) {
+          if (ts.isBindingElement(element)) recordDestructuredAliases(element);
+        }
+      }
+    };
     const visit = node => {
       if (ts.isBinaryExpression(node) && ts.isAssignmentOperator(node.operatorToken.kind)) {
         assignmentTargets(node.left);
@@ -288,20 +385,24 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         assignmentTargets(ts.isDeleteExpression(node) ? node.expression : node.operand);
       }
       if (ts.isCallExpression(node)) changedByCall(node);
-      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
-          node.initializer && ts.isVariableDeclarationList(node.parent) &&
+      if (ts.isVariableDeclaration(node) && node.initializer &&
+          ts.isVariableDeclarationList(node.parent) &&
           (node.parent.flags & ts.NodeFlags.Const)) {
-        const initializer = unwrap(node.initializer);
-        if (ts.isIdentifier(initializer) ||
-            ts.isPropertyAccessExpression(initializer) ||
-            ts.isElementAccessExpression(initializer)) {
-          const source = reference(initializer);
-          if (source) aliases.push({ dest: node, ...source, spread: false });
-        } else if (ts.isObjectLiteralExpression(initializer)) {
-          for (const property of initializer.properties) {
-            if (!ts.isSpreadAssignment(property)) continue;
-            const source = reference(property.expression);
-            if (source) aliases.push({ dest: node, ...source, spread: true });
+        if (!ts.isIdentifier(node.name)) {
+          recordDestructuredAliases(node.name);
+        } else {
+          const initializer = unwrap(node.initializer);
+          if (ts.isIdentifier(initializer) ||
+              ts.isPropertyAccessExpression(initializer) ||
+              ts.isElementAccessExpression(initializer)) {
+            const source = reference(initializer);
+            if (source) aliases.push({ dest: node, ...source, spread: false });
+          } else if (ts.isObjectLiteralExpression(initializer)) {
+            for (const property of initializer.properties) {
+              if (!ts.isSpreadAssignment(property)) continue;
+              const source = reference(property.expression);
+              if (source) aliases.push({ dest: node, ...source, spread: true });
+            }
           }
         }
       }
@@ -323,13 +424,9 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
           }
         }
         for (const path of [...(paths.get(alias.declaration)?.values() || [])]) {
-          if (path.length <= alias.path.length) {
-            // Replacing the source object affects a direct alias but cannot
-            // replace independent own-property slots in a shallow spread.
-            if (!alias.spread && overlaps(alias.path, path)) {
-              changed = add(alias.dest, [unknownKey]) || changed;
-            }
-          } else if (overlaps(path, alias.path)) {
+          // An alias captures a reference. Replacing the holder's property
+          // slot does not mutate that previously captured object.
+          if (path.length > alias.path.length && overlaps(path, alias.path)) {
             const relative = path.slice(alias.path.length);
             if (!alias.spread || relative.length > 1) {
               changed = add(alias.dest, relative) || changed;
@@ -414,11 +511,48 @@ function workerProvenance(sf, workerNames, unwrap) {
   };
   const constInitializer = (identifier, seen) => {
     const declaration = rootDeclaration(identifier);
-    if (!declaration || !ts.isIdentifier(declaration.name) || !declaration.initializer ||
-        !ts.isVariableDeclarationList(declaration.parent) ||
-        !(declaration.parent.flags & ts.NodeFlags.Const) || seen.has(declaration)) return undefined;
+    if (!declaration || seen.has(declaration)) return undefined;
+    if (ts.isVariableDeclaration(declaration)) {
+      if (!ts.isIdentifier(declaration.name) || !declaration.initializer ||
+          !ts.isVariableDeclarationList(declaration.parent) ||
+          !(declaration.parent.flags & ts.NodeFlags.Const)) return undefined;
+      seen.add(declaration);
+      return declaration.initializer;
+    }
+    const origin = constDestructuringOrigin(declaration);
+    if (!origin) return undefined;
     seen.add(declaration);
-    return declaration.initializer;
+    let selected = origin.initializer;
+    for (const access of origin.accesses) {
+      if (access.kind === 'object') {
+        const object = resolveStaticObject(selected, seen);
+        if (!object) return undefined;
+        const value = literalProperty(object, access.key, seen);
+        if (value === unknownProperty) return undefined;
+        if (value === absentProperty) {
+          if (!access.fallback) return undefined;
+          selected = access.fallback;
+        } else selected = value;
+      } else {
+        const array = resolveStaticArray(selected, seen);
+        if (!array || array.elements.some(ts.isSpreadElement)) return undefined;
+        const element = array.elements[Number(access.key)];
+        if (!element || ts.isOmittedExpression(element)) {
+          if (!access.fallback) return undefined;
+          selected = access.fallback;
+        } else selected = element;
+      }
+    }
+    return selected;
+  };
+  const resolveStaticArray = (expression, seen) => {
+    const value = unwrap(expression);
+    if (ts.isArrayLiteralExpression(value)) return value;
+    if (ts.isIdentifier(value)) {
+      const initializer = constInitializer(value, seen);
+      return initializer ? resolveStaticArray(initializer, seen) : undefined;
+    }
+    return undefined;
   };
   const literalKey = name => {
     if (!name) return undefined;
@@ -532,7 +666,10 @@ function workerProvenance(sf, workerNames, unwrap) {
       if (ts.isIdentifier(value)) {
         // Unknown provenance must survive a direct const alias and any
         // further const aliases, not just an inline chain of member accesses.
+        const declaration = rootDeclaration(value);
         const initializer = constInitializer(value, seen);
+        // Unsupported binding patterns are unknown, not proven local.
+        if (!initializer && declaration && ts.isBindingElement(declaration)) return true;
         return Boolean(initializer && ambiguous(initializer, seen));
       }
       if (!(ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value))) return false;
