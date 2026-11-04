@@ -20,6 +20,9 @@ npm ci
 npm --prefix examples/orders ci
 npm --prefix examples/react-app ci
 npm run verify
+# Optional independently invokable checks after installing their dependencies:
+npm run test:architecture
+npm run test:worker-build
 npm audit
 npm --prefix examples/orders audit
 npm --prefix examples/react-app audit

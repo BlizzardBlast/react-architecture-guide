@@ -75,7 +75,7 @@ npm --prefix examples/orders audit
 npm --prefix examples/react-app audit
 ```
 
-`npm run verify` runs Markdown checks, architecture regression tests, the standalone orders example, and the React example's ESLint React Hooks/JSX accessibility rules, tests, typecheck, architecture check and Vite build. The individual checker can be run with `node tools/check-boundaries.cjs examples/react-app/src`. Do not interpret a test existing as a test having passed.
+`npm run verify` runs Markdown checks, architecture regression tests, the standalone orders example, and the React example's ESLint React Hooks/JSX accessibility rules, tests, typecheck, architecture check and Vite build. The individual checker can be run with `node tools/check-boundaries.cjs examples/react-app/src`. Do not interpret a test existing as a test having passed. Root-only `npm run test:architecture` needs just the root dependencies; `npm run test:worker-build` is the separate real Vite Worker integration check, requiring the React example's installed Vite. The full `npm run verify` includes both after installing all three dependency trees.
 
 All three packages include registry-generated lockfiles. See [verification evidence and limits](docs/verification.md) for dated test and browser-check results. Rerun the gates when dependencies or behavior change.
 

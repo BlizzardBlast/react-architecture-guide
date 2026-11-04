@@ -209,15 +209,103 @@ function workerProvenance(sf, workerNames, unwrap) {
     }
     return false;
   };
-  // Const-only provenance is a narrow, bounded subset of JavaScript.
-  // It accepts inspectable object properties without executing source code.
+  // A const binding does not make its referenced object immutable. Track
+  // writes and simple aliases so a later Worker property read cannot be
+  // certified from a stale object initializer.
+  const rootDeclaration = expression => {
+    let node = unwrap(expression);
+    while (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      node = unwrap(node.expression);
+    }
+    if (!ts.isIdentifier(node)) return undefined;
+    const declarations = localSymbol(node)?.declarations;
+    return declarations?.length === 1 && ts.isVariableDeclaration(declarations[0])
+      ? declarations[0] : undefined;
+  };
+  let modifiedDeclarations;
+  const mutatedRoots = () => {
+    if (modifiedDeclarations) return modifiedDeclarations;
+    const modified = new Set();
+    const aliases = [];
+    modifiedDeclarations = modified;
+    const visit = node => {
+      if (ts.isBinaryExpression(node) && ts.isAssignmentOperator(node.operatorToken.kind) &&
+          (ts.isPropertyAccessExpression(unwrap(node.left)) ||
+            ts.isElementAccessExpression(unwrap(node.left)))) {
+        const declaration = rootDeclaration(node.left);
+        if (declaration) modified.add(declaration);
+      }
+      if (ts.isDeleteExpression(node) ||
+          (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+            [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator)) {
+        const target = ts.isDeleteExpression(node) ? node.expression : node.operand;
+        if (ts.isPropertyAccessExpression(unwrap(target)) ||
+            ts.isElementAccessExpression(unwrap(target))) {
+          const declaration = rootDeclaration(target);
+          if (declaration) modified.add(declaration);
+        }
+      }
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+          ts.isIdentifier(node.expression.expression) &&
+          (node.expression.expression.text === 'Object' &&
+            ['assign', 'defineProperty', 'defineProperties', 'setPrototypeOf'].includes(node.expression.name.text) ||
+            node.expression.expression.text === 'Reflect' &&
+            ['set', 'defineProperty', 'deleteProperty', 'setPrototypeOf'].includes(node.expression.name.text))) {
+        const declaration = node.arguments.length ? rootDeclaration(node.arguments[0]) : undefined;
+        if (declaration) modified.add(declaration);
+      }
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
+          ts.isVariableDeclarationList(node.parent) &&
+          Boolean(node.parent.flags & ts.NodeFlags.Const)) {
+        const value = unwrap(node.initializer);
+        if (ts.isIdentifier(value) || ts.isPropertyAccessExpression(value) ||
+            ts.isElementAccessExpression(value)) {
+          const original = rootDeclaration(value);
+          if (original) aliases.push([node, original]);
+        } else if (ts.isObjectLiteralExpression(value)) {
+          for (const entry of value.properties) {
+            if (ts.isSpreadAssignment(entry)) {
+              const original = rootDeclaration(entry.expression);
+              if (original) aliases.push([node, original]);
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    // Conservatively propagate changes in either direction along known aliases.
+    // Shallow spreads can share nested object references, even if their outer
+    // properties are distinct.
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [left, right] of aliases) {
+        if (modified.has(left) !== modified.has(right)) {
+          modified.add(left);
+          modified.add(right);
+          changed = true;
+        }
+      }
+    }
+    return modified;
+  };
+  const unstableWorkerMember = member => {
+    if (!(ts.isPropertyAccessExpression(member) || ts.isElementAccessExpression(member))) return false;
+    const key = ts.isPropertyAccessExpression(member)
+      ? member.name.text : literalString(member.argumentExpression);
+    if (!workerNames.includes(key)) return false;
+    const declaration = rootDeclaration(member.expression);
+    return Boolean(declaration && mutatedRoots().has(declaration));
+  };
+  // Follow a literal only when its const binding and known aliases have no
+  // property mutations in the checked source file.
   const constInitializer = (identifier, seen) => {
-    const symbol = localSymbol(identifier);
-    const declaration = symbol?.declarations?.length === 1 ? symbol.declarations[0] : undefined;
-    if (!declaration || !ts.isVariableDeclaration(declaration) ||
-        !ts.isIdentifier(declaration.name) || !declaration.initializer ||
+    const declaration = rootDeclaration(identifier);
+    if (!declaration || !ts.isIdentifier(declaration.name) || !declaration.initializer ||
         !ts.isVariableDeclarationList(declaration.parent) ||
-        !(declaration.parent.flags & ts.NodeFlags.Const) || seen.has(declaration)) return undefined;
+        !(declaration.parent.flags & ts.NodeFlags.Const) || seen.has(declaration) ||
+        mutatedRoots().has(declaration)) return undefined;
     seen.add(declaration);
     return declaration.initializer;
   };
@@ -242,25 +330,36 @@ function workerProvenance(sf, workerNames, unwrap) {
     }
     return undefined;
   };
+  const absentProperty = Symbol('absent property');
+  const unknownProperty = Symbol('unverified property');
+  const literalProperty = (object, key, seen) => {
+    // Rightmost properties override earlier ones, including spreads.
+    for (let i = object.properties.length - 1; i >= 0; i--) {
+      const property = object.properties[i];
+      if (ts.isSpreadAssignment(property)) {
+        const spread = resolveStaticObject(property.expression, seen);
+        if (!spread) return unknownProperty;
+        const candidate = literalProperty(spread, key, seen);
+        if (candidate !== absentProperty) return candidate;
+        continue;
+      }
+      if (property.name && ts.isComputedPropertyName(property.name) &&
+          literalKey(property.name) === undefined) return unknownProperty;
+      if (literalKey(property.name) !== key) continue;
+      if (ts.isPropertyAssignment(property)) return property.initializer;
+      if (ts.isShorthandPropertyAssignment(property)) return property.name;
+      return unknownProperty;
+    }
+    return absentProperty;
+  };
   const inspectMember = (member, seen) => {
     const key = ts.isPropertyAccessExpression(member)
       ? member.name.text : literalString(member.argumentExpression);
     if (key === null || key === undefined) return undefined;
     const object = resolveStaticObject(member.expression, seen);
     if (!object) return undefined;
-    // Examine the last matching property: later declarations override earlier
-    // ones. Unknown computed keys and non-literal spreads are not certified.
-    for (let i = object.properties.length - 1; i >= 0; i--) {
-      const property = object.properties[i];
-      if (ts.isSpreadAssignment(property)) return undefined;
-      if (property.name && ts.isComputedPropertyName(property.name) &&
-          literalKey(property.name) === undefined) return undefined;
-      if (literalKey(property.name) !== key) continue;
-      if (ts.isPropertyAssignment(property)) return property.initializer;
-      if (ts.isShorthandPropertyAssignment(property)) return property.name;
-      return undefined;
-    }
-    return undefined;
+    const value = literalProperty(object, key, seen);
+    return value === absentProperty || value === unknownProperty ? undefined : value;
   };
   // Follow const aliases and directly inspectable object properties. Reflective
   // access, unknown computed keys, mutated aliases and accessors are not proven.
@@ -290,7 +389,7 @@ function workerProvenance(sf, workerNames, unwrap) {
     (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) &&
     workerNames.includes(ts.isPropertyAccessExpression(expression)
       ? expression.name.text : literalString(expression.argumentExpression)) && globalObject(expression.expression);
-  return { localValue, globalObject, globalSource, globalWorkerMember };
+  return { localValue, globalObject, globalSource, globalWorkerMember, unstableWorkerMember };
 }
 function workerBindings(sf) {
   const workerNames = ['Worker', 'SharedWorker'];
@@ -300,7 +399,7 @@ function workerBindings(sf) {
     while (isWrapper(expression)) expression = expression.expression;
     return expression;
   };
-  const { localValue, globalObject, globalSource, globalWorkerMember } =
+  const { localValue, globalObject, globalSource, globalWorkerMember, unstableWorkerMember } =
     workerProvenance(sf, workerNames, unwrap);
   const workerProperty = key => key && (ts.isComputedPropertyName(key) ||
     (ts.isIdentifier(key) || ts.isStringLiteral(key)) && workerNames.includes(key.text));
@@ -420,7 +519,7 @@ function workerBindings(sf) {
     const parent = parentAfterWrappers(expression);
     return ts.isNewExpression(parent) && unwrap(parent.expression) === expression;
   };
-  return { workerNames, localValue, globalWorkerMember, workerFromGlobal, workerFromIterable, parentAfterWrappers, directConstructor, nestedAssignmentDefault, unwrap };
+  return { workerNames, localValue, globalWorkerMember, unstableWorkerMember, workerFromGlobal, workerFromIterable, parentAfterWrappers, directConstructor, nestedAssignmentDefault, unwrap };
 }
 function imports(node, list, options, bindings, inJSDoc = false) {
   if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
@@ -436,7 +535,7 @@ function imports(node, list, options, bindings, inJSDoc = false) {
     ts.forEachChild(node, child => imports(child, list, options, bindings, true));
     return;
   }
-  const { workerNames, localValue, globalWorkerMember, workerFromGlobal, workerFromIterable, parentAfterWrappers, directConstructor, nestedAssignmentDefault, unwrap } = bindings;
+  const { workerNames, localValue, globalWorkerMember, unstableWorkerMember, workerFromGlobal, workerFromIterable, parentAfterWrappers, directConstructor, nestedAssignmentDefault, unwrap } = bindings;
   if (ts.isIdentifier(node) && workerNames.includes(node.text) && !localValue(node) &&
       (ts.isInExpressionContext(node) || ts.isShorthandPropertyAssignment(node.parent)) &&
       !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
@@ -444,7 +543,7 @@ function imports(node, list, options, bindings, inJSDoc = false) {
       !directConstructor(node) && !ts.isTypeOfExpression(parentAfterWrappers(node))) {
     list.push({ unsupported: 'worker-alias', line: node.getStart() });
   }
-  if (globalWorkerMember(node) && !directConstructor(node) &&
+  if ((globalWorkerMember(node) || unstableWorkerMember(node)) && !directConstructor(node) &&
       !ts.isTypeOfExpression(parentAfterWrappers(node))) {
     list.push({ unsupported: 'worker-alias', line: node.getStart() });
   }
@@ -464,12 +563,15 @@ function imports(node, list, options, bindings, inJSDoc = false) {
   if (ts.isNewExpression(node)) {
     const callee = unwrap(node.expression);
     const globalMember = globalWorkerMember(callee);
-    if (globalMember || ts.isIdentifier(callee) && workerNames.includes(callee.text) && !localValue(callee)) {
+    const unstableMember = unstableWorkerMember(callee);
+    if (globalMember || unstableMember ||
+        ts.isIdentifier(callee) && workerNames.includes(callee.text) && !localValue(callee)) {
       const target = node.arguments?.[0];
       const spec = target && ts.isNewExpression(target) && ts.isIdentifier(target.expression) &&
         target.expression.text === 'URL' && target.arguments?.length === 2 &&
         isImportMetaUrl(target.arguments[1]) ? literalString(target.arguments[0]) : null;
-      if (globalMember || callee !== node.expression || !spec || /^(?:[a-z][a-z\d+.-]*:|\/\/|[?#])/i.test(spec)) {
+      if (globalMember || unstableMember || callee !== node.expression || !spec ||
+          /^(?:[a-z][a-z\d+.-]*:|\/\/|[?#])/i.test(spec)) {
         list.push({ unsupported: 'worker-entry', line: node.getStart() });
       }
     }

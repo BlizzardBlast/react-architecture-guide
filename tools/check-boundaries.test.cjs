@@ -968,6 +968,33 @@ test('inspectable literal-object wrappers do not hide native Worker constructors
     result => assert.deepEqual(result.errors, [], source));
 });
 
+test('mutable property writes invalidate tracked const Worker holders', () => {
+  for (const source of [
+    'class LocalWorker {} const holder = { root: { Worker: LocalWorker } }; holder.root = globalThis; new holder.root.Worker("/worker.js");',
+    'class LocalWorker {} const holder = { root: { Worker: LocalWorker } }; holder.root.Worker = globalThis.Worker; new holder.root.Worker("/worker.js");',
+    'class LocalWorker {} const holder = { root: { Worker: LocalWorker } }; const alias = holder; alias.root = self; new holder.root.Worker("/worker.js");',
+    'class LocalWorker {} const holder = { root: { Worker: LocalWorker } }; Object.assign(holder, { root: window }); new holder.root.Worker("/worker.js");',
+    'class LocalWorker {} const holder = { root: { Worker: LocalWorker } }; const copy = { ...holder }; copy.root = globalThis; new copy.root.Worker("/worker.js");',
+    'class LocalWorker {} const holder = { root: { Worker: LocalWorker } }; Reflect.set(holder, "root", globalThis); new holder.root.Worker("/worker.js");',
+  ]) withFixture({ 'shared/ui/panel.js': source },
+    result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
+});
+
+test('literal-object spreads preserve native Worker provenance and local classes', () => {
+  for (const source of [
+    'const holder = { root: globalThis }; const copy = { ...holder }; new copy.root.Worker("/worker.js");',
+    'const holder = { root: self }; const copy = { root: {}, ...holder }; new copy.root.SharedWorker("/worker.js");',
+    'const holder = { root: { inner: globalThis } }; const copy = { ...holder }; new copy.root.inner.Worker("/worker.js");',
+  ]) withFixture({ 'shared/ui/panel.js': source },
+    result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
+  for (const source of [
+    'class LocalWorker {} const holder = { root: { Worker: LocalWorker } }; new holder.root.Worker();',
+    'class LocalWorker {} const holder = { root: { Worker: LocalWorker } }; const copy = { ...holder }; new copy.root.Worker();',
+    'class LocalWorker {} const holder = { root: globalThis }; const copy = { ...holder, root: { Worker: LocalWorker } }; new copy.root.Worker();',
+  ]) withFixture({ 'modules/orders/ui/panel.js': source },
+    result => assert.deepEqual(result.errors, [], source));
+});
+
 test('native worker aliases from destructuring assignments fail closed', () => {
   for (const assignment of [
     'let BackgroundWorker; ({ Worker: BackgroundWorker } = globalThis);',
