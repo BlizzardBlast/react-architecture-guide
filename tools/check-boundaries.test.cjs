@@ -1297,6 +1297,18 @@ test('explicit undefined in destructured defaults preserves native Worker proven
     assert.deepEqual(result.errors,[],expression));
 });
 
+test('non-constructor own Worker properties do not impersonate inherited native Workers', () => {
+  for (const source of [
+    'for (const { Worker } of [{ Worker: "Alice" }]) console.log(Worker);',
+    'const { Worker: value } = { __proto__: globalThis, Worker: "text" }; console.log(value);',
+    'const { Worker: value } = { __proto__: self, Worker: 0 }; console.log(value);',
+    'const { Worker: value } = { Worker: null }; console.log(value);',
+    'const { Worker: value } = { Worker: {} }; console.log(value);',
+    'const { Worker: value } = { Worker: () => {} }; console.log(value);',
+  ]) withFixture({ 'modules/orders/ui/panel.js': source },
+    result => assert.deepEqual(result.errors, [], source));
+});
+
 test('destructuring inherited Worker constructors cannot bypass ownership', () => {
   for(const source of [
     'const {Worker:Native}={__proto__:globalThis}; new Native("/private.js");',

@@ -654,6 +654,17 @@ function workerProvenance(sf, workerNames, unwrap) {
     return ts.isClassExpression(value) || ts.isFunctionExpression(value) ||
       ts.isIdentifier(value) && localValue(value);
   };
+  // Plain literals cannot be constructors. A known own non-constructor value
+  // shadows an inherited Worker just as a known local class does.
+  const nonConstructorLiteral = expression => {
+    const value = unwrap(expression);
+    return ts.isStringLiteral(value) || ts.isNumericLiteral(value) ||
+      ts.isNoSubstitutionTemplateLiteral(value) || ts.isBigIntLiteral(value) ||
+      ts.isRegularExpressionLiteral(value) || ts.isObjectLiteralExpression(value) ||
+      ts.isArrayLiteralExpression(value) || ts.isArrowFunction(value) ||
+      [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword,
+        ts.SyntaxKind.NullKeyword].includes(value.kind);
+  };
   // Resolve both direct member construction and destructured extraction
   // with the same bounded own-property and prototype-chain inspection.
   const inheritedWorkerSource = (expression, key) => {
@@ -666,7 +677,9 @@ function workerProvenance(sf, workerNames, unwrap) {
       visited.add(current);
       const own = literalProperty(current, key, new Set());
       if (own === unknownProperty) return true;
-      if (own !== absentProperty) return !localWorkerConstructor(own);
+      if (own !== absentProperty) {
+        return !localWorkerConstructor(own) && !nonConstructorLiteral(own);
+      }
       for (const property of current.properties) {
         if (!ts.isPropertyAssignment(property) || !property.name ||
             ts.isComputedPropertyName(property.name) ||
