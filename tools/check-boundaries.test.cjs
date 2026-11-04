@@ -1043,6 +1043,55 @@ test('dynamic and alias property writes remain conservative for Worker members',
     result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
 });
 
+test('object-literal prototype inheritance cannot hide a native Worker', () => {
+  for (const source of [
+    'const holder = { __proto__: globalThis }; new holder.Worker("/private.js");',
+    'const holder = { __proto__: self }; const W = holder.Worker; new W("/private.js");',
+    'const base = globalThis; const holder = { __proto__: base }; new holder.Worker("/private.js");',
+    'const holder = { __proto__: { Worker: globalThis.Worker } }; new holder.Worker("/private.js");',
+  ]) withFixture({ 'shared/ui/panel.js': source },
+    result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
+  for (const source of [
+    'class LocalWorker {} const holder = { __proto__: { Worker: LocalWorker } }; new holder.Worker();',
+    'class LocalWorker {} const holder = { __proto__: globalThis, Worker: LocalWorker }; new holder.Worker();',
+    'class LocalWorker {} const holder = { ["__proto__"]: globalThis, Worker: LocalWorker }; new holder.Worker();',
+    'class LocalWorker {} const holder = { __proto__: null, Worker: LocalWorker }; new holder.Worker();',
+  ]) withFixture({ 'modules/orders/ui/panel.js': source },
+    result => assert.deepEqual(result.errors, [], source));
+});
+
+test('wildcard writes propagate through nested const aliases', () => {
+  for (const source of [
+    'class LocalWorker {} const holder={root:{Worker:LocalWorker}}; const alias=holder.root; Object.assign(holder[key],incoming); new alias.Worker("/private.js");',
+    'class LocalWorker {} const holder={root:{Worker:LocalWorker}}; const alias=holder.root; holder[key].Worker=globalThis.Worker; new alias.Worker("/private.js");',
+    'class LocalWorker {} const holder={root:{Worker:LocalWorker}}; const alias=holder.root; Reflect.set(holder[key],"Worker",globalThis.Worker); new alias.Worker("/private.js");',
+  ]) withFixture({ 'shared/ui/panel.js': source },
+    result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
+});
+
+test('shallow spreads do not propagate replacement of copied top-level properties', () => {
+  for (const source of [
+    'class LocalWorker {} const holder={root:{Worker:LocalWorker}}; const copy={...holder}; copy.root={Worker:LocalWorker}; new holder.root.Worker();',
+    'class LocalWorker {} const holder={root:{Worker:LocalWorker}}; const copy={...holder}; holder.root={Worker:LocalWorker}; new copy.root.Worker();',
+    'class LocalWorker {} const holder={root:{nested:{Worker:LocalWorker}}}; const copy={...holder.root}; copy.nested={Worker:LocalWorker}; new holder.root.nested.Worker();',
+  ]) withFixture({ 'modules/orders/ui/panel.js': source },
+    result => assert.deepEqual(result.errors, [], source));
+  for (const source of [
+    'class LocalWorker {} const holder={root:{Worker:LocalWorker}}; const copy={...holder}; copy.root.Worker=globalThis.Worker; new holder.root.Worker("/private.js");',
+    'class LocalWorker {} const holder={root:{Worker:LocalWorker}}; const copy={...holder}; holder.root.Worker=globalThis.Worker; new copy.root.Worker("/private.js");',
+    'class LocalWorker {} const holder={root:{nested:{Worker:LocalWorker}}}; const copy={...holder.root}; copy.nested.Worker=globalThis.Worker; new holder.root.nested.Worker("/private.js");',
+  ]) withFixture({ 'shared/ui/panel.js': source },
+    result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
+});
+
+test('bounded Worker mutation paths terminate conservatively on many writes', () => {
+  const writes = Array.from({ length: 140 }, (_, i) => 'holder["k' + i + '"] = ' + i + ';').join(' ');
+  withFixture({
+    'shared/ui/panel.js': 'class LocalWorker {} const holder={Worker:LocalWorker}; ' +
+      writes + ' new holder.Worker("/private.js");',
+  }, result => assert.match(result.errors.join(' '), /unsupported-worker/));
+});
+
 test('native worker aliases from destructuring assignments fail closed', () => {
   for (const assignment of [
     'let BackgroundWorker; ({ Worker: BackgroundWorker } = globalThis);',
