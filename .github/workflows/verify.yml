@@ -15,7 +15,12 @@ concurrency:
 
 jobs:
   quality:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    # A ready_for_review event may still carry the prior draft flag in its
+    # payload; run once on that explicit transition without running draft pushes.
+    if: >-
+      github.event_name != 'pull_request' ||
+      !github.event.pull_request.draft ||
+      github.event.action == 'ready_for_review'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
