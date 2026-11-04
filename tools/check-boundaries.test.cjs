@@ -1312,6 +1312,24 @@ test('destructuring inherited Worker constructors cannot bypass ownership', () =
     assert.deepEqual(result.errors,[],source));
 });
 
+test('stale saved references remain a documented conservative analysis limit', () => {
+  for (const source of [
+    'class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}}; const saved=holder.root; holder.root={Worker:LocalWorker}; saved.Worker=next; return new holder.root.Worker();}',
+    'class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}}; const {root:saved}=holder; holder.root={Worker:LocalWorker}; saved.Worker=next; return new holder.root.Worker();}',
+  ]) {
+    const file = 'modules/orders/ui/panel.js';
+    const offset = source.lastIndexOf('new holder.root.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+  // The checker must still recognize a genuinely shared nested write before
+  // a replacement; no flow-dependent exemptions are introduced.
+  const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}}; const saved=holder.root; saved.Worker=next; return new holder.root.Worker("/private.js");}';
+  withFixture({'shared/ui/panel.js':source},result=>
+    assert.match(result.errors.join(' '),/unsupported-worker-entry/,source));
+});
+
 test('native worker aliases from destructuring assignments fail closed', () => {
   for (const assignment of [
     'let BackgroundWorker; ({ Worker: BackgroundWorker } = globalThis);',
