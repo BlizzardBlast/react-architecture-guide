@@ -322,15 +322,32 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       }
       return node;
     };
+    // Destructuring defaults run on an explicitly undefined value, not just
+    // when the property is absent or an array entry is omitted.
+    const definitelyUndefined = expression => {
+      const value = expression && unwrap(expression);
+      return value && (ts.isVoidExpression(value) || ts.isIdentifier(value) &&
+        value.text === 'undefined' && !localSymbol(value)?.declarations?.length);
+    };
+    const definitelyDefined = expression => {
+      const value = expression && unwrap(expression);
+      return value && (ts.isObjectLiteralExpression(value) ||
+        ts.isArrayLiteralExpression(value) || ts.isClassExpression(value) ||
+        ts.isFunctionExpression(value) || ts.isArrowFunction(value) ||
+        ts.isNewExpression(value) || ts.isStringLiteral(value) ||
+        ts.isNumericLiteral(value) || ts.isNoSubstitutionTemplateLiteral(value) ||
+        [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword,
+          ts.SyntaxKind.NullKeyword].includes(value.kind));
+    };
     const selectLiteral = (expression, access) => {
       if (access.key === undefined) return undefined;
       const literal = literalFor(expression, new Set());
+      let selected;
       if (access.kind === 'array' && ts.isArrayLiteralExpression(literal)) {
         if (literal.elements.some(ts.isSpreadElement)) return undefined;
-        const selected = literal.elements[Number(access.key)];
-        return selected && !ts.isOmittedExpression(selected) ? selected : access.fallback;
-      }
-      if (access.kind === 'object' && ts.isObjectLiteralExpression(literal)) {
+        const element = literal.elements[Number(access.key)];
+        selected = element && !ts.isOmittedExpression(element) ? element : undefined;
+      } else if (access.kind === 'object' && ts.isObjectLiteralExpression(literal)) {
         for (let i = literal.properties.length - 1; i >= 0; i--) {
           const property = literal.properties[i];
           if (ts.isSpreadAssignment(property)) return undefined;
@@ -341,17 +358,37 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
           const name = property.name && (ts.isComputedPropertyName(property.name)
             ? property.name.expression : property.name);
           if (name?.text !== access.key) continue;
-          if (ts.isPropertyAssignment(property)) return property.initializer;
-          if (ts.isShorthandPropertyAssignment(property)) return property.name;
-          return undefined;
+          selected = ts.isPropertyAssignment(property) ? property.initializer :
+            ts.isShorthandPropertyAssignment(property) ? property.name : undefined;
+          break;
         }
-        return access.fallback;
+      } else return undefined;
+      return selected && !definitelyUndefined(selected) ? selected : access.fallback;
+    };
+    const spreadReference = (expression, access) => {
+      if (access.kind !== 'object' || access.key === undefined) return undefined;
+      const value = literalFor(expression, new Set());
+      if (!ts.isObjectLiteralExpression(value)) return undefined;
+      // A spread creates independent outer slots, but the copied nested value
+      // may be the *same object*. Keep a conservative edge to that reference.
+      for (let i = value.properties.length - 1; i >= 0; i--) {
+        const property = value.properties[i];
+        if (ts.isSpreadAssignment(property)) {
+          const origin = reference(property.expression);
+          if (origin) return { ...origin, path: [...origin.path, access.key] };
+        }
       }
       return undefined;
     };
-    const extractedAlias = declaration => {
+    const extractedAliases = declaration => {
       const origin = constDestructuringOrigin(declaration);
-      if (!origin) return undefined;
+      if (!origin) return [];
+      const found = new Map();
+      const capture = item => {
+        if (!item) return;
+        const encoded = pathCode(item.path);
+        found.set(String(item.declaration.pos) + ':' + encoded, item);
+      };
       let expression = origin.initializer, fallback;
       for (let i = 0; i <= origin.accesses.length; i++) {
         const original = reference(expression);
@@ -361,17 +398,39 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
             access.key === undefined ? unknownKey : access.key)],
         };
         if (i === origin.accesses.length) break;
-        const selected = selectLiteral(expression, origin.accesses[i]);
+        const access = origin.accesses[i];
+        // An unresolved selection may evaluate to undefined and use its
+        // default. Track both possibilities rather than dropping the alias.
+        if (access.fallback) {
+          const selected = selectLiteral(expression, access);
+          if (!selected || !definitelyDefined(selected)) {
+            const defaultRef = reference(access.fallback);
+            if (defaultRef) capture({
+              ...defaultRef,
+              path: [...defaultRef.path, ...origin.accesses.slice(i + 1).map(a =>
+                a.key === undefined ? unknownKey : a.key)],
+            });
+          }
+        }
+        const spread = spreadReference(expression, access);
+        if (spread) capture({
+          ...spread,
+          path: [...spread.path, ...origin.accesses.slice(i + 1).map(a =>
+            a.key === undefined ? unknownKey : a.key)],
+        });
+        const selected = selectLiteral(expression, access);
         if (!selected) break;
         expression = selected;
       }
-      return reference(expression) || fallback;
+      capture(reference(expression) || fallback);
+      return [...found.values()];
     };
     const recordDestructuredAliases = pattern => {
       if (ts.isBindingElement(pattern)) {
         if (ts.isIdentifier(pattern.name)) {
-          const source = extractedAlias(pattern);
-          if (source) aliases.push({ dest: pattern, ...source, spread: false });
+          for (const source of extractedAliases(pattern)) {
+            aliases.push({ dest: pattern, ...source, spread: false });
+          }
         } else recordDestructuredAliases(pattern.name);
       } else if (ts.isObjectBindingPattern(pattern) || ts.isArrayBindingPattern(pattern)) {
         for (const element of pattern.elements) {
@@ -662,6 +721,9 @@ function workerProvenance(sf, workerNames, unwrap) {
       ts.isNoSubstitutionTemplateLiteral(value) || ts.isBigIntLiteral(value) ||
       ts.isRegularExpressionLiteral(value) || ts.isObjectLiteralExpression(value) ||
       ts.isArrayLiteralExpression(value) || ts.isArrowFunction(value) ||
+      ts.isVoidExpression(value) ||
+      ts.isIdentifier(value) && value.text === 'undefined' &&
+        !localValue(value) && !shadowsGlobal(value) ||
       [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword,
         ts.SyntaxKind.NullKeyword].includes(value.kind);
   };
@@ -809,7 +871,14 @@ function workerBindings(sf) {
   const nativeWorker = Symbol('native worker');
   const propertyValues = (source, name) => {
     const key = propertyKey(name);
-    if (!source || key === undefined) return [undefined];
+    if (!source) return [undefined];
+    if (key === undefined) {
+      // A computed binding key may evaluate to Worker or SharedWorker.
+      // Known native or opaque Worker properties cannot be called local just
+      // because the key's identifier spelling is unrelated to "Worker".
+      return globalObject(source) || workerNames.some(name =>
+        inheritedWorkerSource(source, name)) ? [nativeWorker] : [undefined];
+    }
     // Own-property-only destructuring misses an inherited native Worker.
     if (inheritedWorkerSource(source, key)) return [nativeWorker];
     if (!ts.isObjectLiteralExpression(source)) return [undefined];

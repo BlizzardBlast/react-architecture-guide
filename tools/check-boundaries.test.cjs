@@ -1342,6 +1342,54 @@ test('stale saved references remain a documented conservative analysis limit', (
     assert.match(result.errors.join(' '),/unsupported-worker-entry/,source));
 });
 
+test('computed key extraction cannot launder an inherited native Worker', () => {
+  for (const source of [
+    'const key="Worker"; const {[key]:Native}={__proto__:globalThis}; new Native("/private.js");',
+    'const key="SharedWorker"; const {[key]:Native}={__proto__:{__proto__:self}}; new Native("/private.js");',
+    'const key="Worker"; const {[key]:Native}=globalThis; new Native("/private.js");',
+  ]) withFixture({'shared/ui/panel.js':source},result=>
+    assert.match(result.errors.join(' '),/unsupported-worker-alias/,source));
+  for (const source of [
+    'class LocalWorker{} const key="Worker"; const {[key]:Local}={Worker:LocalWorker}; new Local();',
+    'const key="status"; const {[key]:value}={status:"ok"}; console.log(value);',
+  ]) withFixture({'modules/orders/ui/panel.js':source},result=>
+    assert.deepEqual(result.errors,[],source));
+});
+
+test('destructuring default and shallow spread aliases preserve Worker mutations', () => {
+  const bindings=[
+    'const {root:alias=holder.root}={root:undefined};',
+    'const {root:alias=holder.root}={root:void 0};',
+    'const {root:alias}={...holder};',
+    'const snapshot={...holder}; const {root:alias}=snapshot;',
+    'const {root:alias=holder.root}={root:maybeUndefined};',
+  ];
+  for (const binding of bindings) {
+    const source='class LocalWorker{} function run(next,maybeUndefined){ const holder={root:{Worker:LocalWorker}}; '+
+      binding+' Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js"); }';
+    const file='shared/ui/panel.js', offset=source.indexOf('new holder.root.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\\n'+result.errors.join('\\n')));
+  }
+  for (const source of [
+    'class LocalWorker{} const holder={root:{Worker:LocalWorker}}; const {root:alias=holder.root}={root:undefined}; Reflect.set(alias,"other",1); new holder.root.Worker();',
+    'class LocalWorker{} const holder={root:{Worker:LocalWorker}}; const {root:alias}={...holder}; Reflect.set(alias,"other",1); new holder.root.Worker();',
+    'class LocalWorker{} const holder={root:{Worker:LocalWorker}}; const {root:alias}={...holder}; new holder.root.Worker();',
+  ]) withFixture({'modules/orders/ui/panel.js':source},result=>
+    assert.deepEqual(result.errors,[],source));
+});
+
+test('known undefined Worker properties are harmless local reads', () => {
+  for (const source of [
+    'const {Worker:local}={Worker:undefined}; console.log(local);',
+    'const {Worker:local}={__proto__:globalThis,Worker:undefined}; console.log(local);',
+    'const {Worker:local}={Worker:void 0}; console.log(local);',
+    'const {Worker:local}={__proto__:self,Worker:void 0}; console.log(local);',
+  ]) withFixture({'modules/orders/ui/panel.js':source},result=>
+    assert.deepEqual(result.errors,[],source));
+});
+
 test('native worker aliases from destructuring assignments fail closed', () => {
   for (const assignment of [
     'let BackgroundWorker; ({ Worker: BackgroundWorker } = globalThis);',
