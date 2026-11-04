@@ -1256,6 +1256,62 @@ test('replacing a holder slot does not mutate an already captured alias', () => 
     result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
 });
 
+test('dynamic computed destructuring keys do not use identifier names as property keys', () => {
+  for (const extension of ['js','ts']) {
+    const source = 'const key="root"; const {[key]:source}={root:globalThis,key:{Worker:class LocalWorker{}}}; new source.Worker("/private.js");';
+    const file='shared/ui/panel.'+extension, at=source.indexOf('new source.Worker(');
+    withFixture({[file]:source}, result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+at+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+  for (const source of [
+    'class LocalWorker{} const key="root"; const holder={root:{Worker:LocalWorker}}; const {[key]:alias}=holder; alias.Worker=globalThis.Worker; new holder.root.Worker("/private.js");',
+    'class LocalWorker{} const key="other"; const holder={root:{Worker:LocalWorker},other:{}}; const {[key]:alias}=holder; alias.Worker=globalThis.Worker; new holder.root.Worker("/private.js");',
+  ]) withFixture({'shared/ui/panel.js':source},result=>{
+    // Unknown computed aliases are conservatively rejected, not certified local.
+    assert.match(result.errors.join(' '),/unsupported-worker/,source);
+  });
+  for (const source of [
+    'class LocalWorker{} const {["root"]:source}={root:{Worker:LocalWorker}}; new source.Worker();',
+    'class LocalWorker{} const {root:source}={root:{Worker:LocalWorker}}; new source.Worker();',
+  ]) withFixture({'modules/orders/ui/panel.js':source},result=>
+    assert.deepEqual(result.errors,[],source));
+});
+
+test('explicit undefined in destructured defaults preserves native Worker provenance', () => {
+  for (const expression of [
+    'const {root:source=globalThis}={root:undefined}; new source.Worker("/private.js");',
+    'const [source=globalThis]=[undefined]; new source.Worker("/private.js");',
+    'const {root:source=globalThis}={root:void 0}; new source.Worker("/private.js");',
+    'const [source=self]=[void 0]; new source.SharedWorker("/private.js");',
+  ]) {
+    const file='shared/ui/panel.js',at=expression.lastIndexOf('new ');
+    withFixture({[file]:expression},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+at+';')
+    ),expression+'\n'+result.errors.join('\n')));
+  }
+  for (const expression of [
+    'class LocalWorker{} const {root:source=globalThis}={root:{Worker:LocalWorker}}; new source.Worker();',
+    'class LocalWorker{} const [source=globalThis]=[{Worker:LocalWorker}]; new source.Worker();',
+  ]) withFixture({'modules/orders/ui/panel.js':expression},result=>
+    assert.deepEqual(result.errors,[],expression));
+});
+
+test('destructuring inherited Worker constructors cannot bypass ownership', () => {
+  for(const source of [
+    'const {Worker:Native}={__proto__:globalThis}; new Native("/private.js");',
+    'const holder={__proto__:globalThis}; const {Worker:Native}=holder; new Native("/private.js");',
+    'const {SharedWorker:Native}={__proto__:{__proto__:self}}; new Native("/private.js");',
+    'const {Worker:Native}={__proto__:unknownPrototype}; new Native("/private.js");',
+  ]) withFixture({'shared/ui/panel.js':source},result=>
+    assert.match(result.errors.join(' '),/unsupported-worker-alias/,source));
+  for(const source of [
+    'class LocalWorker{} const {Worker:Local}={__proto__:globalThis,Worker:LocalWorker}; new Local();',
+    'class LocalWorker{} const {Worker:Local}={__proto__:{Worker:LocalWorker}}; new Local();',
+  ]) withFixture({'modules/orders/ui/panel.js':source},result=>
+    assert.deepEqual(result.errors,[],source));
+});
+
 test('native worker aliases from destructuring assignments fail closed', () => {
   for (const assignment of [
     'let BackgroundWorker; ({ Worker: BackgroundWorker } = globalThis);',

@@ -166,10 +166,14 @@ function constDestructuringOrigin(declaration) {
     const pattern = element.parent;
     if (ts.isObjectBindingPattern(pattern)) {
       const name = element.propertyName || element.name;
-      const actual = ts.isComputedPropertyName(name) ? name.expression : name;
-      if (!(ts.isIdentifier(actual) || ts.isStringLiteral(actual) ||
-            ts.isNumericLiteral(actual) || ts.isNoSubstitutionTemplateLiteral(actual))) return undefined;
-      accesses.unshift({ kind: 'object', key: actual.text, fallback: element.initializer });
+      const computed = ts.isComputedPropertyName(name);
+      const actual = computed ? name.expression : name;
+      // An identifier inside a computed key is *not* the property name:
+      // {[key]: value} reads the value of key at runtime.
+      const staticKey = (ts.isStringLiteral(actual) || ts.isNumericLiteral(actual) ||
+        ts.isNoSubstitutionTemplateLiteral(actual) || !computed && ts.isIdentifier(actual))
+        ? actual.text : undefined;
+      accesses.unshift({ kind: 'object', key: staticKey, fallback: element.initializer });
     } else if (ts.isArrayBindingPattern(pattern)) {
       const index = pattern.elements.indexOf(element);
       if (index < 0) return undefined;
@@ -319,6 +323,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       return node;
     };
     const selectLiteral = (expression, access) => {
+      if (access.key === undefined) return undefined;
       const literal = literalFor(expression, new Set());
       if (access.kind === 'array' && ts.isArrayLiteralExpression(literal)) {
         if (literal.elements.some(ts.isSpreadElement)) return undefined;
@@ -352,7 +357,8 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         const original = reference(expression);
         if (original) fallback = {
           ...original,
-          path: [...original.path, ...origin.accesses.slice(i).map(access => access.key)],
+          path: [...original.path, ...origin.accesses.slice(i).map(access =>
+            access.key === undefined ? unknownKey : access.key)],
         };
         if (i === origin.accesses.length) break;
         const selected = selectLiteral(expression, origin.accesses[i]);
@@ -523,8 +529,34 @@ function workerProvenance(sf, workerNames, unwrap) {
     if (!origin) return undefined;
     seen.add(declaration);
     let selected = origin.initializer;
+    // Destructuring defaults fire on explicit undefined as well as missing
+    // entries. Unknown selections with a default must not be called local.
+    const knownUndefined = value => {
+      const node = unwrap(value);
+      return ts.isVoidExpression(node) || ts.isIdentifier(node) &&
+        node.text === 'undefined' && !localValue(node) && !shadowsGlobal(node);
+    };
+    const knownDefined = value => {
+      const node = unwrap(value);
+      return ts.isObjectLiteralExpression(node) || ts.isArrayLiteralExpression(node) ||
+        ts.isClassExpression(node) || ts.isFunctionExpression(node) ||
+        ts.isArrowFunction(node) || ts.isNewExpression(node) ||
+        ts.isStringLiteral(node) || ts.isNumericLiteral(node) ||
+        ts.isNoSubstitutionTemplateLiteral(node) ||
+        [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword,
+          ts.SyntaxKind.NullKeyword].includes(node.kind) ||
+        ts.isIdentifier(node) && ['globalThis','window','self'].includes(node.text) &&
+          !localValue(node) && !shadowsGlobal(node) ||
+        Boolean(resolveStaticObject(node, new Set()));
+    };
+    const withDefault = (value, fallback) => {
+      if (!fallback) return value;
+      if (knownUndefined(value)) return fallback;
+      return knownDefined(value) ? value : undefined;
+    };
     for (const access of origin.accesses) {
       if (access.kind === 'object') {
+        if (access.key === undefined) return undefined;
         const object = resolveStaticObject(selected, seen);
         if (!object) return undefined;
         const value = literalProperty(object, access.key, seen);
@@ -532,7 +564,10 @@ function workerProvenance(sf, workerNames, unwrap) {
         if (value === absentProperty) {
           if (!access.fallback) return undefined;
           selected = access.fallback;
-        } else selected = value;
+        } else {
+          selected = withDefault(value, access.fallback);
+          if (!selected) return undefined;
+        }
       } else {
         const array = resolveStaticArray(selected, seen);
         if (!array || array.elements.some(ts.isSpreadElement)) return undefined;
@@ -540,7 +575,10 @@ function workerProvenance(sf, workerNames, unwrap) {
         if (!element || ts.isOmittedExpression(element)) {
           if (!access.fallback) return undefined;
           selected = access.fallback;
-        } else selected = element;
+        } else {
+          selected = withDefault(element, access.fallback);
+          if (!selected) return undefined;
+        }
       }
     }
     return selected;
@@ -616,26 +654,19 @@ function workerProvenance(sf, workerNames, unwrap) {
     return ts.isClassExpression(value) || ts.isFunctionExpression(value) ||
       ts.isIdentifier(value) && localValue(value);
   };
-  // Literal own properties and prototype inheritance are different sources.
-  // Follow inspectable prototype chains with an explicit cycle guard.
-  const inheritedWorkerMember = member => {
-    if (!(ts.isPropertyAccessExpression(member) || ts.isElementAccessExpression(member))) return false;
-    const key = ts.isPropertyAccessExpression(member)
-      ? member.name.text : literalString(member.argumentExpression);
+  // Resolve both direct member construction and destructured extraction
+  // with the same bounded own-property and prototype-chain inspection.
+  const inheritedWorkerSource = (expression, key) => {
     if (!workerNames.includes(key)) return false;
-    const object = resolveStaticObject(member.expression, new Set());
+    const object = resolveStaticObject(expression, new Set());
     if (!object) return false;
     const visited = new Set();
     const inspect = current => {
-      if (visited.has(current)) return true; // An opaque/cyclic chain is not safe.
+      if (visited.has(current)) return true;
       visited.add(current);
       const own = literalProperty(current, key, new Set());
       if (own === unknownProperty) return true;
-      if (own !== absentProperty) {
-        // Identifiers with proven local values and inline class/function
-        // expressions shadow inherited native Worker constructors.
-        return !localWorkerConstructor(own);
-      }
+      if (own !== absentProperty) return !localWorkerConstructor(own);
       for (const property of current.properties) {
         if (!ts.isPropertyAssignment(property) || !property.name ||
             ts.isComputedPropertyName(property.name) ||
@@ -652,6 +683,12 @@ function workerProvenance(sf, workerNames, unwrap) {
       return false;
     };
     return inspect(object);
+  };
+  const inheritedWorkerMember = member => {
+    if (!(ts.isPropertyAccessExpression(member) || ts.isElementAccessExpression(member))) return false;
+    const key = ts.isPropertyAccessExpression(member)
+      ? member.name.text : literalString(member.argumentExpression);
+    return inheritedWorkerSource(member.expression, key);
   };
   // An ambiguous computed key or opaque spread may overwrite an otherwise
   // statically known global-root property. Treat that provenance as unknown,
@@ -710,7 +747,7 @@ function workerProvenance(sf, workerNames, unwrap) {
     (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) &&
     workerNames.includes(ts.isPropertyAccessExpression(expression)
       ? expression.name.text : literalString(expression.argumentExpression)) && globalObject(expression.expression);
-  return { localValue, globalObject, globalSource, globalWorkerMember, unstableWorkerMember, inheritedWorkerMember, unresolvedWorkerReceiver };
+  return { localValue, globalObject, globalSource, globalWorkerMember, unstableWorkerMember, inheritedWorkerMember, inheritedWorkerSource, unresolvedWorkerReceiver };
 }
 function workerBindings(sf) {
   const workerNames = ['Worker', 'SharedWorker'];
@@ -720,7 +757,7 @@ function workerBindings(sf) {
     while (isWrapper(expression)) expression = expression.expression;
     return expression;
   };
-  const { localValue, globalObject, globalSource, globalWorkerMember, unstableWorkerMember, inheritedWorkerMember, unresolvedWorkerReceiver } =
+  const { localValue, globalObject, globalSource, globalWorkerMember, unstableWorkerMember, inheritedWorkerMember, inheritedWorkerSource, unresolvedWorkerReceiver } =
     workerProvenance(sf, workerNames, unwrap);
   const workerProperty = key => key && (ts.isComputedPropertyName(key) ||
     (ts.isIdentifier(key) || ts.isStringLiteral(key)) && workerNames.includes(key.text));
@@ -759,7 +796,10 @@ function workerBindings(sf) {
   const nativeWorker = Symbol('native worker');
   const propertyValues = (source, name) => {
     const key = propertyKey(name);
-    if (!source || key === undefined || !ts.isObjectLiteralExpression(source)) return [undefined];
+    if (!source || key === undefined) return [undefined];
+    // Own-property-only destructuring misses an inherited native Worker.
+    if (inheritedWorkerSource(source, key)) return [nativeWorker];
+    if (!ts.isObjectLiteralExpression(source)) return [undefined];
     let values = [undefined];
     const visit = object => {
       for (const property of object.properties) {
