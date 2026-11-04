@@ -32,7 +32,7 @@ This is the **implementation-specific verification matrix** for the architecture
 - [ ] Include Vite-recognized `link.imagesrcset` candidates and allowed `meta[content]` image/media variants in the same physical ownership checks applied to `img.srcset`.
 - [ ] Reject unaudited secondary HTML pages accessible in Vite dev, including sibling and nested `.html`/`.htm`; separately audit `public/` assets.
 - [ ] Keep existing pre-refactor architecture fixtures aligned with precise error names, without weakening genuinely invalid-input tests.
-- [ ] Verify actual worker/main builds and dev-server HTML behavior as part of the quality and security checks.
+- [ ] Run real Vite main/Worker production builds alongside static Worker ownership checks; a valid local Worker must produce a separate bundled asset and a cross-owner entry must remain rejected by the checker. Dev-server HTML/browser behavior remains an independent smoke check.
 
 ### Nested HTML exclusions, CSS entrypoint ownership and symlink failures
 

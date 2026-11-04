@@ -949,6 +949,25 @@ test('constant aliases of global objects cannot hide native Worker constructors'
     result => assert.deepEqual(result.errors, [], source));
 });
 
+test('inspectable literal-object wrappers do not hide native Worker constructors', () => {
+  for (const source of [
+    'const holder = { root: globalThis }; const Ctor = holder.root.Worker; new Ctor("/src/modules/private/ui/worker.js");',
+    'const holder = { root: globalThis }; new holder.root.Worker("/src/modules/private/ui/worker.js");',
+    'const holder = { root: self }; const Ctor = holder["root"]["SharedWorker"]; new Ctor("/worker.js");',
+    'const inner = { root: window }; const holder = inner; const Ctor = holder.root.Worker; new Ctor("/worker.js");',
+    'const holder = { root: { inner: globalThis } }; const Ctor = holder.root.inner.Worker; new Ctor("/worker.js");',
+  ]) withFixture({ 'shared/ui/panel.ts': source,
+    'modules/private/ui/worker.js': 'export const result = 1;' },
+    result => assert.match(result.errors.join(' '), /unsupported-worker/, source));
+
+  for (const source of [
+    'class LocalWorker {} const holder = { root: { Worker: LocalWorker } }; const Ctor = holder.root.Worker; new Ctor();',
+    'class LocalWorker {} const holder = { root: globalThis, root: { Worker: LocalWorker } }; const Ctor = holder.root.Worker; new Ctor();',
+    'class LocalWorker {} const globalThis = { Worker: LocalWorker }; const holder = { root: globalThis }; const Ctor = holder.root.Worker; new Ctor();',
+  ]) withFixture({ 'modules/orders/ui/panel.ts': source },
+    result => assert.deepEqual(result.errors, [], source));
+});
+
 test('native worker aliases from destructuring assignments fail closed', () => {
   for (const assignment of [
     'let BackgroundWorker; ({ Worker: BackgroundWorker } = globalThis);',

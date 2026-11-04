@@ -153,14 +153,9 @@ function primitiveLocalBinding(identifier) {
   // No local binding: direct calls may refer to Node's built-in loader.
   return undefined;
 }
-function workerBindings(sf) {
-  const workerNames = ['Worker', 'SharedWorker'];
-  const isWrapper = node => ts.isParenthesizedExpression(node) || ts.isAsExpression(node) ||
-    ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node);
-  const unwrap = expression => {
-    while (isWrapper(expression)) expression = expression.expression;
-    return expression;
-  };
+// Resolve native Worker roots separately from extraction of dependency edges.
+// This avoids conflating symbol provenance with import graph bookkeeping.
+function workerProvenance(sf, workerNames, unwrap) {
   let checker;
   // A single checker per source file keeps binding resolution consistent and
   // avoids repeatedly rebuilding its program for every Worker-like expression.
@@ -214,22 +209,63 @@ function workerBindings(sf) {
     }
     return false;
   };
-  // Follow only directly initialized, immutable local aliases. Arbitrary
-  // assignments and reflective lookups are not certified by this static graph.
-  const globalObject = (expression, seen = new Set()) => {
-    const value = unwrap(expression);
-    if (!ts.isIdentifier(value)) return false;
-    if (['globalThis', 'window', 'self'].includes(value.text)) {
-      return !localValue(value) && !shadowsGlobal(value);
-    }
-    const symbol = localSymbol(value);
+  // Const-only provenance is a narrow, bounded subset of JavaScript.
+  // It accepts inspectable object properties without executing source code.
+  const constInitializer = (identifier, seen) => {
+    const symbol = localSymbol(identifier);
     const declaration = symbol?.declarations?.length === 1 ? symbol.declarations[0] : undefined;
     if (!declaration || !ts.isVariableDeclaration(declaration) ||
         !ts.isIdentifier(declaration.name) || !declaration.initializer ||
         !ts.isVariableDeclarationList(declaration.parent) ||
-        !(declaration.parent.flags & ts.NodeFlags.Const) || seen.has(declaration)) return false;
+        !(declaration.parent.flags & ts.NodeFlags.Const) || seen.has(declaration)) return undefined;
     seen.add(declaration);
-    return globalObject(declaration.initializer, seen);
+    return declaration.initializer;
+  };
+  const literalKey = name => {
+    if (!name) return undefined;
+    if (ts.isComputedPropertyName(name)) return literalString(name.expression) ?? undefined;
+    return ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)
+      ? name.text : undefined;
+  };
+  const inspectMember = (member, seen) => {
+    const key = ts.isPropertyAccessExpression(member)
+      ? member.name.text : literalString(member.argumentExpression);
+    if (key === null || key === undefined) return undefined;
+    let object = unwrap(member.expression);
+    while (ts.isIdentifier(object)) {
+      const initializer = constInitializer(object, seen);
+      if (!initializer) return undefined;
+      object = unwrap(initializer);
+    }
+    if (!ts.isObjectLiteralExpression(object)) return undefined;
+    // Examine the last matching property: later declarations override earlier
+    // ones. Unknown computed keys and non-literal spreads are not certified.
+    for (let i = object.properties.length - 1; i >= 0; i--) {
+      const property = object.properties[i];
+      if (ts.isSpreadAssignment(property)) return undefined;
+      if (property.name && ts.isComputedPropertyName(property.name) &&
+          literalKey(property.name) === undefined) return undefined;
+      if (literalKey(property.name) !== key) continue;
+      if (ts.isPropertyAssignment(property)) return property.initializer;
+      if (ts.isShorthandPropertyAssignment(property)) return property.name;
+      return undefined;
+    }
+    return undefined;
+  };
+  // Follow const aliases and directly inspectable object properties. Reflective
+  // access, unknown computed keys, mutated aliases and accessors are not proven.
+  const globalObject = (expression, seen = new Set()) => {
+    const value = unwrap(expression);
+    if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
+      const resolved = inspectMember(value, seen);
+      return Boolean(resolved && globalObject(resolved, seen));
+    }
+    if (!ts.isIdentifier(value)) return false;
+    if (['globalThis', 'window', 'self'].includes(value.text)) {
+      return !localValue(value) && !shadowsGlobal(value);
+    }
+    const initializer = constInitializer(value, seen);
+    return Boolean(initializer && globalObject(initializer, seen));
   };
   const globalSource = expression => {
     const value = unwrap(expression);
@@ -244,6 +280,18 @@ function workerBindings(sf) {
     (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) &&
     workerNames.includes(ts.isPropertyAccessExpression(expression)
       ? expression.name.text : literalString(expression.argumentExpression)) && globalObject(expression.expression);
+  return { localValue, globalObject, globalSource, globalWorkerMember };
+}
+function workerBindings(sf) {
+  const workerNames = ['Worker', 'SharedWorker'];
+  const isWrapper = node => ts.isParenthesizedExpression(node) || ts.isAsExpression(node) ||
+    ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node);
+  const unwrap = expression => {
+    while (isWrapper(expression)) expression = expression.expression;
+    return expression;
+  };
+  const { localValue, globalObject, globalSource, globalWorkerMember } =
+    workerProvenance(sf, workerNames, unwrap);
   const workerProperty = key => key && (ts.isComputedPropertyName(key) ||
     (ts.isIdentifier(key) || ts.isStringLiteral(key)) && workerNames.includes(key.text));
   const workerPattern = pattern => {
