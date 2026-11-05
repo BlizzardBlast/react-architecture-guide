@@ -1380,6 +1380,37 @@ test('destructuring default and shallow spread aliases preserve Worker mutations
     assert.deepEqual(result.errors,[],source));
 });
 
+for (const [name, binding] of [
+  ['multiple spreads', 'const unrelated={status:1}; const {root:alias}={...holder,...unrelated};'],
+  ['inline spread', 'const {root:alias}={...{root:holder.root}};'],
+  ['unknown computed key', 'const key="root"; const {[key]:alias}={...holder};'],
+  ['unknown key with inline property', 'const key="root"; const {[key]:alias}={...{root:holder.root}};'],
+  ['nested spread', 'const {root:alias}={...{...holder}};'],
+  ['unknown later spread', 'const {root:alias}={...holder,...maybe};'],
+]) test('destructured spread mutation: ' + name, () => {
+  const source='class LocalWorker{} function run(next,maybe){const holder={root:{Worker:LocalWorker}}; '+
+    binding+' Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js");}';
+  for (const extension of ['js','ts']) {
+    const file='shared/ui/panel.'+extension, offset=source.indexOf('new holder.root.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+});
+
+test('destructured explicit overwrite and unrelated writes preserve local constructors', () => {
+  for (const binding of [
+    'const {root:alias}={...holder,root:other.root}; Reflect.set(alias,"Worker",next);',
+    'const {root:alias}={...holder,...{root:other.root}}; Reflect.set(alias,"Worker",next);',
+    'const snapshot={...holder,root:other.root}; const {root:alias}=snapshot; Reflect.set(alias,"Worker",next);',
+    'const {root:alias}={...holder,...{status:1}}; Reflect.set(alias,"status",next);',
+  ]) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}}; '+
+      'const other={root:{Worker:LocalWorker}}; '+binding+' new holder.root.Worker();}';
+    withFixture({'modules/orders/ui/panel.js':source},result=>assert.deepEqual(result.errors,[],source));
+  }
+});
+
 test('known undefined Worker properties are harmless local reads', () => {
   for (const source of [
     'const {Worker:local}={Worker:undefined}; console.log(local);',

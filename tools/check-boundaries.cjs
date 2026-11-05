@@ -365,20 +365,42 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       } else return undefined;
       return selected && !definitelyUndefined(selected) ? selected : access.fallback;
     };
-    const spreadReference = (expression, access) => {
-      if (access.kind !== 'object' || access.key === undefined) return undefined;
-      const value = literalFor(expression, new Set());
-      if (!ts.isObjectLiteralExpression(value)) return undefined;
-      // A spread creates independent outer slots, but the copied nested value
-      // may be the *same object*. Keep a conservative edge to that reference.
-      for (let i = value.properties.length - 1; i >= 0; i--) {
-        const property = value.properties[i];
-        if (ts.isSpreadAssignment(property)) {
-          const origin = reference(property.expression);
-          if (origin) return { ...origin, path: [...origin.path, access.key] };
+    const spreadReferences = (expression, access) => {
+      if (access.kind !== 'object') return [];
+      const key = access.key === undefined ? unknownKey : access.key;
+      const found = [];
+      const inspect = (source, seen) => {
+        const value = literalFor(source, new Set());
+        const origin = reference(source);
+        if (!ts.isObjectLiteralExpression(value) || seen.has(value)) {
+          if (origin) found.push({ ...origin, path: [...origin.path, key] });
+          return false;
         }
-      }
-      return undefined;
+        const nextSeen = new Set(seen).add(value);
+        let definite = false, possible = false;
+        for (let i = value.properties.length - 1; i >= 0 && !definite; i--) {
+          const property = value.properties[i];
+          if (ts.isSpreadAssignment(property)) {
+            const count = found.length;
+            definite = inspect(property.expression, nextSeen) && key !== unknownKey;
+            possible ||= definite || found.length > count;
+            continue;
+          }
+          const name = property.name && (ts.isComputedPropertyName(property.name)
+            ? literalName(property.name.expression) : property.name.text);
+          if (name === undefined || key !== unknownKey && name !== unknownKey && name !== key) continue;
+          possible = true;
+          const selected = ts.isPropertyAssignment(property) ? property.initializer :
+            ts.isShorthandPropertyAssignment(property) ? property.name : undefined;
+          const selectedRef = selected && reference(selected);
+          if (selectedRef) found.push(selectedRef);
+          definite = key !== unknownKey && name !== unknownKey;
+        }
+        if (origin && possible) found.push({ ...origin, path: [...origin.path, key] });
+        return definite;
+      };
+      inspect(expression, new Set());
+      return found;
     };
     const extractedAliases = declaration => {
       const origin = constDestructuringOrigin(declaration);
@@ -412,8 +434,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
             });
           }
         }
-        const spread = spreadReference(expression, access);
-        if (spread) capture({
+        for (const spread of spreadReferences(expression, access)) capture({
           ...spread,
           path: [...spread.path, ...origin.accesses.slice(i + 1).map(a =>
             a.key === undefined ? unknownKey : a.key)],
@@ -466,7 +487,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
             for (const property of initializer.properties) {
               if (!ts.isSpreadAssignment(property)) continue;
               const source = reference(property.expression);
-              if (source) aliases.push({ dest: node, ...source, spread: true });
+              if (source) aliases.push({ dest: node, ...source, spread: true, initializer });
             }
           }
         }
@@ -479,12 +500,16 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
     // the nested references under those properties remain shared.
     const overlaps = (path, prefix) =>
       prefix.every((key, i) => key === unknownKey || path[i] === unknownKey || path[i] === key);
+    const spreadSupplies = (alias, key) => spreadReferences(alias.initializer, {
+      kind: 'object', key: key === unknownKey ? undefined : key,
+    }).some(candidate => candidate.declaration === alias.declaration &&
+      candidate.path.length === alias.path.length + 1 && overlaps(candidate.path, [...alias.path, key]));
     let changed = true;
     while (changed) {
       changed = false;
       for (const alias of aliases) {
         for (const path of [...(paths.get(alias.dest)?.values() || [])]) {
-          if (!alias.spread || path.length > 1) {
+          if (!alias.spread || path.length > 1 && spreadSupplies(alias, path[0])) {
             changed = add(alias.declaration, [...alias.path, ...path]) || changed;
           }
         }
@@ -493,7 +518,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
           // slot does not mutate that previously captured object.
           if (path.length > alias.path.length && overlaps(path, alias.path)) {
             const relative = path.slice(alias.path.length);
-            if (!alias.spread || relative.length > 1) {
+            if (!alias.spread || relative.length > 1 && spreadSupplies(alias, relative[0])) {
               changed = add(alias.dest, relative) || changed;
             }
           }
