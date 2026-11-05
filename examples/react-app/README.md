@@ -18,6 +18,8 @@ npm run dev
 
 The committed lockfile supports `npm ci`. Verification includes React component and integration tests and real Vite conformance checks; run `npm run verify` for the current test totals rather than relying on fixed counts in this guide. Earlier clean installation and bounded browser smoke evidence are recorded separately. See [verification evidence and limits](../../docs/verification.md).
 
+The temporary `minimatch` 11 override applies only to `@typescript-eslint/typescript-estree` to address [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249). It exceeds that package's declared version range; the test suite checks representative project-service glob matching. Remove the override when upstream supports a non-vulnerable version.
+
 `npm run verify` runs ESLint (React Hooks, TypeScript and JSX accessibility), Vitest, real Vite alias/HTML conformance checks, architecture checks, TypeScript typechecking and the Vite build. The conformance tests build temporary fixtures without writing production output. The architecture checker accepts Vite-style CSS/image/query assets within owned presentation code, checks static URL/worker and transitive stylesheet dependencies (including intra-module layer rules, CSS url()/image-set() and literal Less import options), rejects unsupported dynamic imports and Vite globs, and checks source and owned JSON dependencies separately.
 
 ## Catalog behavior
