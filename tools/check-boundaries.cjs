@@ -485,9 +485,22 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
             if (source) aliases.push({ dest: node, ...source, spread: false });
           } else if (ts.isObjectLiteralExpression(initializer)) {
             for (const property of initializer.properties) {
-              if (!ts.isSpreadAssignment(property)) continue;
-              const source = reference(property.expression);
-              if (source) aliases.push({ dest: node, ...source, spread: true, initializer });
+              if (ts.isSpreadAssignment(property)) {
+                const source = reference(property.expression);
+                if (source) aliases.push({ dest: node, ...source, spread: true, initializer });
+              } else if (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) {
+                const name = property.name;
+                if (!ts.isComputedPropertyName(name) && name.text === '__proto__' &&
+                    ts.isPropertyAssignment(property)) continue;
+                const key = ts.isComputedPropertyName(name) ? literalName(name.expression) : name.text;
+                const source = reference(ts.isPropertyAssignment(property) ? property.initializer : name);
+                if (source && spreadReferences(initializer, {
+                  kind: 'object', key: key === unknownKey ? undefined : key,
+                }).some(candidate => candidate.declaration === source.declaration &&
+                  pathCode(candidate.path) === pathCode(source.path))) {
+                  aliases.push({ dest: node, destPath: [key], ...source, spread: false });
+                }
+              }
             }
           }
         }
@@ -508,9 +521,13 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
     while (changed) {
       changed = false;
       for (const alias of aliases) {
+        const destPath = alias.destPath || [];
         for (const path of [...(paths.get(alias.dest)?.values() || [])]) {
-          if (!alias.spread || path.length > 1 && spreadSupplies(alias, path[0])) {
-            changed = add(alias.declaration, [...alias.path, ...path]) || changed;
+          if (path.length > destPath.length && overlaps(path, destPath)) {
+            const relative = path.slice(destPath.length);
+            if (!alias.spread || relative.length > 1 && spreadSupplies(alias, relative[0])) {
+              changed = add(alias.declaration, [...alias.path, ...relative]) || changed;
+            }
           }
         }
         for (const path of [...(paths.get(alias.declaration)?.values() || [])]) {
@@ -519,7 +536,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
           if (path.length > alias.path.length && overlaps(path, alias.path)) {
             const relative = path.slice(alias.path.length);
             if (!alias.spread || relative.length > 1 && spreadSupplies(alias, relative[0])) {
-              changed = add(alias.dest, relative) || changed;
+              changed = add(alias.dest, [...destPath, ...relative]) || changed;
             }
           }
         }

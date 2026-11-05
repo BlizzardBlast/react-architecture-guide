@@ -1411,6 +1411,28 @@ test('destructured explicit overwrite and unrelated writes preserve local constr
   }
 });
 
+test('snapshot property references share nested Worker mutations with their source', () => {
+  for (const mutation of [
+    'Reflect.set(snapshot.root,"Worker",next); new other.root.Worker("/private.js");',
+    'Reflect.set(other.root,"Worker",next); new snapshot.root.Worker("/private.js");',
+  ]) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}}; '+
+      'const other={root:{Worker:LocalWorker}}; const snapshot={...holder,root:other.root}; '+mutation+'}';
+    const file='shared/ui/panel.js', offset=source.indexOf('new ');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+  for (const operation of [
+    'snapshot.root={Worker:LocalWorker}; new other.root.Worker();',
+    'Reflect.set(snapshot.root,"status",next); new other.root.Worker();',
+  ]) {
+    const source='class LocalWorker{} function run(next){const other={root:{Worker:LocalWorker}}; '+
+      'const snapshot={root:other.root}; '+operation+'}';
+    withFixture({'modules/orders/ui/panel.js':source},result=>assert.deepEqual(result.errors,[],source));
+  }
+});
+
 test('known undefined Worker properties are harmless local reads', () => {
   for (const source of [
     'const {Worker:local}={Worker:undefined}; console.log(local);',
