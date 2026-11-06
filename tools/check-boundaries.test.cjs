@@ -1435,6 +1435,28 @@ test('destructuring default and shallow spread aliases preserve Worker mutations
     assert.deepEqual(result.errors,[],source));
 });
 
+test('repeated literal spreads do not cause exponential Worker analysis', () => {
+  const { spawnSync } = require('node:child_process');
+  for (const scenario of ['empty','mutated','cyclic','cyclic-mutated']) {
+    const mutated=scenario.includes('mutated');
+    let source='class LocalWorker{} function run(key,next){const holder={root:{Worker:LocalWorker}}; '+
+      (scenario==='cyclic-mutated' ? 'const base0={...base0,root:holder.root}; ' :
+        mutated ? 'const base0={root:holder.root}; ' :
+        scenario==='cyclic' ? 'const base0={...base0}; ' : 'const base0={}; ');
+    for (let i=1; i<=24; i++) source+='const base'+i+'={...base'+(i-1)+',...base'+(i-1)+'}; ';
+    source+=mutated ? 'const {[key]:alias}=base24; Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js");}' :
+      'const {root:alias}=base24; new holder.root.Worker();}';
+    const file='shared/ui/panel.js', offset=source.indexOf('new holder.root.Worker(');
+    const fixture=setup({[file]:source});
+    try {
+      const run=spawnSync(process.execPath,[path.join(__dirname,'check-boundaries.cjs'),fixture.root],
+        {encoding:'utf8',timeout:20000});
+      assert.equal(run.status,mutated ? 1 : 0,run.error?.message || run.stderr);
+      if (mutated) assert.ok(run.stderr.includes('unsupported-worker-entry: '+file+' at offset '+offset+';'),run.stderr);
+    } finally { fixture.cleanup(); }
+  }
+});
+
 for (const [name, binding] of [
   ['multiple spreads', 'const unrelated={status:1}; const {root:alias}={...holder,...unrelated};'],
   ['inline spread', 'const {root:alias}={...{root:holder.root}};'],

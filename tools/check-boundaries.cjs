@@ -370,22 +370,28 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
     const spreadReferences = (expression, access) => {
       if (access.kind !== 'object') return [];
       const key = access.key === undefined ? unknownKey : access.key;
-      const found = [];
+      const found = [], cache = new Map();
       const inspect = (source, seen) => {
         const value = literalFor(source, new Set());
         const origin = reference(source);
         if (!ts.isObjectLiteralExpression(value) || seen.has(value)) {
           if (origin) found.push({ ...origin, path: [...origin.path, key] });
-          return false;
+          return { definite: false, possible: Boolean(origin), cyclic: seen.has(value) };
+        }
+        const cached = cache.get(value);
+        if (cached) {
+          if (origin && cached.possible) found.push({ ...origin, path: [...origin.path, key] });
+          return cached;
         }
         const nextSeen = new Set(seen).add(value);
-        let definite = false, possible = false;
+        let definite = false, possible = false, cyclic = false;
         for (let i = value.properties.length - 1; i >= 0 && !definite; i--) {
           const property = value.properties[i];
           if (ts.isSpreadAssignment(property)) {
-            const count = found.length;
-            definite = inspect(property.expression, nextSeen) && key !== unknownKey;
-            possible ||= definite || found.length > count;
+            const result = inspect(property.expression, nextSeen);
+            definite = result.definite && key !== unknownKey;
+            possible ||= result.possible;
+            cyclic ||= result.cyclic;
             continue;
           }
           const name = property.name && (ts.isComputedPropertyName(property.name)
@@ -399,7 +405,11 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
           definite = key !== unknownKey && name !== unknownKey;
         }
         if (origin && possible) found.push({ ...origin, path: [...origin.path, key] });
-        return definite;
+        // Cycles make overwrite certainty context-dependent; retain all candidates.
+        if (cyclic) definite = false;
+        const result = { definite, possible, cyclic };
+        cache.set(value, result);
+        return result;
       };
       inspect(expression, new Set());
       return found;
