@@ -452,7 +452,10 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
             a.key === undefined ? unknownKey : a.key)],
         });
         const selected = selectLiteral(expression, access);
-        if (!selected) break;
+        if (!selected) {
+          capture(fallback);
+          return [...found.values()];
+        }
         expression = selected;
       }
       capture(reference(expression) || fallback);

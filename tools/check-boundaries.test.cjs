@@ -1435,6 +1435,49 @@ test('destructuring default and shallow spread aliases preserve Worker mutations
     assert.deepEqual(result.errors,[],source));
 });
 
+for (const [name, binding] of [
+  ['named spread', 'const copy={...holder}; const {root:alias}=copy;'],
+  ['computed key', 'const copy={...holder}; const {[key]:alias}=copy;'],
+  ['nested spread', 'const copy={...{box:holder}}; const {box:{root:alias}}=copy;'],
+  ['array binding', 'const list=[holder.root]; const [alias]=list;'],
+]) test('destructured '+name+' preserves unrelated Worker fields', () => {
+  for (const extension of ['js','ts']) {
+    const source='class LocalWorker{} function run(key){const holder={root:{Worker:LocalWorker}}; '+
+      binding+' alias.status=1; new holder.root.Worker();}';
+    withFixture({['modules/orders/ui/panel.'+extension]:source},result=>
+      assert.deepEqual(result.errors,[],source));
+  }
+});
+
+test('destructured named-spread aliases still propagate Worker mutations', () => {
+  for (const binding of [
+    'const {root:alias}=copy;', 'const {[key]:alias}=copy;',
+  ]) for (const extension of ['js','ts']) {
+    const source='class LocalWorker{} function run(key,next){const holder={root:{Worker:LocalWorker}}; '+
+      'const copy={...holder}; '+binding+' Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js");}';
+    const file='shared/ui/panel.'+extension, offset=source.indexOf('new holder.root.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+});
+
+test('named-spread alias paths preserve reverse writes and overwritten slots', () => {
+  for (const binding of ['const {root:alias}=copy;', 'const {[key]:alias}=copy;']) {
+    const source='class LocalWorker{} function run(key,next){const holder={root:{Worker:LocalWorker}}; '+
+      'const copy={...holder}; '+binding+' Reflect.set(holder.root,"Worker",next); new alias.Worker("/private.js");}';
+    const file='shared/ui/panel.js', offset=source.indexOf('new alias.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+  const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}}; '+
+    'const other={root:{Worker:LocalWorker}}; const a={root:other.root}; '+
+    'const b={...a,root:holder.root}; const c={...a}; const {root:alias}=c; '+
+    'Reflect.set(alias,"Worker",next); new holder.root.Worker();}';
+  withFixture({'modules/orders/ui/panel.js':source},result=>assert.deepEqual(result.errors,[],source));
+});
+
 test('repeated literal spreads do not cause exponential Worker analysis', () => {
   const { spawnSync } = require('node:child_process');
   for (const scenario of ['empty','mutated','cyclic','cyclic-mutated']) {
