@@ -5385,3 +5385,47 @@ test('a real executable Less plugin remains forbidden after a safe @plugin varia
     'modules/orders/infrastructure/plugin.js': 'module.exports = {};',
     'app/start.ts': 'export const ready = true;',
   }, result => assert.match(result.errors.join(' '), /unsupported-less-plugin/)));
+
+test('nested literal selections preserve shared Worker references', () => {
+  const bindings = [
+    'const {box:{root:alias}}={box:{root:holder.root}};',
+    'const {box:{root:alias}}={...{box:{root:holder.root}}};',
+    'const copy={...{box:{root:holder.root}}}; const {box:{root:alias}}=copy;',
+    'const {[key]:{root:alias}}={box:{root:holder.root}};',
+    'const {box:[{root:alias}]}={...{box:[{root:holder.root}]}};',
+    'const {box:[alias]}={...{box:[...[],holder.root]}};',
+    'const {box:[alias]}={...{box:[...[holder.root]]}};',
+    'const {box:[alias]}={...{box:[...maybe,holder.root]}};',
+    'const {box:{root:alias=holder.root}}={...{box:{}}};',
+    'const {box:{root:alias=holder.root}}={...{box:{root:undefined}}};',
+    'const {box:[alias=holder.root]}={...{box:[maybe]}};',
+    'const {box:{root:alias=holder.root}}={...{box:maybe}};',
+  ];
+  for (const binding of bindings) for (const extension of ['js','ts']) {
+    const source='class LocalWorker{} function run(key,next,maybe){const holder={root:{Worker:LocalWorker}}; '+
+      binding+' Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js");}';
+    const file='shared/ui/panel.'+extension, offset=source.indexOf('new holder.root.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+  for (const binding of [
+    'const {box:{root:alias}}={...{box:{root:holder.root}}}; Reflect.set(alias,"other",next);',
+    'const {box:{root:alias}}={...{box:{root:holder.root}},box:{root:other.root}}; Reflect.set(alias,"Worker",next);',
+    'const {box:[alias]}={...{box:[other.root,...[holder.root]]}}; Reflect.set(alias,"Worker",next);',
+  ]) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}}; '+
+      'const other={root:{Worker:LocalWorker}}; '+binding+' new holder.root.Worker();}';
+    withFixture({'modules/orders/ui/panel.js':source},result=>assert.deepEqual(result.errors,[],source));
+  }
+});
+
+test('nested spread aliases propagate reverse Worker writes', () => {
+  const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}}; '+
+    'const {box:{root:alias}}={...{box:{root:holder.root}}}; '+
+    'Reflect.set(holder.root,"Worker",next); new alias.Worker("/private.js");}';
+  const file='shared/ui/panel.js', offset=source.indexOf('new alias.Worker(');
+  withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+    error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+  ),source+'\n'+result.errors.join('\n')));
+});

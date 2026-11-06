@@ -367,20 +367,58 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       } else return undefined;
       return selected && !definitelyUndefined(selected) ? selected : access.fallback;
     };
-    const spreadReferences = (expression, access) => {
+    const spreadReferences = (expression, access, remaining = []) => {
       if (access.kind !== 'object') return [];
-      const key = access.key === undefined ? unknownKey : access.key;
-      const found = [], cache = new Map();
-      const inspect = (source, seen) => {
-        const value = literalFor(source, new Set());
+      const accesses = [access, ...remaining];
+      const found = [], cache = new Map(), arrays = new Map();
+      const inspect = (source, seen, index = 0, arrayUnknown = false) => {
         const origin = reference(source);
+        if (index === accesses.length) {
+          if (origin) found.push(origin);
+          return { definite: true, possible: Boolean(origin), cyclic: false };
+        }
+        const access = accesses[index];
+        const key = access.key === undefined ? unknownKey : access.key;
+        const suffix = accesses.slice(index).map(item => item.key === undefined ? unknownKey : item.key);
+        if (arrayUnknown) suffix[0] = unknownKey;
+        const value = literalFor(source, new Set());
+        if (access.kind === 'array' && ts.isArrayLiteralExpression(value)) {
+          const firstSpread = value.elements.findIndex(ts.isSpreadElement);
+          if (arrayUnknown || firstSpread !== -1 && Number(access.key) >= firstSpread) {
+            if (!arrays.has(index)) arrays.set(index, new Set());
+            if (arrays.get(index).has(value)) return { definite: false, possible: true, cyclic: false };
+            arrays.get(index).add(value);
+            for (const item of value.elements) {
+              if (ts.isOmittedExpression(item)) continue;
+              if (ts.isSpreadElement(item)) inspect(item.expression, seen, index, true);
+              else inspect(item, seen, index + 1);
+            }
+            if (access.fallback) inspect(access.fallback, seen, index + 1);
+            if (origin) found.push({ ...origin, path: [...origin.path, ...suffix] });
+            return { definite: false, possible: true, cyclic: false };
+          }
+          const selected = firstSpread === -1 ? selectLiteral(value, access) :
+            value.elements[Number(access.key)];
+          if (selected && !ts.isOmittedExpression(selected)) {
+            inspect(selected, seen, index + 1);
+            if (access.fallback && selected !== access.fallback && !definitelyDefined(selected)) {
+              inspect(access.fallback, seen, index + 1);
+            }
+          } else {
+            if (access.fallback) inspect(access.fallback, seen, index + 1);
+            if (origin) found.push({ ...origin, path: [...origin.path, ...suffix] });
+          }
+          return { definite: Boolean(selected), possible: Boolean(selected || origin), cyclic: false };
+        }
         if (!ts.isObjectLiteralExpression(value) || seen.has(value)) {
-          if (origin) found.push({ ...origin, path: [...origin.path, key] });
+          if (access.fallback) inspect(access.fallback, seen, index + 1);
+          if (origin) found.push({ ...origin, path: [...origin.path, ...suffix] });
           return { definite: false, possible: Boolean(origin), cyclic: seen.has(value) };
         }
-        const cached = cache.get(value);
+        if (!cache.has(index)) cache.set(index, new Map());
+        const cached = cache.get(index).get(value);
         if (cached) {
-          if (origin && cached.possible) found.push({ ...origin, path: [...origin.path, key] });
+          if (origin && cached.possible) found.push({ ...origin, path: [...origin.path, ...suffix] });
           return cached;
         }
         const nextSeen = new Set(seen).add(value);
@@ -388,7 +426,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         for (let i = value.properties.length - 1; i >= 0 && !definite; i--) {
           const property = value.properties[i];
           if (ts.isSpreadAssignment(property)) {
-            const result = inspect(property.expression, nextSeen);
+            const result = inspect(property.expression, nextSeen, index);
             definite = result.definite && key !== unknownKey;
             possible ||= result.possible;
             cyclic ||= result.cyclic;
@@ -400,15 +438,18 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
           possible = true;
           const selected = ts.isPropertyAssignment(property) ? property.initializer :
             ts.isShorthandPropertyAssignment(property) ? property.name : undefined;
-          const selectedRef = selected && reference(selected);
-          if (selectedRef) found.push(selectedRef);
+          if (selected) inspect(selected, nextSeen, index + 1);
+          if (access.fallback && (!selected || !definitelyDefined(selected))) {
+            inspect(access.fallback, nextSeen, index + 1);
+          }
           definite = key !== unknownKey && name !== unknownKey;
         }
-        if (origin && possible) found.push({ ...origin, path: [...origin.path, key] });
+        if (access.fallback && !definite) inspect(access.fallback, nextSeen, index + 1);
+        if (origin && possible) found.push({ ...origin, path: [...origin.path, ...suffix] });
         // Cycles make overwrite certainty context-dependent; retain all candidates.
         if (cyclic) definite = false;
         const result = { definite, possible, cyclic };
-        cache.set(value, result);
+        cache.get(index).set(value, result);
         return result;
       };
       inspect(expression, new Set());
@@ -446,11 +487,9 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
             });
           }
         }
-        for (const spread of spreadReferences(expression, access)) capture({
-          ...spread,
-          path: [...spread.path, ...origin.accesses.slice(i + 1).map(a =>
-            a.key === undefined ? unknownKey : a.key)],
-        });
+        for (const spread of spreadReferences(expression, access, origin.accesses.slice(i + 1))) {
+          capture(spread);
+        }
         const selected = selectLiteral(expression, access);
         if (!selected) {
           capture(fallback);
