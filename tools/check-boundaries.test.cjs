@@ -1092,6 +1092,61 @@ test('bounded Worker mutation paths terminate conservatively on many writes', ()
   }, result => assert.match(result.errors.join(' '), /unsupported-worker/));
 });
 
+for (const [shape, binding] of [
+  ['property reference', 'const snapshot={root:other.root};'],
+  ['shallow spread', 'const snapshot={...other};'],
+]) for (const [writer, reader] of [['snapshot','other'], ['other','snapshot']]) {
+  test('overflow propagates through ' + shape + ' from ' + writer, () => {
+    const writes = Array.from({length:128}, (_, i) => writer + '.p' + i + '=0;').join('');
+    const source='class LocalWorker{} function run(next){const other={root:{Worker:LocalWorker}}; '+
+      binding+writes+'Reflect.set('+writer+'.root,"Worker",next); new '+reader+'.root.Worker("/private.js");}';
+    const file='shared/ui/panel.js', offset=source.indexOf('new '+reader+'.root.Worker(');
+    withFixture({[file]:source}, result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  });
+  test('unknown outer write retains later nested mutation through ' + shape + ' from ' + writer, () => {
+    const source='class LocalWorker{} function run(key,next){const other={root:{Worker:LocalWorker}}; '+
+      binding+writer+'[key]=0; Reflect.set('+writer+'.root,"Worker",next); '+
+      'new '+reader+'.root.Worker("/private.js");}';
+    const file='shared/ui/panel.js', offset=source.indexOf('new '+reader+'.root.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  });
+}
+
+test('deep writes propagate through property aliases after path collapse', () => {
+  const nested='{x:'.repeat(12)+'{Worker:LocalWorker}'+'}'.repeat(12);
+  const chain='.x'.repeat(12);
+  const source='class LocalWorker{} function run(next){const other={root:'+nested+'}; '+
+    'const snapshot={root:other.root}; Reflect.set(snapshot.root'+chain+',"Worker",next); '+
+    'new other.root'+chain+'.Worker("/private.js");}';
+  const file='shared/ui/panel.js', offset=source.indexOf('new other.root');
+  withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+    error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+  ),result.errors.join('\n')));
+});
+
+test('collapsed mutations propagate through multiple object aliases', () => {
+  const writes=Array.from({length:128},(_,i)=>'snapshot.p'+i+'=0;').join('');
+  const source='class LocalWorker{} function run(next){const other={root:{Worker:LocalWorker}}; '+
+    'const middle={root:other.root}; const snapshot={root:middle.root}; '+writes+
+    'Reflect.set(snapshot.root,"Worker",next); new other.root.Worker("/private.js");}';
+  const file='shared/ui/panel.js', offset=source.indexOf('new other.root.Worker(');
+  withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+    error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+  ),result.errors.join('\n')));
+});
+
+test('unknown outer slot replacements do not mutate shared nested objects', () => {
+  for (const binding of ['const snapshot={root:other.root};', 'const snapshot={...other};']) {
+    const source='class LocalWorker{} function run(key){const other={root:{Worker:LocalWorker}}; '+
+      binding+' snapshot[key]=0; new other.root.Worker();}';
+    withFixture({'modules/orders/ui/panel.js':source},result=>assert.deepEqual(result.errors,[],source));
+  }
+});
+
 test('nested prototype chains preserve native Worker ownership checks', () => {
   for (const source of [
     'const base={__proto__:globalThis}; const holder={__proto__:base}; new holder.Worker("/private.js");',

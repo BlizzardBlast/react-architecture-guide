@@ -192,8 +192,10 @@ function constDestructuringOrigin(declaration) {
 function workerMutationPaths(sf, localSymbol, unwrap) {
   // Unknown property paths must never collide with literal string keys.
   const unknownKey = Symbol('unknown property');
-  const pathCode = parts => JSON.stringify(parts.map(part => part === unknownKey ? null : part));
-  const universalPath = pathCode([unknownKey]);
+  const universalKey = Symbol('any mutation path');
+  const pathCode = parts => JSON.stringify(parts.map(part =>
+    part === universalKey ? {} : part === unknownKey ? null : part));
+  const universalPath = pathCode([universalKey]);
   const rootDeclaration = expression => {
     let node = unwrap(expression);
     while (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
@@ -229,15 +231,15 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
     const add = (declaration, given) => {
       if (!declaration) return false;
       // Prevent pathological alias cycles from creating unbounded path arrays.
-      const path = given.length > 12 ? [unknownKey] : given;
+      const path = given.length > 12 ? [universalKey] : given;
       let entries = paths.get(declaration);
       if (!entries) { entries = new Map(); paths.set(declaration, entries); }
       const encoded = pathCode(path);
       // The top element is terminal: never re-expand it across fixpoint passes.
       if (entries.has(encoded) || entries.has(universalPath)) return false;
-      if (entries.size >= 128) {
+      if (encoded === universalPath || entries.size >= 128) {
         entries.clear();
-        entries.set(universalPath, [unknownKey]);
+        entries.set(universalPath, [universalKey]);
         return true;
       }
       entries.set(encoded, path);
@@ -523,7 +525,9 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       for (const alias of aliases) {
         const destPath = alias.destPath || [];
         for (const path of [...(paths.get(alias.dest)?.values() || [])]) {
-          if (path.length > destPath.length && overlaps(path, destPath)) {
+          if (pathCode(path) === universalPath) {
+            changed = add(alias.declaration, [universalKey]) || changed;
+          } else if (path.length > destPath.length && overlaps(path, destPath)) {
             const relative = path.slice(destPath.length);
             if (!alias.spread || relative.length > 1 && spreadSupplies(alias, relative[0])) {
               changed = add(alias.declaration, [...alias.path, ...relative]) || changed;
@@ -533,7 +537,9 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         for (const path of [...(paths.get(alias.declaration)?.values() || [])]) {
           // An alias captures a reference. Replacing the holder's property
           // slot does not mutate that previously captured object.
-          if (path.length > alias.path.length && overlaps(path, alias.path)) {
+          if (pathCode(path) === universalPath) {
+            changed = add(alias.dest, [universalKey]) || changed;
+          } else if (path.length > alias.path.length && overlaps(path, alias.path)) {
             const relative = path.slice(alias.path.length);
             if (!alias.spread || relative.length > 1 && spreadSupplies(alias, relative[0])) {
               changed = add(alias.dest, [...destPath, ...relative]) || changed;
@@ -550,7 +556,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
     const writes = mutations().get(value.declaration);
     return Boolean(writes && [...writes.values()].some(path =>
       path.length <= value.path.length && path.every((key, i) =>
-        key === unknownKey || value.path[i] === unknownKey || key === value.path[i])));
+        key === universalKey || key === unknownKey || value.path[i] === unknownKey || key === value.path[i])));
   };
   return { rootDeclaration, possiblyMutated };
 }
