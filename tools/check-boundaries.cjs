@@ -164,7 +164,9 @@ function constDestructuringOrigin(declaration, restKey) {
   while (ts.isBindingElement(element)) {
     const pattern = element.parent;
     if (element.dotDotDotToken) {
-      if (restKey === undefined) return undefined;
+      const nested = element !== declaration ? accesses.shift() : undefined;
+      const key = nested ? nested.key ?? null : restKey;
+      if (key === undefined) return undefined;
       if (ts.isObjectBindingPattern(pattern)) {
         const excluded = pattern.elements.some(other => {
           if (other === element) return false;
@@ -172,14 +174,14 @@ function constDestructuringOrigin(declaration, restKey) {
           const actual = ts.isComputedPropertyName(name) ? name.expression : name;
           return (ts.isStringLiteral(actual) || ts.isNumericLiteral(actual) ||
             ts.isNoSubstitutionTemplateLiteral(actual) ||
-            !ts.isComputedPropertyName(name) && ts.isIdentifier(actual)) && actual.text === restKey;
+            !ts.isComputedPropertyName(name) && ts.isIdentifier(actual)) && actual.text === key;
         });
         if (excluded) return undefined;
-        accesses.unshift({ kind: 'object', key: restKey ?? undefined });
+        accesses.unshift({ kind: 'object', key: key ?? undefined, fallback: nested?.fallback });
       } else if (ts.isArrayBindingPattern(pattern)) {
-        if (restKey !== null && !/^(?:0|[1-9]\d*)$/.test(restKey)) return undefined;
-        accesses.unshift({ kind: 'array', key: restKey === null ? undefined :
-          String(pattern.elements.indexOf(element) + Number(restKey)) });
+        if (key !== null && !/^(?:0|[1-9]\d*)$/.test(key)) return undefined;
+        accesses.unshift({ kind: 'array', key: key === null ? undefined :
+          String(pattern.elements.indexOf(element) + Number(key)), fallback: nested?.fallback });
       } else return undefined;
       element = pattern.parent;
       continue;
@@ -330,6 +332,156 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         record(target, [unknownKey]);
       }
     };
+    const arrayCopies = [];
+    const linkAssignment = (target, value, suffix = []) => {
+      const dest = reference(target);
+      if (!dest || !value || !dest.path.length && !suffix.length) return;
+      const capture = (expression, destPath) => {
+        const source = reference(expression);
+        if (source) {
+          aliases.push({ dest: dest.declaration, destPath, ...source, spread: false });
+          return;
+        }
+        const literal = unwrap(expression);
+        if (ts.isObjectLiteralExpression(literal)) {
+          const keys = new Set(), seen = new Set();
+          const collect = expression => {
+            const value = literalFor(expression, new Set());
+            if (!ts.isObjectLiteralExpression(value) || seen.has(value)) return;
+            seen.add(value);
+            for (const property of value.properties) {
+              if (ts.isSpreadAssignment(property)) {
+                const source = reference(property.expression);
+                if (source) aliases.push({ dest: dest.declaration, destPath, ...source, spread: true, initializer: literal });
+                collect(property.expression);
+              } else if (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) {
+                const name = property.name;
+                keys.add(ts.isComputedPropertyName(name) ? literalName(name.expression) : name.text);
+              }
+            }
+          };
+          collect(literal);
+          for (const key of keys) {
+            const access = { kind: 'object', key: key === unknownKey ? undefined : key };
+            const values = [];
+            for (const candidate of spreadReferences(literal, access, [], values)) {
+              aliases.push({ dest: dest.declaration, destPath: [...destPath, key], ...candidate, spread: false });
+            }
+            for (const selected of values) capture(selected, [...destPath, key]);
+          }
+        } else if (ts.isArrayLiteralExpression(literal)) {
+          if (literal.elements.some(ts.isSpreadElement)) {
+            arrayCopies.push({ declaration: dest.declaration, destPath, literal, capture, processed: new Set() });
+          } else literal.elements.forEach((item, index) => {
+            if (!ts.isOmittedExpression(item)) capture(item, [...destPath, String(index)]);
+          });
+        }
+      };
+      capture(value, [...dest.path, ...suffix]);
+    };
+    const linkPattern = (target, value) => {
+      const left = unwrap(target), right = unwrap(value);
+      if (ts.isArrayLiteralExpression(left) && !left.elements.some(ts.isSpreadElement)) {
+        left.elements.forEach((item, index) => {
+          if (ts.isOmittedExpression(item)) return;
+          const access = { kind: 'array', key: String(index) };
+          const dest = reference(item);
+          if (dest && dest.path.length) {
+            for (const source of spreadReferences(right, access)) {
+              aliases.push({ dest: dest.declaration, destPath: dest.path, ...source, spread: false });
+            }
+          } else {
+            const selected = selectLiteral(right, access);
+            if (selected) linkPattern(item, selected);
+          }
+        });
+      } else if (ts.isObjectLiteralExpression(left)) {
+        for (const property of left.properties) {
+          if (!ts.isPropertyAssignment(property)) continue;
+          const name = property.name;
+          const key = ts.isComputedPropertyName(name) ? literalName(name.expression) : name.text;
+          const access = { kind: 'object', key: key === unknownKey ? undefined : key };
+          const dest = reference(property.initializer);
+          if (dest && dest.path.length) {
+            for (const source of spreadReferences(right, access)) {
+              aliases.push({ dest: dest.declaration, destPath: dest.path, ...source, spread: false });
+            }
+          } else {
+            const selected = selectLiteral(right, access);
+            if (selected) linkPattern(property.initializer, selected);
+          }
+        }
+      } else linkAssignment(left, right);
+    };
+    const linkDescriptor = (target, key, descriptor) => {
+      const value = unwrap(descriptor);
+      if (!ts.isObjectLiteralExpression(value)) return;
+      const entry = value.properties.findLast(property => ts.isPropertyAssignment(property) &&
+        !ts.isComputedPropertyName(property.name) && property.name.text === 'value');
+      if (entry) linkAssignment(target, entry.initializer, [key]);
+    };
+    // Gather writes before resolving literal sources, including writes later in the file.
+    const directAliases = [];
+    const directBindings = [];
+    const scanWrites = node => {
+      if (ts.isBinaryExpression(node) && ts.isAssignmentOperator(node.operatorToken.kind)) {
+        assignmentTargets(node.left);
+        if (node.operatorToken.kind === ts.SyntaxKind.EqualsToken) linkPattern(node.left, node.right);
+      }
+      if ((ts.isForOfStatement(node) || ts.isForInStatement(node)) &&
+          !ts.isVariableDeclarationList(node.initializer)) assignmentTargets(node.initializer);
+      if (ts.isDeleteExpression(node) ||
+          (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+          [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator)) {
+        assignmentTargets(ts.isDeleteExpression(node) ? node.expression : node.operand);
+      }
+      if (ts.isCallExpression(node)) {
+        changedByCall(node);
+        if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression) &&
+            node.expression.expression.text === 'Reflect' && node.expression.name.text === 'set' &&
+            node.arguments.length >= 3) {
+          linkAssignment(node.arguments[0], node.arguments[2], [literalName(node.arguments[1])]);
+        }
+        if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression) &&
+            ['Object', 'Reflect'].includes(node.expression.expression.text) &&
+            node.expression.name.text === 'defineProperty' && node.arguments.length >= 3) {
+          linkDescriptor(node.arguments[0], literalName(node.arguments[1]), node.arguments[2]);
+        }
+        if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression) &&
+            node.expression.expression.text === 'Object' && node.expression.name.text === 'defineProperties' &&
+            node.arguments.length >= 2 && ts.isObjectLiteralExpression(unwrap(node.arguments[1]))) {
+          for (const property of unwrap(node.arguments[1]).properties) {
+            if (!ts.isPropertyAssignment(property)) continue;
+            const key = ts.isComputedPropertyName(property.name) ? literalName(property.name.expression) : property.name.text;
+            linkDescriptor(node.arguments[0], key, property.initializer);
+          }
+        }
+        if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression) &&
+            node.expression.expression.text === 'Object' && node.expression.name.text === 'assign' &&
+            node.arguments.length >= 2) {
+          for (const source of node.arguments.slice(1)) {
+            const value = unwrap(source);
+            if (!ts.isObjectLiteralExpression(value)) continue;
+            for (const property of value.properties) {
+              if (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) {
+                const name = property.name;
+                const key = ts.isComputedPropertyName(name) ? literalName(name.expression) : name.text;
+                linkAssignment(node.arguments[0], ts.isPropertyAssignment(property) ? property.initializer : name, [key]);
+              }
+            }
+          }
+        }
+      }
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
+          ts.isVariableDeclarationList(node.parent) && (node.parent.flags & ts.NodeFlags.Const)) {
+        const source = reference(node.initializer);
+        if (source) directAliases.push({ dest: node, ...source });
+      }
+      if (ts.isBindingElement(node) && ts.isIdentifier(node.name) && !node.dotDotDotToken) {
+        directBindings.push(node);
+      }
+      ts.forEachChild(node, scanWrites);
+    };
     // Choose literal object/array elements before falling back to a holder
     // property path, so a binding from [holder.root] aliases holder.root itself.
     const literalFor = (expression, seen) => {
@@ -339,6 +491,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         if (!binding || !ts.isVariableDeclaration(binding) || !binding.initializer ||
             !ts.isVariableDeclarationList(binding.parent) ||
             !(binding.parent.flags & ts.NodeFlags.Const) || seen.has(binding)) break;
+        if ([...(paths.get(binding)?.values() || [])].some(path => path.length === 1)) break;
         seen.add(binding);
         node = unwrap(binding.initializer);
       }
@@ -351,9 +504,18 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       return value && (ts.isVoidExpression(value) || ts.isIdentifier(value) &&
         value.text === 'undefined' && !localSymbol(value)?.declarations?.length);
     };
-    const definitelyDefined = expression => {
+    const definitelyDefined = (expression, seen = new Set()) => {
       const value = expression && unwrap(expression);
-      return value && (ts.isObjectLiteralExpression(value) ||
+      if (!value) return false;
+      if (ts.isIdentifier(value)) {
+        const binding = rootDeclaration(value);
+        if (binding && ts.isVariableDeclaration(binding) && binding.initializer &&
+            ts.isVariableDeclarationList(binding.parent) && (binding.parent.flags & ts.NodeFlags.Const) &&
+            !seen.has(binding)) {
+          return definitelyDefined(binding.initializer, new Set(seen).add(binding));
+        }
+      }
+      return (ts.isObjectLiteralExpression(value) ||
         ts.isArrayLiteralExpression(value) || ts.isClassExpression(value) ||
         ts.isFunctionExpression(value) || ts.isArrowFunction(value) ||
         ts.isNewExpression(value) || ts.isStringLiteral(value) ||
@@ -387,7 +549,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       } else return undefined;
       return selected && !definitelyUndefined(selected) ? selected : access.fallback;
     };
-    const spreadReferences = (expression, access, remaining = []) => {
+    const spreadReferences = (expression, access, remaining = [], values) => {
       const accesses = [access, ...remaining];
       const found = [], cache = new Map(), arrays = new Map(), lengths = new Map();
       const arrayLength = (source, seen = new Set()) => {
@@ -404,10 +566,28 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         lengths.set(value, length);
         return length;
       };
+      const arrayValue = (source, target, seen = new Set()) => {
+        const value = literalFor(source, new Set());
+        if (!ts.isArrayLiteralExpression(value) || seen.has(value)) return undefined;
+        const next = new Set(seen).add(value);
+        let offset = 0;
+        for (const item of value.elements) {
+          const size = ts.isSpreadElement(item) ? arrayLength(item.expression) : 1;
+          if (size === undefined) return undefined;
+          if (target < offset + size) {
+            return ts.isSpreadElement(item) ? arrayValue(item.expression, target - offset, next) :
+              ts.isOmittedExpression(item) ? undefined : item;
+          }
+          offset += size;
+        }
+        return undefined;
+      };
       const inspect = (source, seen, index = 0, arrayUnknown = false, arrayIndex) => {
         const origin = reference(source);
         if (index === accesses.length) {
           if (origin) found.push(origin);
+          else if (values && (ts.isObjectLiteralExpression(unwrap(source)) ||
+                   ts.isArrayLiteralExpression(unwrap(source)))) values.push(source);
           return { definite: true, possible: Boolean(origin), cyclic: false };
         }
         const access = accesses[index];
@@ -443,7 +623,8 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
                 offset++;
               }
             }
-            if (access.fallback) inspect(access.fallback, seen, index + 1);
+            const selected = !arrayUnknown && target !== undefined && arrayValue(value, target);
+            if (access.fallback && !definitelyDefined(selected)) inspect(access.fallback, seen, index + 1);
             if (origin) found.push({ ...origin, path: [...origin.path, ...suffix] });
             return { definite: false, possible: true, cyclic: false };
           }
@@ -524,19 +705,6 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         };
         if (i === origin.accesses.length) break;
         const access = origin.accesses[i];
-        // An unresolved selection may evaluate to undefined and use its
-        // default. Track both possibilities rather than dropping the alias.
-        if (access.fallback) {
-          const selected = selectLiteral(expression, access);
-          if (!selected || !definitelyDefined(selected)) {
-            const defaultRef = reference(access.fallback);
-            if (defaultRef) capture({
-              ...defaultRef,
-              path: [...defaultRef.path, ...origin.accesses.slice(i + 1).map(a =>
-                a.key === undefined ? unknownKey : a.key)],
-            });
-          }
-        }
         for (const spread of spreadReferences(expression, access, origin.accesses.slice(i + 1))) {
           capture(spread);
         }
@@ -565,6 +733,25 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         }
       }
     };
+    scanWrites(sf);
+    for (const binding of directBindings) {
+      for (const source of extractedAliases(binding)) directAliases.push({ dest: binding, ...source });
+    }
+    let directChanged = true;
+    while (directChanged) {
+      directChanged = false;
+      for (const alias of directAliases) {
+        for (const path of [...(paths.get(alias.dest)?.values() || [])]) {
+          directChanged = add(alias.declaration, [...alias.path, ...path]) || directChanged;
+        }
+        for (const path of [...(paths.get(alias.declaration)?.values() || [])]) {
+          if (path.length > alias.path.length && alias.path.every((key, i) =>
+            key === unknownKey || path[i] === unknownKey || key === path[i])) {
+            directChanged = add(alias.dest, path.slice(alias.path.length)) || directChanged;
+          }
+        }
+      }
+    }
     const visit = node => {
       if (ts.isBinaryExpression(node) && ts.isAssignmentOperator(node.operatorToken.kind)) {
         assignmentTargets(node.left);
@@ -650,6 +837,31 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
           for (const source of extractedAliases(binding, restKey)) {
             aliases.push({ dest: binding, destPath: [key], ...source, spread: false });
           }
+          changed = true;
+        }
+      }
+      for (const copy of arrayCopies) {
+        const keys = new Set();
+        const collect = path => {
+          if (pathCode(path) === universalPath) keys.add(unknownKey);
+          else if (path.length > copy.destPath.length && overlaps(path, copy.destPath)) {
+            keys.add(path[copy.destPath.length]);
+          }
+        };
+        for (const path of paths.get(copy.declaration)?.values() || []) collect(path);
+        for (const alias of aliases) {
+          if (alias.declaration === copy.declaration) collect(alias.path);
+          if (alias.dest === copy.declaration) collect(alias.destPath || []);
+        }
+        for (const key of keys) {
+          if (copy.processed.has(key)) continue;
+          copy.processed.add(key);
+          const access = { kind: 'array', key: key === unknownKey ? undefined : key };
+          const values = [];
+          for (const source of spreadReferences(copy.literal, access, [], values)) {
+            aliases.push({ dest: copy.declaration, destPath: [...copy.destPath, key], ...source, spread: false });
+          }
+          for (const value of values) copy.capture(value, [...copy.destPath, key]);
           changed = true;
         }
       }

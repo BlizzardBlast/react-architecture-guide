@@ -5493,3 +5493,78 @@ test('rest copies propagate reverse writes only through shared slots', () => {
     ),source+'\n'+result.errors.join('\n')));
   }
 });
+
+test('mutable spread sources and nested rest bindings preserve Worker mutations', () => {
+  const bindings = [
+    'const a=[other.root]; a.length=0; const [alias]=[...a,holder.root];',
+    'const a=[other.root]; a[0]=holder.root; const [alias]=[...a];',
+    'const a=[other.root]; Reflect.set(a,"0",holder.root); const [alias]=[...a];',
+    'const a=[other.root]; Object.assign(a,{0:holder.root}); const [alias]=[...a];',
+    'const a=[other.root]; Object.defineProperty(a,"0",{value:holder.root}); const [alias]=[...a];',
+    'const a=[other.root]; Reflect.defineProperty(a,"0",{value:holder.root}); const [alias]=[...a];',
+    'const a=[other.root]; Object.defineProperties(a,{0:{value:holder.root}}); const [alias]=[...a];',
+    'const a=[other.root]; ([a[0]]=[holder.root]); const [alias]=[...a];',
+    'const source={root:other.root}; ({root:source.root}={root:holder.root}); const {root:alias}={...source};',
+    'const a=[other.root]; const {box:b}={box:a}; b.length=0; const [alias]=[...a,holder.root];',
+    'const source={root:other.root}; source.root=holder.root; const {root:alias}={...source};',
+    'const source={root:{box:other.root}}; source.root={box:holder.root}; const {root:{box:alias}}={...source};',
+    'const source={root:{box:other.root}}; source.root={...{box:holder.root}}; const {root:{box:alias}}={...source};',
+    'const source={root:{box:other.root}}; const shared={box:holder.root}; source.root={...shared}; const {root:{box:alias}}={...source};',
+    'const a=[other.root]; a[0]={root:holder.root}; const [{root:alias}]=[...a];',
+    'const a=[[other.root]]; a[0]=[...[],holder.root]; const [[alias]]=[...a];',
+    'const a=[[other.root]]; a[0]=[...[],{root:holder.root}]; const [[{root:alias}]]=[...a];',
+    'const [first,...[alias]]=[0,holder.root];',
+    'const [first,...{0:alias}]=[0,holder.root];',
+    'const [first,...[{root:alias}]]=[0,{root:holder.root}];',
+    'const [first,...[...tail]]=[0,holder.root]; const alias=tail[0];',
+  ];
+  for (const binding of bindings) for (const extension of ['js','ts']) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+      'other={root:{Worker:LocalWorker}}; '+binding+
+      ' Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js");}';
+    const file='shared/ui/panel.'+extension, offset=source.indexOf('new holder.root.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+  for (const binding of [
+    'const a=[other.root]; const [alias]=[...a,holder.root]; Reflect.set(alias,"Worker",next);',
+    'const [first,...[alias]]=[0,other.root]; Reflect.set(alias,"Worker",next);',
+    'const [first,...[alias]]=[0,holder.root]; Reflect.set(alias,"status",next);',
+    'const source={root:{box:other.root}}; source.root={...{box:holder.root},box:other.root}; const {root:{box:alias}}={...source}; Reflect.set(alias,"Worker",next);',
+    'const a=[[other.root]]; a[0]=[...[],other.root,holder.root]; const [[alias]]=[...a]; Reflect.set(alias,"Worker",next);',
+  ]) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+      'other={root:{Worker:LocalWorker}}; '+binding+' new holder.root.Worker();}';
+    withFixture({'modules/orders/ui/panel.js':source},result=>assert.deepEqual(result.errors,[],source));
+  }
+});
+
+test('spread assignments and defaults retain exact Worker source selection', () => {
+  for (const binding of [
+    'const source={root:other.root}; ({root:source.root}={...{root:holder.root}}); const {root:alias}={...source};',
+    'const source={root:other.root}; const rhs={...{root:holder.root}}; ({root:source.root}=rhs); const {root:alias}={...source};',
+    'const source={root:other.root}; ([source.root]=[...[],holder.root]); const {root:alias}={...source};',
+    'const [alias=holder.root]=[...[],undefined];',
+  ]) for (const extension of ['js','ts']) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+      'other={root:{Worker:LocalWorker}}; '+binding+
+      ' Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js");}';
+    const file='shared/ui/panel.'+extension, offset=source.indexOf('new holder.root.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+  for (const binding of [
+    'const source={root:other.root}; ({root:source.root}={root:holder.root,...{root:other.root}}); const {root:alias}={...source};',
+    'const [alias=holder.root]=[...[],{Worker:LocalWorker}];',
+    'const local={Worker:LocalWorker}; const [alias=holder.root]=[...[],local];',
+    'const {box:[alias=holder.root]}={...{box:[...[],{Worker:LocalWorker}]}};',
+  ]) for (const extension of ['js','ts']) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+      'other={root:{Worker:LocalWorker}}; '+binding+
+      ' Reflect.set(alias,"Worker",next); new holder.root.Worker();}';
+    withFixture({['modules/orders/ui/panel.'+extension]:source},result=>
+      assert.deepEqual(result.errors,[],source));
+  }
+});
