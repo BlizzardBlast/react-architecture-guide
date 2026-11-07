@@ -157,13 +157,33 @@ function primitiveLocalBinding(identifier) {
 // This avoids conflating symbol provenance with import graph bookkeeping.
 // Destructured const values are binding elements, not variable declarations.
 // Resolve the statically inspectable source path for both provenance and writes.
-function constDestructuringOrigin(declaration) {
+function constDestructuringOrigin(declaration, restKey) {
   if (!ts.isBindingElement(declaration)) return undefined;
   const accesses = [];
   let element = declaration;
   while (ts.isBindingElement(element)) {
-    if (element.dotDotDotToken) return undefined;
     const pattern = element.parent;
+    if (element.dotDotDotToken) {
+      if (restKey === undefined) return undefined;
+      if (ts.isObjectBindingPattern(pattern)) {
+        const excluded = pattern.elements.some(other => {
+          if (other === element) return false;
+          const name = other.propertyName || other.name;
+          const actual = ts.isComputedPropertyName(name) ? name.expression : name;
+          return (ts.isStringLiteral(actual) || ts.isNumericLiteral(actual) ||
+            ts.isNoSubstitutionTemplateLiteral(actual) ||
+            !ts.isComputedPropertyName(name) && ts.isIdentifier(actual)) && actual.text === restKey;
+        });
+        if (excluded) return undefined;
+        accesses.unshift({ kind: 'object', key: restKey ?? undefined });
+      } else if (ts.isArrayBindingPattern(pattern)) {
+        if (restKey !== null && !/^(?:0|[1-9]\d*)$/.test(restKey)) return undefined;
+        accesses.unshift({ kind: 'array', key: restKey === null ? undefined :
+          String(pattern.elements.indexOf(element) + Number(restKey)) });
+      } else return undefined;
+      element = pattern.parent;
+      continue;
+    }
     if (ts.isObjectBindingPattern(pattern)) {
       const name = element.propertyName || element.name;
       const computed = ts.isComputedPropertyName(name);
@@ -368,10 +388,23 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       return selected && !definitelyUndefined(selected) ? selected : access.fallback;
     };
     const spreadReferences = (expression, access, remaining = []) => {
-      if (access.kind !== 'object') return [];
       const accesses = [access, ...remaining];
-      const found = [], cache = new Map(), arrays = new Map();
-      const inspect = (source, seen, index = 0, arrayUnknown = false) => {
+      const found = [], cache = new Map(), arrays = new Map(), lengths = new Map();
+      const arrayLength = (source, seen = new Set()) => {
+        const value = literalFor(source, new Set());
+        if (!ts.isArrayLiteralExpression(value) || seen.has(value)) return undefined;
+        if (lengths.has(value)) return lengths.get(value);
+        const next = new Set(seen).add(value);
+        let length = 0;
+        for (const item of value.elements) {
+          const size = ts.isSpreadElement(item) ? arrayLength(item.expression, next) : 1;
+          if (size === undefined) return undefined;
+          length = Math.min(Number.MAX_SAFE_INTEGER, length + size);
+        }
+        lengths.set(value, length);
+        return length;
+      };
+      const inspect = (source, seen, index = 0, arrayUnknown = false, arrayIndex) => {
         const origin = reference(source);
         if (index === accesses.length) {
           if (origin) found.push(origin);
@@ -381,24 +414,41 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         const key = access.key === undefined ? unknownKey : access.key;
         const suffix = accesses.slice(index).map(item => item.key === undefined ? unknownKey : item.key);
         if (arrayUnknown) suffix[0] = unknownKey;
+        else if (arrayIndex !== undefined) suffix[0] = String(arrayIndex);
         const value = literalFor(source, new Set());
         if (access.kind === 'array' && ts.isArrayLiteralExpression(value)) {
           const firstSpread = value.elements.findIndex(ts.isSpreadElement);
-          if (arrayUnknown || firstSpread !== -1 && Number(access.key) >= firstSpread) {
-            if (!arrays.has(index)) arrays.set(index, new Set());
-            if (arrays.get(index).has(value)) return { definite: false, possible: true, cyclic: false };
-            arrays.get(index).add(value);
+          const target = arrayIndex ?? (access.key === undefined ? undefined : Number(access.key));
+          if (arrayUnknown || target === undefined || firstSpread !== -1 && target >= firstSpread) {
+            if (!arrays.has(index)) arrays.set(index, new Map());
+            if (!arrays.get(index).has(value)) arrays.get(index).set(value, new Set());
+            const visited = arrays.get(index).get(value);
+            const selection = arrayUnknown || target === undefined ? '*' : target;
+            if (visited.has(selection)) return { definite: false, possible: true, cyclic: false };
+            visited.add(selection);
+            let offset = 0, exact = true;
             for (const item of value.elements) {
-              if (ts.isOmittedExpression(item)) continue;
-              if (ts.isSpreadElement(item)) inspect(item.expression, seen, index, true);
-              else inspect(item, seen, index + 1);
+              if (ts.isSpreadElement(item)) {
+                const size = arrayLength(item.expression);
+                if (size !== 0 && (arrayUnknown || target === undefined || target >= offset &&
+                    (!exact || size === undefined || target < offset + size))) {
+                  const unknown = arrayUnknown || target === undefined || !exact || size === undefined;
+                  inspect(item.expression, seen, index, unknown, unknown ? undefined : target - offset);
+                }
+                if (size === undefined) exact = false;
+                else offset += size;
+              } else {
+                if (!ts.isOmittedExpression(item) && (arrayUnknown || target === undefined ||
+                    target >= offset && (!exact || target === offset))) inspect(item, seen, index + 1);
+                offset++;
+              }
             }
             if (access.fallback) inspect(access.fallback, seen, index + 1);
             if (origin) found.push({ ...origin, path: [...origin.path, ...suffix] });
             return { definite: false, possible: true, cyclic: false };
           }
-          const selected = firstSpread === -1 ? selectLiteral(value, access) :
-            value.elements[Number(access.key)];
+          const selected = firstSpread === -1 && arrayIndex === undefined ? selectLiteral(value, access) :
+            value.elements[target];
           if (selected && !ts.isOmittedExpression(selected)) {
             inspect(selected, seen, index + 1);
             if (access.fallback && selected !== access.fallback && !definitelyDefined(selected)) {
@@ -455,8 +505,8 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       inspect(expression, new Set());
       return found;
     };
-    const extractedAliases = declaration => {
-      const origin = constDestructuringOrigin(declaration);
+    const extractedAliases = (declaration, restKey) => {
+      const origin = constDestructuringOrigin(declaration, restKey);
       if (!origin) return [];
       const found = new Map();
       const capture = item => {
@@ -500,9 +550,11 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       capture(reference(expression) || fallback);
       return [...found.values()];
     };
+    const restBindings = [];
     const recordDestructuredAliases = pattern => {
       if (ts.isBindingElement(pattern)) {
         if (ts.isIdentifier(pattern.name)) {
+          if (pattern.dotDotDotToken) { restBindings.push(pattern); return; }
           for (const source of extractedAliases(pattern)) {
             aliases.push({ dest: pattern, ...source, spread: false });
           }
@@ -562,6 +614,19 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       ts.forEachChild(node, visit);
     };
     visit(sf);
+    // Rest copies own slots; only references stored inside those slots are shared.
+    const restKeys = new Map(restBindings.map(binding => [binding, new Set()]));
+    const collectRestKeys = node => {
+      if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+        const item = reference(node);
+        if (item?.path.length && restKeys.has(item.declaration)) {
+          restKeys.get(item.declaration).add(item.path[0]);
+        }
+      }
+      ts.forEachChild(node, collectRestKeys);
+    };
+    collectRestKeys(sf);
+    const processedRestKeys = new Map(restBindings.map(binding => [binding, new Set()]));
     // A wildcard may occur on either side of an alias path comparison.
     // Spreads copy own top-level properties into a *different* object, while
     // the nested references under those properties remain shared.
@@ -574,6 +639,20 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
     let changed = true;
     while (changed) {
       changed = false;
+      for (const binding of restBindings) {
+        for (const path of paths.get(binding)?.values() || []) {
+          if (path.length) restKeys.get(binding).add(path[0]);
+        }
+        for (const key of restKeys.get(binding)) {
+          if (processedRestKeys.get(binding).has(key)) continue;
+          processedRestKeys.get(binding).add(key);
+          const restKey = key === unknownKey || key === universalKey ? null : key;
+          for (const source of extractedAliases(binding, restKey)) {
+            aliases.push({ dest: binding, destPath: [key], ...source, spread: false });
+          }
+          changed = true;
+        }
+      }
       for (const alias of aliases) {
         const destPath = alias.destPath || [];
         for (const path of [...(paths.get(alias.dest)?.values() || [])]) {

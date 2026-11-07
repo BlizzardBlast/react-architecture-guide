@@ -5429,3 +5429,67 @@ test('nested spread aliases propagate reverse Worker writes', () => {
     error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
   ),source+'\n'+result.errors.join('\n')));
 });
+
+test('array spreads and rest copies retain shared Worker references', () => {
+  const bindings = [
+    'const [alias]=[...[],holder.root]; Reflect.set(alias,"Worker",next);',
+    'const list=[...[],holder.root]; const [alias]=list; Reflect.set(alias,"Worker",next);',
+    'const {...copy}=holder; Reflect.set(copy.root,"Worker",next);',
+    'const {...copy}=holder; const wrap={copy}; Reflect.set(wrap.copy.root,"Worker",next);',
+    'const [first,...copy]=[0,holder.root]; Reflect.set(copy[0],"Worker",next);',
+    'const list=[0,holder.root]; const [first,...copy]=list; Reflect.set(copy[0],"Worker",next);',
+    'const [first,...copy]=[0,holder.root]; const key=0; Reflect.set(copy[key],"Worker",next);',
+    'const {box:{...copy}}={box:holder}; Reflect.set(copy.root,"Worker",next);',
+    'const {box:[...copy]}={box:[holder.root]}; Reflect.set(copy[0],"Worker",next);',
+  ];
+  for (const binding of bindings) for (const extension of ['js','ts']) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}}; '+
+      binding+' new holder.root.Worker("/private.js");}';
+    const file='shared/ui/panel.'+extension, offset=source.indexOf('new holder.root.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+  for (const binding of [
+    'const {...copy}=holder; Reflect.set(copy,"root",other.root);',
+    'const {root,...copy}=holder; Reflect.set(copy.root,"Worker",next);',
+    'const [first,...copy]=[holder.root,other.root]; Reflect.set(copy[0],"Worker",next);',
+    'const {box:[,alias]}={...{box:[holder.root,...[other.root]]}}; Reflect.set(alias,"Worker",next);',
+    'const {box:[alias]}={...{box:[...[],other.root,holder.root]}}; Reflect.set(alias,"Worker",next);',
+    'const {box:[alias]}={...{box:[...[other.root,holder.root]]}}; Reflect.set(alias,"Worker",next);',
+  ]) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}}; '+
+      'const other={root:{Worker:LocalWorker}}; '+binding+' new holder.root.Worker();}';
+    withFixture({'modules/orders/ui/panel.js':source},result=>assert.deepEqual(result.errors,[],source));
+  }
+});
+
+test('repeated array spreads keep Worker analysis bounded', () => {
+  const { spawnSync } = require('node:child_process');
+  let source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}}; '+
+    'const a0=[holder.root]; ';
+  for (let i=1; i<=24; i++) source+='const a'+i+'=[...a'+(i-1)+',...a'+(i-1)+']; ';
+  source+='const [alias]=a24; Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js");}';
+  const file='shared/ui/panel.js', offset=source.indexOf('new holder.root.Worker(');
+  const fixture=setup({[file]:source});
+  try {
+    const run=spawnSync(process.execPath,[path.join(__dirname,'check-boundaries.cjs'),fixture.root],
+      {encoding:'utf8',timeout:20000});
+    assert.equal(run.status,1,run.error?.message || run.stderr);
+    assert.ok(run.stderr.includes('unsupported-worker-entry: '+file+' at offset '+offset+';'),run.stderr);
+  } finally { fixture.cleanup(); }
+});
+
+test('rest copies propagate reverse writes only through shared slots', () => {
+  for (const binding of [
+    'const {...copy}=holder; new copy.root.Worker("/private.js");',
+    'const [first,...copy]=[0,holder.root]; new copy[0].Worker("/private.js");',
+  ]) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}}; '+
+      'Reflect.set(holder.root,"Worker",next); '+binding+'}';
+    const file='shared/ui/panel.js', offset=source.indexOf('new copy');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+});
