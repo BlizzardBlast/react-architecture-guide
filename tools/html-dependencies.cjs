@@ -22,7 +22,14 @@ const nativeResources = new Map([
   ['use', ['href', 'xlink:href']],
   ['feimage', ['href', 'xlink:href']],
 ]);
-const dangerousScheme = /^(?:javascript|vbscript|data:text\/html|data:image\/svg\+xml):/i;
+// Data URLs are not an ownership-verified source graph. Permit only passive
+// media in resource positions; never allow data navigation or active documents.
+const passiveDataMedia = /^data:(?:image\/(?:png|jpe?g|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon)|audio\/(?:mpeg|ogg|wav|x-wav)|video\/(?:mp4|webm)|font\/woff2?)(?:;[^,]*)?,/i;
+function unsafeEmbeddedUrl(spec, passiveResource) {
+  const normalized = spec.replace(/[\u0000-\u0020]/g, '');
+  return /^(?:javascript|vbscript):/i.test(normalized) ||
+    /^data:/i.test(normalized) && (!passiveResource || !passiveDataMedia.test(normalized));
+}
 
 function scanHtml(html) {
   const errors = [], references = [];
@@ -40,15 +47,14 @@ function scanHtml(html) {
       errors.push('unsupported-vite-html-url: missing, malformed or control-character URL');
       return;
     }
-    if (dangerousScheme.test(spec.replace(/[\u0000-\u0020]/g, ''))) {
-      errors.push('unsupported-vite-html-url: executable or active-content URL');
-      return;
-    }
-    // Executable stylesheets are dependency-bearing: an unchecked external
-    // CSS entry can import further CSS outside the verified ownership graph.
-    // Remote/data decorative media are separate from active stylesheets.
+    // Preserve the established stylesheet-specific diagnostic and reject any
+    // unchecked CSS source before applying the generic data-media policy.
     if (kind === 'stylesheet' && /^(?:https?:|data:|\/\/)/i.test(spec)) {
       errors.push('unsupported-vite-html-stylesheet: external or data stylesheet is not verified');
+      return;
+    }
+    if (unsafeEmbeddedUrl(spec, kind === 'asset')) {
+      errors.push('unsupported-vite-html-url: executable or active-content URL');
       return;
     }
     if (kind === 'script' && /^(?:https?:|data:|\/\/)/i.test(spec)) {
@@ -87,6 +93,10 @@ function scanHtml(html) {
     const tag = node.tagName?.toLowerCase();
     if (tag) {
       const attrs = new Map();
+      const rel = new Set(((node.attrs || []).find(a => a.name === 'rel')?.value || '')
+        .toLowerCase().split(/\s+/));
+      const preloadKind = ((node.attrs || []).find(a => a.name === 'as')?.value || '')
+        .toLowerCase();
       for (const attribute of node.attrs || []) {
         const key = (attribute.prefix ? attribute.prefix + ':' : '') + attribute.name.toLowerCase();
         attrs.set(key, attribute.value);
@@ -96,9 +106,14 @@ function scanHtml(html) {
         if (key === 'style' || key === 'srcdoc') {
           errors.push('unsupported-vite-html-inline: unchecked inline ' + key);
         }
-        if (urlAttributes.has(key) && dangerousScheme.test(
-          attribute.value.replace(/[\u0000-\u0020]/g, ''))) {
-          errors.push('unsupported-vite-html-url: executable URL in ' + key);
+        // A passive data image is acceptable in a resource, but not in a
+        // navigation or form destination. parse5 has already decoded entities.
+        const isResource = (nativeResources.get(tag) || []).includes(key) ||
+          tag === 'link' && key === 'href' &&
+          (rel.has('icon') || rel.has('apple-touch-icon') ||
+            rel.has('preload') && ['image', 'audio', 'video', 'font'].includes(preloadKind));
+        if (urlAttributes.has(key) && unsafeEmbeddedUrl(attribute.value, isResource)) {
+          errors.push('unsupported-vite-html-url: executable or unsupported data URL in ' + key);
         }
       }
       if (tag === 'style' || tag === 'noscript') {
