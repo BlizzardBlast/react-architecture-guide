@@ -5626,3 +5626,67 @@ test('Object.assign tracks array sources and sparse overwrites', () => {
     withFixture({'modules/orders/ui/panel.js':source},result=>assert.deepEqual(result.errors,[],source));
   }
 });
+
+test('spread arguments and inherited descriptors retain Worker aliases', () => {
+  for (const binding of [
+    'Object.assign(source,...[{root:holder.root}]);',
+    'const entries=[{root:holder.root}]; Object.assign(source,...entries);',
+    'const entries=[{root:other.root}]; entries[0]={root:holder.root}; Object.assign(source,...entries);',
+    'const entries=[{root:other.root}]; entries[0].root=holder.root; Object.assign(source,...entries);',
+    'Object.defineProperty(source,"root",{__proto__:{value:holder.root}});',
+    'Object.defineProperty(source,"root",{__proto__:{__proto__:{value:holder.root}}});',
+    'const proto={value:holder.root}; const desc={__proto__:proto}; Reflect.defineProperty(source,"root",desc);',
+    'Object.defineProperties(source,{root:{__proto__:{value:holder.root}}});',
+  ]) for (const extension of ['js','ts']) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+      'other={root:{Worker:LocalWorker}},source={root:other.root}; '+binding+
+      ' const {root:alias}={...source}; Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js");}';
+    const file='shared/ui/panel.'+extension, offset=source.indexOf('new holder.root.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+  for (const binding of [
+    'Object.assign(source,...[{root:holder.root}],{root:other.root});',
+    'const entries=[{root:other.root}]; entries[0]={root:holder.root}; Object.assign(source,...entries,{root:other.root});',
+    'Object.defineProperty(source,"root",{__proto__:{value:holder.root},value:other.root});',
+  ]) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+      'other={root:{Worker:LocalWorker}},source={root:other.root}; '+binding+
+      ' const {root:alias}={...source}; Reflect.set(alias,"Worker",next); new holder.root.Worker();}';
+    withFixture({'modules/orders/ui/panel.js':source},result=>assert.deepEqual(result.errors,[],source));
+  }
+});
+
+test('Object.assign treats undefined array entries as present and holes as absent', () => {
+  for (const value of ['undefined','void 0','...[,]']) for (const extension of ['js','ts']) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+      'other={root:{Worker:LocalWorker}},source=[other.root]; Object.assign(source,[holder.root],['+value+']);'+
+      ' const [alias=other.root]=source; Reflect.set(alias,"Worker",next); new holder.root.Worker();}';
+    withFixture({['modules/orders/ui/panel.'+extension]:source},result=>assert.deepEqual(result.errors,[],source));
+  }
+  const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+    'other={root:{Worker:LocalWorker}},source=[other.root]; Object.assign(source,[holder.root],[,]);'+
+    ' const [alias=other.root]=source; Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js");}';
+  const file='shared/ui/panel.js', offset=source.indexOf('new holder.root.Worker(');
+  withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+    error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+  ),source+'\n'+result.errors.join('\n')));
+});
+
+test('repeated argument spreads keep Object.assign analysis bounded', () => {
+  const { spawnSync } = require('node:child_process');
+  let source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+    'source={root:{Worker:LocalWorker}}; const a0=[{root:holder.root}]; ';
+  for (let i=1; i<=20; i++) source+='const a'+i+'=[...a'+(i-1)+',...a'+(i-1)+']; ';
+  source+='Object.assign(source,...a20); const {root:alias}={...source}; '+
+    'Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js");}';
+  const file='shared/ui/panel.js', offset=source.indexOf('new holder.root.Worker(');
+  const fixture=setup({[file]:source});
+  try {
+    const run=spawnSync(process.execPath,[path.join(__dirname,'check-boundaries.cjs'),fixture.root],
+      {encoding:'utf8',timeout:20000});
+    assert.equal(run.status,1,run.error?.message || run.stderr);
+    assert.ok(run.stderr.includes('unsupported-worker-entry: '+file+' at offset '+offset+';'),run.stderr);
+  } finally { fixture.cleanup(); }
+});

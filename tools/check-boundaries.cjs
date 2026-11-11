@@ -417,7 +417,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       const dest = reference(target);
       if (!dest) return;
       const values = [];
-      for (const source of spreadReferences(descriptor, { kind: 'object', key: 'value' }, [], values)) {
+      for (const source of spreadReferences(descriptor, { kind: 'object', key: 'value' }, [], values, false, true)) {
         aliases.push({ dest: dest.declaration, destPath: [...dest.path, key], ...source, spread: false });
       }
       for (const value of values) linkAssignment(target, value, [key]);
@@ -460,9 +460,8 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
             node.expression.expression.text === 'Object' && node.expression.name.text === 'assign' &&
             node.arguments.length >= 2) {
           const dest = reference(node.arguments[0]);
-          if (dest) objectCopies.push({ ...dest,
-            initializer: ts.factory.createObjectLiteralExpression(node.arguments.slice(1).map(source =>
-              ts.factory.createSpreadAssignment(source))), target: node.arguments[0], processed: new Set() });
+          if (dest) objectCopies.push({ ...dest, arguments: node.arguments.slice(1),
+            target: node.arguments[0], processed: new Set() });
         }
       }
       if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
@@ -542,7 +541,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       } else return undefined;
       return selected && !definitelyUndefined(selected) ? selected : access.fallback;
     };
-    const spreadReferences = (expression, access, remaining = [], values, includeReferences = false) => {
+    const spreadReferences = (expression, access, remaining = [], values, includeReferences = false, followPrototype = false) => {
       const accesses = [access, ...remaining];
       const found = [], cache = new Map(), arrays = new Map(), lengths = new Map();
       const arrayLength = (source, seen = new Set()) => {
@@ -559,7 +558,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         lengths.set(value, length);
         return length;
       };
-      const arrayValue = (source, target, seen = new Set()) => {
+      const arrayValue = (source, target, seen = new Set(), throughSpread = false) => {
         const value = literalFor(source, new Set());
         if (!ts.isArrayLiteralExpression(value) || seen.has(value)) return undefined;
         const next = new Set(seen).add(value);
@@ -568,8 +567,8 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
           const size = ts.isSpreadElement(item) ? arrayLength(item.expression) : 1;
           if (size === undefined) return undefined;
           if (target < offset + size) {
-            return ts.isSpreadElement(item) ? arrayValue(item.expression, target - offset, next) :
-              ts.isOmittedExpression(item) ? undefined : item;
+            return ts.isSpreadElement(item) ? arrayValue(item.expression, target - offset, next, true) :
+              ts.isOmittedExpression(item) && !throughSpread ? undefined : item;
           }
           offset += size;
         }
@@ -589,6 +588,12 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         const suffix = accesses.slice(index).map(item => item.key === undefined ? unknownKey : item.key);
         if (arrayUnknown) suffix[0] = unknownKey;
         else if (arrayIndex !== undefined) suffix[0] = String(arrayIndex);
+        const raw = unwrap(source);
+        if (ts.isSpreadElement(raw)) {
+          const sequence = reference(raw.expression);
+          if (sequence) found.push({ ...sequence, path: [...sequence.path, unknownKey, ...suffix] });
+          return { definite: false, possible: Boolean(sequence), cyclic: false };
+        }
         const value = literalFor(source, new Set());
         const arrayObject = access.kind === 'object' &&
           (key === unknownKey || /^(?:0|[1-9]\d*)$/.test(key));
@@ -626,7 +631,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
             if (origin && possible) found.push({ ...origin, path: [...origin.path, ...suffix] });
             return { definite: arrayObject && certain && Boolean(selected), possible, cyclic: false };
           }
-          const selected = firstSpread === -1 && arrayIndex === undefined ?
+          const selected = firstSpread === -1 && arrayIndex === undefined && !arrayObject ?
             selectLiteral(value, { ...access, kind: 'array' }) :
             value.elements[target];
           if (selected && !ts.isOmittedExpression(selected)) {
@@ -638,7 +643,8 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
             if (access.fallback) inspect(access.fallback, seen, index + 1);
             if (origin) found.push({ ...origin, path: [...origin.path, ...suffix] });
           }
-          return { definite: Boolean(selected), possible: Boolean(selected || origin), cyclic: false };
+          const present = Boolean(selected && !ts.isOmittedExpression(selected));
+          return { definite: present, possible: Boolean(present || origin), cyclic: false };
         }
         if (!ts.isObjectLiteralExpression(value) || seen.has(value)) {
           if (access.fallback) inspect(access.fallback, seen, index + 1);
@@ -673,6 +679,16 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
             inspect(access.fallback, nextSeen, index + 1);
           }
           definite = key !== unknownKey && name !== unknownKey;
+        }
+        if (followPrototype && !definite) {
+          const prototype = value.properties.find(property => ts.isPropertyAssignment(property) &&
+            !ts.isComputedPropertyName(property.name) && property.name.text === '__proto__');
+          if (prototype) {
+            const result = inspect(prototype.initializer, nextSeen, index);
+            definite = result.definite;
+            possible ||= result.possible;
+            cyclic ||= result.cyclic;
+          }
         }
         if (access.fallback && !definite) inspect(access.fallback, nextSeen, index + 1);
         if (origin && possible) found.push({ ...origin, path: [...origin.path, ...suffix] });
@@ -733,6 +749,29 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       }
     };
     scanWrites(sf);
+    const assignGroups = new Map();
+    const assignSources = (argumentsList, seen = new Set()) => {
+      const properties = [];
+      for (const argument of argumentsList) {
+        if (!ts.isSpreadElement(argument)) {
+          properties.push(ts.factory.createSpreadAssignment(argument));
+          continue;
+        }
+        const array = literalFor(argument.expression, new Set());
+        const origin = reference(argument.expression);
+        const mutated = origin && [...(paths.get(origin.declaration)?.values() || [])].some(path =>
+          pathCode(path) === universalPath || path.slice(0, origin.path.length).every((key, i) =>
+            key === unknownKey || origin.path[i] === unknownKey || key === origin.path[i]));
+        if (mutated || !ts.isArrayLiteralExpression(array) || seen.has(array)) {
+          properties.push(ts.factory.createSpreadAssignment(argument));
+          continue;
+        }
+        if (!assignGroups.has(array)) assignGroups.set(array,
+          assignSources(array.elements.filter(item => !ts.isOmittedExpression(item)), new Set(seen).add(array)));
+        properties.push(ts.factory.createSpreadAssignment(assignGroups.get(array)));
+      }
+      return ts.factory.createObjectLiteralExpression(properties);
+    };
     for (const copy of descriptorCopies) linkDescriptor(copy.target, copy.key, copy.descriptor);
     for (const binding of directBindings) {
       for (const source of extractedAliases(binding)) directAliases.push({ dest: binding, ...source });
@@ -751,6 +790,9 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
           }
         }
       }
+    }
+    for (const copy of objectCopies) if (copy.arguments) {
+      copy.initializer = assignSources(copy.arguments);
     }
     const visit = node => {
       if (ts.isBinaryExpression(node) && ts.isAssignmentOperator(node.operatorToken.kind)) {
