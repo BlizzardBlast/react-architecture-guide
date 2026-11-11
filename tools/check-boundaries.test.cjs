@@ -5568,3 +5568,61 @@ test('spread assignments and defaults retain exact Worker source selection', () 
       assert.deepEqual(result.errors,[],source));
   }
 });
+
+test('reflective writes track selected object values and overwrite order', () => {
+  const bindings = [
+    'Object.assign(source,{...{root:holder.root}});',
+    'const rhs={root:holder.root}; Object.assign(source,rhs);',
+    'Object.assign(source,{root:holder.root},{status:1});',
+    'Object.defineProperty(source,"root",{...{value:holder.root}});',
+    'Reflect.defineProperty(source,"root",{...{value:holder.root}});',
+    'Object.defineProperties(source,{...{root:{value:holder.root}}});',
+    'const defs={root:{value:holder.root}}; Object.defineProperties(source,defs);',
+  ];
+  for (const binding of bindings) for (const extension of ['js','ts']) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+      'other={root:{Worker:LocalWorker}},source={root:other.root}; '+binding+
+      ' const {root:alias}={...source}; Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js");}';
+    const file='shared/ui/panel.'+extension, offset=source.indexOf('new holder.root.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+  for (const binding of [
+    'Object.assign(source,{root:holder.root},{root:other.root});',
+    'Object.assign(source,{root:holder.root,...{root:other.root}});',
+    'Object.defineProperty(source,"root",{value:holder.root,...{value:other.root}});',
+    'Object.defineProperties(source,{root:{value:holder.root},...{root:{value:other.root}}});',
+  ]) for (const extension of ['js','ts']) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+      'other={root:{Worker:LocalWorker}},source={root:other.root}; '+binding+
+      ' const {root:alias}={...source}; Reflect.set(alias,"Worker",next); new holder.root.Worker();}';
+    withFixture({['modules/orders/ui/panel.'+extension]:source},result=>
+      assert.deepEqual(result.errors,[],source));
+  }
+});
+
+test('Object.assign tracks array sources and sparse overwrites', () => {
+  for (const binding of [
+    'Object.assign(source,[holder.root]);',
+    'Object.assign(source,[holder.root],[,]);',
+  ]) for (const extension of ['js','ts']) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+      'other={root:{Worker:LocalWorker}},source=[other.root]; '+binding+
+      ' const [alias]=source; Reflect.set(alias,"Worker",next); new holder.root.Worker("/private.js");}';
+    const file='shared/ui/panel.'+extension, offset=source.indexOf('new holder.root.Worker(');
+    withFixture({[file]:source},result=>assert.ok(result.errors.some(error=>
+      error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';')
+    ),source+'\n'+result.errors.join('\n')));
+  }
+  for (const binding of [
+    'Object.assign(source,[holder.root],[other.root]);',
+    'Object.assign(source,[holder.root],[...[],other.root]);',
+    'Object.assign(source,[holder.root],{0:other.root});',
+  ]) {
+    const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+      'other={root:{Worker:LocalWorker}},source=[other.root]; '+binding+
+      ' const [alias]=source; Reflect.set(alias,"Worker",next); new holder.root.Worker();}';
+    withFixture({'modules/orders/ui/panel.js':source},result=>assert.deepEqual(result.errors,[],source));
+  }
+});

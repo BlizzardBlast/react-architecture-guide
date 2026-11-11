@@ -332,7 +332,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         record(target, [unknownKey]);
       }
     };
-    const arrayCopies = [];
+    const arrayCopies = [], objectCopies = [], descriptorCopies = [];
     const linkAssignment = (target, value, suffix = []) => {
       const dest = reference(target);
       if (!dest || !value || !dest.path.length && !suffix.length) return;
@@ -414,11 +414,13 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       } else linkAssignment(left, right);
     };
     const linkDescriptor = (target, key, descriptor) => {
-      const value = unwrap(descriptor);
-      if (!ts.isObjectLiteralExpression(value)) return;
-      const entry = value.properties.findLast(property => ts.isPropertyAssignment(property) &&
-        !ts.isComputedPropertyName(property.name) && property.name.text === 'value');
-      if (entry) linkAssignment(target, entry.initializer, [key]);
+      const dest = reference(target);
+      if (!dest) return;
+      const values = [];
+      for (const source of spreadReferences(descriptor, { kind: 'object', key: 'value' }, [], values)) {
+        aliases.push({ dest: dest.declaration, destPath: [...dest.path, key], ...source, spread: false });
+      }
+      for (const value of values) linkAssignment(target, value, [key]);
     };
     // Gather writes before resolving literal sources, including writes later in the file.
     const directAliases = [];
@@ -445,31 +447,22 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression) &&
             ['Object', 'Reflect'].includes(node.expression.expression.text) &&
             node.expression.name.text === 'defineProperty' && node.arguments.length >= 3) {
-          linkDescriptor(node.arguments[0], literalName(node.arguments[1]), node.arguments[2]);
+          descriptorCopies.push({ target: node.arguments[0], key: literalName(node.arguments[1]), descriptor: node.arguments[2] });
         }
         if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression) &&
             node.expression.expression.text === 'Object' && node.expression.name.text === 'defineProperties' &&
-            node.arguments.length >= 2 && ts.isObjectLiteralExpression(unwrap(node.arguments[1]))) {
-          for (const property of unwrap(node.arguments[1]).properties) {
-            if (!ts.isPropertyAssignment(property)) continue;
-            const key = ts.isComputedPropertyName(property.name) ? literalName(property.name.expression) : property.name.text;
-            linkDescriptor(node.arguments[0], key, property.initializer);
-          }
+            node.arguments.length >= 2) {
+          const dest = reference(node.arguments[0]);
+          if (dest) objectCopies.push({ ...dest, initializer: node.arguments[1], target: node.arguments[0],
+            descriptors: true, processed: new Set() });
         }
         if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression) &&
             node.expression.expression.text === 'Object' && node.expression.name.text === 'assign' &&
             node.arguments.length >= 2) {
-          for (const source of node.arguments.slice(1)) {
-            const value = unwrap(source);
-            if (!ts.isObjectLiteralExpression(value)) continue;
-            for (const property of value.properties) {
-              if (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) {
-                const name = property.name;
-                const key = ts.isComputedPropertyName(name) ? literalName(name.expression) : name.text;
-                linkAssignment(node.arguments[0], ts.isPropertyAssignment(property) ? property.initializer : name, [key]);
-              }
-            }
-          }
+          const dest = reference(node.arguments[0]);
+          if (dest) objectCopies.push({ ...dest,
+            initializer: ts.factory.createObjectLiteralExpression(node.arguments.slice(1).map(source =>
+              ts.factory.createSpreadAssignment(source))), target: node.arguments[0], processed: new Set() });
         }
       }
       if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
@@ -549,7 +542,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       } else return undefined;
       return selected && !definitelyUndefined(selected) ? selected : access.fallback;
     };
-    const spreadReferences = (expression, access, remaining = [], values) => {
+    const spreadReferences = (expression, access, remaining = [], values, includeReferences = false) => {
       const accesses = [access, ...remaining];
       const found = [], cache = new Map(), arrays = new Map(), lengths = new Map();
       const arrayLength = (source, seen = new Set()) => {
@@ -586,6 +579,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         const origin = reference(source);
         if (index === accesses.length) {
           if (origin) found.push(origin);
+          if (origin && values && includeReferences) values.push(source);
           else if (values && (ts.isObjectLiteralExpression(unwrap(source)) ||
                    ts.isArrayLiteralExpression(unwrap(source)))) values.push(source);
           return { definite: true, possible: Boolean(origin), cyclic: false };
@@ -596,7 +590,9 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         if (arrayUnknown) suffix[0] = unknownKey;
         else if (arrayIndex !== undefined) suffix[0] = String(arrayIndex);
         const value = literalFor(source, new Set());
-        if (access.kind === 'array' && ts.isArrayLiteralExpression(value)) {
+        const arrayObject = access.kind === 'object' &&
+          (key === unknownKey || /^(?:0|[1-9]\d*)$/.test(key));
+        if ((access.kind === 'array' || arrayObject) && ts.isArrayLiteralExpression(value)) {
           const firstSpread = value.elements.findIndex(ts.isSpreadElement);
           const target = arrayIndex ?? (access.key === undefined ? undefined : Number(access.key));
           if (arrayUnknown || target === undefined || firstSpread !== -1 && target >= firstSpread) {
@@ -625,10 +621,13 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
             }
             const selected = !arrayUnknown && target !== undefined && arrayValue(value, target);
             if (access.fallback && !definitelyDefined(selected)) inspect(access.fallback, seen, index + 1);
-            if (origin) found.push({ ...origin, path: [...origin.path, ...suffix] });
-            return { definite: false, possible: true, cyclic: false };
+            const certain = !arrayUnknown && target !== undefined && arrayLength(value) !== undefined;
+            const possible = !arrayObject || !certain || Boolean(selected);
+            if (origin && possible) found.push({ ...origin, path: [...origin.path, ...suffix] });
+            return { definite: arrayObject && certain && Boolean(selected), possible, cyclic: false };
           }
-          const selected = firstSpread === -1 && arrayIndex === undefined ? selectLiteral(value, access) :
+          const selected = firstSpread === -1 && arrayIndex === undefined ?
+            selectLiteral(value, { ...access, kind: 'array' }) :
             value.elements[target];
           if (selected && !ts.isOmittedExpression(selected)) {
             inspect(selected, seen, index + 1);
@@ -734,6 +733,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
       }
     };
     scanWrites(sf);
+    for (const copy of descriptorCopies) linkDescriptor(copy.target, copy.key, copy.descriptor);
     for (const binding of directBindings) {
       for (const source of extractedAliases(binding)) directAliases.push({ dest: binding, ...source });
     }
@@ -862,6 +862,38 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
             aliases.push({ dest: copy.declaration, destPath: [...copy.destPath, key], ...source, spread: false });
           }
           for (const value of values) copy.capture(value, [...copy.destPath, key]);
+          changed = true;
+        }
+      }
+      for (const copy of objectCopies) {
+        const keys = new Set();
+        const collect = path => {
+          if (pathCode(path) === universalPath) keys.add(unknownKey);
+          else if (path.length > copy.path.length + 1 && overlaps(path, copy.path)) {
+            keys.add(path[copy.path.length]);
+          }
+        };
+        for (const path of paths.get(copy.declaration)?.values() || []) collect(path);
+        for (const alias of aliases) {
+          if (alias.declaration === copy.declaration && alias.path.length > copy.path.length &&
+              overlaps(alias.path, copy.path)) keys.add(alias.path[copy.path.length]);
+          if (alias.dest === copy.declaration && (alias.destPath || []).length > copy.path.length &&
+              overlaps(alias.destPath, copy.path)) keys.add(alias.destPath[copy.path.length]);
+        }
+        for (const key of keys) {
+          if (copy.processed.has(key)) continue;
+          copy.processed.add(key);
+          const values = [];
+          const sources = spreadReferences(copy.initializer, {
+            kind: 'object', key: key === unknownKey ? undefined : key,
+          }, [], values, copy.descriptors);
+          if (!copy.descriptors) for (const source of sources) {
+            aliases.push({ dest: copy.declaration, destPath: [...copy.path, key], ...source, spread: false });
+          }
+          for (const value of values) {
+            if (copy.descriptors) linkDescriptor(copy.target, key, value);
+            else linkAssignment(copy.target, value, [key]);
+          }
           changed = true;
         }
       }
