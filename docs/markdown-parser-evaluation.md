@@ -28,14 +28,14 @@ The earlier failure counts describe the earlier candidate snapshots. Passing the
 
 | Finding | Reproduction and impact | Required follow-up |
 | --- | --- | --- |
-| CR-P1-004: malformed URL escape is accepted | Create a local file named `exists%ZZ.md` and inspect `[x](exists%ZZ.md)`. The current validator reports invalid URL encoding; the candidate reports no issue. The same result occurs for an image and a reference definition. A properly escaped `%25ZZ` control is accepted by both. markdown-it normalizes the bad escape before the candidate calls `decodeURIComponent`. | Validate the original destination spelling before normalization, while preserving valid escapes and existing link/reference behavior. |
-| CR-P2-005: quote-depth transition hides a fence error | With `> - ~~~`, `>   code`, then `> > - [bad](missing.md)` on successive lines, the current validator reports both an unclosed fence and the missing link. The candidate reports only the missing link. A sibling item at the original quote depth still produces the unclosed-fence diagnostic. | Preserve fence state when quote depth changes and test both transitions and valid closures. |
+| malformed URL escape is accepted | Create a local file named `exists%ZZ.md` and inspect `[x](exists%ZZ.md)`. The current validator reports invalid URL encoding; the candidate reports no issue. The same result occurs for an image and a reference definition. A properly escaped `%25ZZ` control is accepted by both. markdown-it normalizes the bad escape before the candidate calls `decodeURIComponent`. | Validate the original destination spelling before normalization, while preserving valid escapes and existing link/reference behavior. |
+| quote-depth transition hides a fence error | With `> - ~~~`, `>   code`, then `> > - [bad](missing.md)` on successive lines, the current validator reports both an unclosed fence and the missing link. The candidate reports only the missing link. A sibling item at the original quote depth still produces the unclosed-fence diagnostic. | Preserve fence state when quote depth changes and test both transitions and valid closures. |
 
 The candidate overrides markdown-it's inline parser and accesses its private `__rules__` array. This creates a maintenance dependency on parser internals in addition to the handwritten fence visibility pass; review that design before considering adoption. Registry metadata for `markdown-it` 15.0.3 lists the MIT license and six direct dependencies. Its temporary resolved dependency tree had no npm audit findings in this run; this does not certify future versions. No parser dependency or lockfile was added to the repository.
 
 On Windows with Node 22.15.1, all 140 existing candidate and rendering tests passed. The previously recorded Node 24.22.0 run also passed those tests. The advertised Node 22.13 minimum, other operating systems, and complete CommonMark/GFM conformance were not tested. These results do not supersede the two reproduced failures above, and no CI was run for this review.
 
-### Remediation of CR-P1-004 and CR-P2-005 — 2026-10-29
+### Compatibility fixes — 2026-10-29
 
 The experimental adapter preserves malformed path escapes before markdown-it normalizes a destination, allowing its existing URL check to reject them. It also retains an unclosed-fence diagnostic when a following list item changes blockquote depth. Regression tests cover malformed links, images and reference definitions; valid escaped filenames and query strings; increasing and decreasing quote depth; and a valid closing fence. A separate comparison against the current validator checked those cases, a filename with an encoded space, an external URL and a link after exiting the list.
 
@@ -45,7 +45,7 @@ Both findings are resolved for these tested cases. All **142 candidate, existing
 
 **Decision: retain the current validator and stop developing this adapter as a replacement.** The latest candidate passed its 142 existing tests on Node 24.22.0, but a broader bounded comparison found a broken-link detection regression. This decision applies to this adapter, not to every maintained Markdown parser.
 
-CR-P1-006: the candidate's list-fence masking can hide a real link. For the following input, the current validator reports `missing local link: missing.md` on line 4; the candidate instead reports an unclosed fence on line 3 and misses the link. Both markdown-it and the independent `commonmark` renderer render the link. The invariant is that a rendered local link remains subject to existence and containment checks.
+the candidate's list-fence masking can hide a real link. For the following input, the current validator reports `missing local link: missing.md` on line 4; the candidate instead reports an unclosed fence on line 3 and misses the link. Both markdown-it and the independent `commonmark` renderer render the link. The invariant is that a rendered local link remains subject to existence and containment checks.
 
 ~~~~markdown
 1. ~~~
@@ -54,7 +54,7 @@ CR-P1-006: the candidate's list-fence masking can hide a real link. For the foll
 [bad](missing.md)
 ~~~~
 
-The targeted comparison covered 88 combinations of links, references, comments and code across plain text, quotes, lists and fences; the candidate and current validator returned the same diagnostics for those cases. A separate 52-case fence/container comparison found 12 differing outputs, including CR-P1-006; not every difference was classified as a defect. These are samples, not exhaustive conformance results.
+The targeted comparison covered 88 combinations of links, references, comments and code across plain text, quotes, lists and fences; the candidate and current validator returned the same diagnostics for those cases. A separate 52-case fence/container comparison found 12 differing outputs, including the example above; not every difference was classified as a defect. These are samples, not exhaustive conformance results.
 
 The prototype is shorter than the current validator, but its behavior depends on an overridden inline parser, markdown-it's private `__rules__` storage, and a handwritten preprocessing pass that parses each document twice. Repeated additions to preserve the existing conservative checks have not yet produced equivalent behavior. It also has no command-line entry point, while `npm run test:docs` and the Python wrapper execute the production checker directly. Production adoption would require those contracts, a pinned dependency and lockfile, full verification and independent compatibility evidence. Those requirements do not justify continuing this particular adapter without a new, demonstrated need.
 
@@ -80,7 +80,7 @@ finally { Pop-Location }
 
 ## Scope and baseline
 
-The source baseline was `86a61a946920ad6f39c1e0fea6ec105654a65efb` on Windows with Node 24.22.0. The separately modified checkout verification record was preserved. The existing [`validate-docs.cjs`](../tools/validate-docs.cjs) and its Python wrapper remain unchanged. The baseline suite passed 123 of 123 tests.
+The source baseline was `86a61a946920ad6f39c1e0fea6ec105654a65efb` on Windows with Node 24.22.0. The existing [`validate-docs.cjs`](../tools/validate-docs.cjs) and its Python wrapper remain unchanged. The baseline suite passed 123 of 123 tests.
 
 The candidate was `markdown-it` 15.0.3 (MIT), installed only in a temporary directory, with the already-used `parse5` 8.0.1 for inspecting rendered HTML. The candidate's default parser had HTML enabled; this is not a claim of complete GitHub Flavored Markdown compatibility. No dependency or lockfile was added to the repository. The temporary dependency audit reported zero vulnerabilities at the time of the run.
 
@@ -90,9 +90,9 @@ The [probe adapter](../experiments/markdown-parser/validate-docs.cjs) checks tok
 
 | Review finding | Evidence and consequence | Disposition |
 | --- | --- | --- |
-| CR-P1-001: unresolved explicit references | `[Missing][ref]` becomes plain text in the parser token stream. The adapter misses the existing missing-reference diagnostic. | Unresolved in the adapter; the replacement was not adopted. |
-| CR-P2-002: diagnostic line locations | Inline tokens can cover multiple source lines; the probe uses their block start, and assigns references line 1. Existing tests detect incorrect locations. | Unresolved in the adapter; source mapping would need a separately verified implementation. |
-| CR-P2-003: fence and comment policy | The adapter reports an additional unclosed fence when a list container ends. For `<!-- ` followed by a backtick-wrapped `-->` and a same-line Markdown link, the current validator checks the tail, while markdown-it renders the line as an HTML block and produces no link token. | Unresolved in the adapter; reconcile conservative lint policy with rendering before replacement. |
+| unresolved explicit references | `[Missing][ref]` becomes plain text in the parser token stream. The adapter misses the existing missing-reference diagnostic. | Unresolved in the adapter; the replacement was not adopted. |
+| diagnostic line locations | Inline tokens can cover multiple source lines; the probe uses their block start, and assigns references line 1. Existing tests detect incorrect locations. | Unresolved in the adapter; source mapping would need a separately verified implementation. |
+| fence and comment policy | The adapter reports an additional unclosed fence when a list container ends. For `<!-- ` followed by a backtick-wrapped `-->` and a same-line Markdown link, the current validator checks the tail, while markdown-it renders the line as an HTML block and produces no link token. | Unresolved in the adapter; reconcile conservative lint policy with rendering before replacement. |
 
 The [rendered-link probe](../experiments/markdown-parser/render-parity.cjs) passed nine cases: inline links, images, preceding and forward references, inline code, a comment block, a list, a table, and a same-line block-comment tail. It compared markdown-it's token output with its own rendered HTML parsed by parse5. This is a small consistency check, not an independent CommonMark/GFM conformance test; renderer behavior can differ from the current validator's intentionally conservative diagnostics.
 

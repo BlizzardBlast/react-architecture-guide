@@ -80,6 +80,37 @@ test('executable HTML and inline styling fail closed', () => {
   }
 });
 
+test('active data URLs are rejected while ordinary image data remains allowed', () => {
+  for (const url of [
+    'data:text/html,<script>alert(1)</script>',
+    'DATA:text/html;charset=utf-8,%3Cscript%3E',
+    'data:image/svg+xml,<svg/>',
+    'data:image/svg+xml;base64,PHN2Zy8+',
+    'data:application/xhtml+xml,<html/>',
+    'data:application/xhtml+xml;charset=utf-8,%3Chtml%3E',
+    'data:application/xml,<script/>',
+    'data:text/plain,<b>text</b>',
+  ]) {
+    for (const tag of ['<a href="URL">open</a>', '<img src="URL" alt="">']) {
+      assert.match(scanHtml(tag.replace('URL', url)).errors.join(' '), /unsupported-vite-html-url/, url);
+    }
+  }
+  assert.match(scanHtml('<a href="data&#58;text/html;base64,PHNjcmlwdD4=">open</a>').errors.join(' '),
+    /unsupported-vite-html-url/);
+  for (const html of [
+    '<img src="data:image/png;base64,iVBORw0KGgo" alt="">',
+    '<img src="data:image/jpeg;base64,/9j/" alt="">',
+    '<link rel="icon" href="data:image/png;base64,iVBORw0KGgo">',
+    '<video src="data:video/mp4;base64,AAAA"></video>',
+  ]) assert.deepEqual(scanHtml(html).errors, [], html);
+  for (const html of [
+    '<a href="data:image/png;base64,iVBORw0KGgo">navigate</a>',
+    '<form action="data:image/png;base64,iVBORw0KGgo"></form>',
+    '<link rel="canonical" href="data:image/png;base64,iVBORw0KGgo">',
+    '<meta property="og:image" content="data:application/xhtml+xml,%3Chtml%3E">',
+  ]) assert.match(scanHtml(html).errors.join(' '), /unsupported-vite-html-url/, html);
+});
+
 test('inert JSON and actual HTML comments cannot generate source dependencies', () => {
   const text = '<script type="application/json">{"text":"<script>"}' +
     '</script><!-- <script type="module" src="/hidden.ts"></script> -->' + main;

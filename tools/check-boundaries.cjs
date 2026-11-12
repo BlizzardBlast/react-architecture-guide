@@ -153,7 +153,1284 @@ function primitiveLocalBinding(identifier) {
   // No local binding: direct calls may refer to Node's built-in loader.
   return undefined;
 }
-function imports(node, list, options, inJSDoc = false) {
+// Resolve native Worker roots separately from extraction of dependency edges.
+// This avoids conflating symbol provenance with import graph bookkeeping.
+// Destructured const values are binding elements, not variable declarations.
+// Resolve the statically inspectable source path for both provenance and writes.
+function constDestructuringOrigin(declaration, restKey) {
+  if (!ts.isBindingElement(declaration)) return undefined;
+  const accesses = [];
+  let element = declaration;
+  while (ts.isBindingElement(element)) {
+    const pattern = element.parent;
+    if (element.dotDotDotToken) {
+      const nested = element !== declaration ? accesses.shift() : undefined;
+      const key = nested ? nested.key ?? null : restKey;
+      if (key === undefined) return undefined;
+      if (ts.isObjectBindingPattern(pattern)) {
+        const excluded = pattern.elements.some(other => {
+          if (other === element) return false;
+          const name = other.propertyName || other.name;
+          const actual = ts.isComputedPropertyName(name) ? name.expression : name;
+          return (ts.isStringLiteral(actual) || ts.isNumericLiteral(actual) ||
+            ts.isNoSubstitutionTemplateLiteral(actual) ||
+            !ts.isComputedPropertyName(name) && ts.isIdentifier(actual)) && actual.text === key;
+        });
+        if (excluded) return undefined;
+        accesses.unshift({ kind: 'object', key: key ?? undefined, fallback: nested?.fallback });
+      } else if (ts.isArrayBindingPattern(pattern)) {
+        if (key !== null && !/^(?:0|[1-9]\d*)$/.test(key)) return undefined;
+        accesses.unshift({ kind: 'array', key: key === null ? undefined :
+          String(pattern.elements.indexOf(element) + Number(key)), fallback: nested?.fallback });
+      } else return undefined;
+      element = pattern.parent;
+      continue;
+    }
+    if (ts.isObjectBindingPattern(pattern)) {
+      const name = element.propertyName || element.name;
+      const computed = ts.isComputedPropertyName(name);
+      const actual = computed ? name.expression : name;
+      // An identifier inside a computed key is *not* the property name:
+      // {[key]: value} reads the value of key at runtime.
+      const staticKey = (ts.isStringLiteral(actual) || ts.isNumericLiteral(actual) ||
+        ts.isNoSubstitutionTemplateLiteral(actual) || !computed && ts.isIdentifier(actual))
+        ? actual.text : undefined;
+      accesses.unshift({ kind: 'object', key: staticKey, fallback: element.initializer });
+    } else if (ts.isArrayBindingPattern(pattern)) {
+      const index = pattern.elements.indexOf(element);
+      if (index < 0) return undefined;
+      accesses.unshift({ kind: 'array', key: String(index), fallback: element.initializer });
+    } else return undefined;
+    element = pattern.parent;
+  }
+  if (!ts.isVariableDeclaration(element) || !element.initializer ||
+      !ts.isVariableDeclarationList(element.parent) ||
+      !(element.parent.flags & ts.NodeFlags.Const)) return undefined;
+  return { initializer: element.initializer, accesses };
+}
+// Track writes to statically known object-property paths. Immutable bindings
+// do not imply immutable objects; a path is untrusted if a write could alter
+// that path or an ancestor. Keep this analysis independent of Worker policy.
+function workerMutationPaths(sf, localSymbol, unwrap) {
+  // Unknown property paths must never collide with literal string keys.
+  const unknownKey = Symbol('unknown property');
+  const universalKey = Symbol('any mutation path');
+  const pathCode = parts => JSON.stringify(parts.map(part =>
+    part === universalKey ? {} : part === unknownKey ? null : part));
+  const universalPath = pathCode([universalKey]);
+  const rootDeclaration = expression => {
+    let node = unwrap(expression);
+    while (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      node = unwrap(node.expression);
+    }
+    if (!ts.isIdentifier(node)) return undefined;
+    // JS binding symbols can carry synthetic Identifier declarations.
+    const declarations = localSymbol(node)?.declarations?.filter(declaration =>
+      ts.isVariableDeclaration(declaration) || ts.isBindingElement(declaration));
+    return declarations?.length === 1 ? declarations[0] : undefined;
+  };
+  const memberKey = node => {
+    if (ts.isPropertyAccessExpression(node)) return node.name.text;
+    const arg = unwrap(node.argumentExpression);
+    return ts.isStringLiteral(arg) || ts.isNumericLiteral(arg) ||
+      ts.isNoSubstitutionTemplateLiteral(arg) ? arg.text : unknownKey;
+  };
+  const reference = expression => {
+    let node = unwrap(expression);
+    const path = [];
+    while (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      path.unshift(memberKey(node));
+      node = unwrap(node.expression);
+    }
+    const declaration = ts.isIdentifier(node) ? rootDeclaration(node) : undefined;
+    return declaration ? { declaration, path } : undefined;
+  };
+  let changes;
+  const mutations = () => {
+    if (changes) return changes;
+    const paths = new Map(), aliases = [];
+    changes = paths;
+    const add = (declaration, given) => {
+      if (!declaration) return false;
+      // Prevent pathological alias cycles from creating unbounded path arrays.
+      const path = given.length > 12 ? [universalKey] : given;
+      let entries = paths.get(declaration);
+      if (!entries) { entries = new Map(); paths.set(declaration, entries); }
+      const encoded = pathCode(path);
+      // The top element is terminal: never re-expand it across fixpoint passes.
+      if (entries.has(encoded) || entries.has(universalPath)) return false;
+      if (encoded === universalPath || entries.size >= 128) {
+        entries.clear();
+        entries.set(universalPath, [universalKey]);
+        return true;
+      }
+      entries.set(encoded, path);
+      return true;
+    };
+    const record = (target, suffix = []) => {
+      const found = reference(target);
+      if (found) add(found.declaration, [...found.path, ...suffix]);
+    };
+    const assignmentTargets = target => {
+      const node = unwrap(target);
+      if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+        record(node);
+      } else if (ts.isArrayLiteralExpression(node) || ts.isArrayBindingPattern(node)) {
+        for (const item of node.elements) {
+          if (ts.isOmittedExpression(item)) continue;
+          assignmentTargets(ts.isSpreadElement(item) ? item.expression :
+            ts.isBindingElement(item) ? item.name : item);
+        }
+      } else if (ts.isObjectLiteralExpression(node)) {
+        for (const property of node.properties) {
+          if (ts.isPropertyAssignment(property)) assignmentTargets(property.initializer);
+          else if (ts.isSpreadAssignment(property)) assignmentTargets(property.expression);
+        }
+      } else if (ts.isObjectBindingPattern(node)) {
+        for (const element of node.elements) assignmentTargets(element.name);
+      } else if (ts.isBinaryExpression(node) &&
+                 node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        assignmentTargets(node.left);
+      }
+    };
+    const literalName = expr => {
+      const node = expr && unwrap(expr);
+      return node && (ts.isStringLiteral(node) || ts.isNumericLiteral(node) ||
+        ts.isNoSubstitutionTemplateLiteral(node)) ? node.text : unknownKey;
+    };
+    const changedByCall = node => {
+      if (!ts.isPropertyAccessExpression(node.expression) ||
+          !ts.isIdentifier(node.expression.expression)) return;
+      const owner = node.expression.expression.text, method = node.expression.name.text;
+      const objectCall = owner === 'Object' &&
+        ['assign', 'defineProperty', 'defineProperties', 'setPrototypeOf'].includes(method);
+      const reflectCall = owner === 'Reflect' &&
+        ['set', 'defineProperty', 'deleteProperty', 'setPrototypeOf'].includes(method);
+      if (!objectCall && !reflectCall || !node.arguments.length) return;
+      const target = node.arguments[0];
+      const markObject = source => {
+        const value = unwrap(source);
+        if (!ts.isObjectLiteralExpression(value)) { record(target, [unknownKey]); return; }
+        for (const property of value.properties) {
+          if (ts.isSpreadAssignment(property)) { record(target, [unknownKey]); continue; }
+          const name = property.name;
+          if (name && (ts.isIdentifier(name) || ts.isStringLiteral(name) ||
+              ts.isNumericLiteral(name))) record(target, [name.text]);
+          else if (name && ts.isComputedPropertyName(name))
+            record(target, [literalName(name.expression)]);
+          else record(target, [unknownKey]);
+        }
+      };
+      if (method === 'assign') {
+        for (const source of node.arguments.slice(1)) markObject(source);
+      } else if (method === 'defineProperties') {
+        if (node.arguments[1]) markObject(node.arguments[1]);
+        else record(target, [unknownKey]);
+      } else if (['set', 'defineProperty', 'deleteProperty'].includes(method)) {
+        record(target, [literalName(node.arguments[1])]);
+      } else {
+        record(target, [unknownKey]);
+      }
+    };
+    const arrayCopies = [], objectCopies = [], descriptorCopies = [];
+    const linkAssignment = (target, value, suffix = []) => {
+      const dest = reference(target);
+      if (!dest || !value || !dest.path.length && !suffix.length) return;
+      const capture = (expression, destPath) => {
+        const source = reference(expression);
+        if (source) {
+          aliases.push({ dest: dest.declaration, destPath, ...source, spread: false });
+          return;
+        }
+        const literal = unwrap(expression);
+        if (ts.isObjectLiteralExpression(literal)) {
+          const keys = new Set(), seen = new Set();
+          const collect = expression => {
+            const value = literalFor(expression, new Set());
+            if (!ts.isObjectLiteralExpression(value) || seen.has(value)) return;
+            seen.add(value);
+            for (const property of value.properties) {
+              if (ts.isSpreadAssignment(property)) {
+                const source = reference(property.expression);
+                if (source) aliases.push({ dest: dest.declaration, destPath, ...source, spread: true, initializer: literal });
+                collect(property.expression);
+              } else if (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) {
+                const name = property.name;
+                keys.add(ts.isComputedPropertyName(name) ? literalName(name.expression) : name.text);
+              }
+            }
+          };
+          collect(literal);
+          for (const key of keys) {
+            const access = { kind: 'object', key: key === unknownKey ? undefined : key };
+            const values = [];
+            for (const candidate of spreadReferences(literal, access, [], values)) {
+              aliases.push({ dest: dest.declaration, destPath: [...destPath, key], ...candidate, spread: false });
+            }
+            for (const selected of values) capture(selected, [...destPath, key]);
+          }
+        } else if (ts.isArrayLiteralExpression(literal)) {
+          if (literal.elements.some(ts.isSpreadElement)) {
+            arrayCopies.push({ declaration: dest.declaration, destPath, literal, capture, processed: new Set() });
+          } else literal.elements.forEach((item, index) => {
+            if (!ts.isOmittedExpression(item)) capture(item, [...destPath, String(index)]);
+          });
+        }
+      };
+      capture(value, [...dest.path, ...suffix]);
+    };
+    const linkPattern = (target, value) => {
+      const left = unwrap(target), right = unwrap(value);
+      if (ts.isArrayLiteralExpression(left) && !left.elements.some(ts.isSpreadElement)) {
+        left.elements.forEach((item, index) => {
+          if (ts.isOmittedExpression(item)) return;
+          const access = { kind: 'array', key: String(index) };
+          const dest = reference(item);
+          if (dest && dest.path.length) {
+            for (const source of spreadReferences(right, access)) {
+              aliases.push({ dest: dest.declaration, destPath: dest.path, ...source, spread: false });
+            }
+          } else {
+            const selected = selectLiteral(right, access);
+            if (selected) linkPattern(item, selected);
+          }
+        });
+      } else if (ts.isObjectLiteralExpression(left)) {
+        for (const property of left.properties) {
+          if (!ts.isPropertyAssignment(property)) continue;
+          const name = property.name;
+          const key = ts.isComputedPropertyName(name) ? literalName(name.expression) : name.text;
+          const access = { kind: 'object', key: key === unknownKey ? undefined : key };
+          const dest = reference(property.initializer);
+          if (dest && dest.path.length) {
+            for (const source of spreadReferences(right, access)) {
+              aliases.push({ dest: dest.declaration, destPath: dest.path, ...source, spread: false });
+            }
+          } else {
+            const selected = selectLiteral(right, access);
+            if (selected) linkPattern(property.initializer, selected);
+          }
+        }
+      } else linkAssignment(left, right);
+    };
+    const linkDescriptor = (target, key, descriptor) => {
+      const dest = reference(target);
+      if (!dest) return;
+      const values = [];
+      for (const source of spreadReferences(descriptor, { kind: 'object', key: 'value' }, [], values, false, true)) {
+        aliases.push({ dest: dest.declaration, destPath: [...dest.path, key], ...source, spread: false });
+      }
+      for (const value of values) linkAssignment(target, value, [key]);
+    };
+    // Gather writes before resolving literal sources, including writes later in the file.
+    const directAliases = [];
+    const directBindings = [];
+    const scanWrites = node => {
+      if (ts.isBinaryExpression(node) && ts.isAssignmentOperator(node.operatorToken.kind)) {
+        assignmentTargets(node.left);
+        if (node.operatorToken.kind === ts.SyntaxKind.EqualsToken) linkPattern(node.left, node.right);
+      }
+      if ((ts.isForOfStatement(node) || ts.isForInStatement(node)) &&
+          !ts.isVariableDeclarationList(node.initializer)) assignmentTargets(node.initializer);
+      if (ts.isDeleteExpression(node) ||
+          (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+          [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator)) {
+        assignmentTargets(ts.isDeleteExpression(node) ? node.expression : node.operand);
+      }
+      if (ts.isCallExpression(node)) {
+        changedByCall(node);
+        if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression) &&
+            node.expression.expression.text === 'Reflect' && node.expression.name.text === 'set' &&
+            node.arguments.length >= 3) {
+          linkAssignment(node.arguments[0], node.arguments[2], [literalName(node.arguments[1])]);
+        }
+        if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression) &&
+            ['Object', 'Reflect'].includes(node.expression.expression.text) &&
+            node.expression.name.text === 'defineProperty' && node.arguments.length >= 3) {
+          descriptorCopies.push({ target: node.arguments[0], key: literalName(node.arguments[1]), descriptor: node.arguments[2] });
+        }
+        if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression) &&
+            node.expression.expression.text === 'Object' && node.expression.name.text === 'defineProperties' &&
+            node.arguments.length >= 2) {
+          const dest = reference(node.arguments[0]);
+          if (dest) objectCopies.push({ ...dest, initializer: node.arguments[1], target: node.arguments[0],
+            descriptors: true, processed: new Set() });
+        }
+        if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression) &&
+            node.expression.expression.text === 'Object' && node.expression.name.text === 'assign' &&
+            node.arguments.length >= 2) {
+          const dest = reference(node.arguments[0]);
+          if (dest) objectCopies.push({ ...dest, arguments: node.arguments.slice(1),
+            target: node.arguments[0], processed: new Set() });
+        }
+      }
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
+          ts.isVariableDeclarationList(node.parent) && (node.parent.flags & ts.NodeFlags.Const)) {
+        const source = reference(node.initializer);
+        if (source) directAliases.push({ dest: node, ...source });
+      }
+      if (ts.isBindingElement(node) && ts.isIdentifier(node.name) && !node.dotDotDotToken) {
+        directBindings.push(node);
+      }
+      ts.forEachChild(node, scanWrites);
+    };
+    // Choose literal object/array elements before falling back to a holder
+    // property path, so a binding from [holder.root] aliases holder.root itself.
+    const literalFor = (expression, seen) => {
+      let node = unwrap(expression);
+      while (ts.isIdentifier(node)) {
+        const binding = rootDeclaration(node);
+        if (!binding || !ts.isVariableDeclaration(binding) || !binding.initializer ||
+            !ts.isVariableDeclarationList(binding.parent) ||
+            !(binding.parent.flags & ts.NodeFlags.Const) || seen.has(binding)) break;
+        if ([...(paths.get(binding)?.values() || [])].some(path => path.length === 1)) break;
+        seen.add(binding);
+        node = unwrap(binding.initializer);
+      }
+      return node;
+    };
+    // Destructuring defaults run on an explicitly undefined value, not just
+    // when the property is absent or an array entry is omitted.
+    const definitelyUndefined = expression => {
+      const value = expression && unwrap(expression);
+      return value && (ts.isVoidExpression(value) || ts.isIdentifier(value) &&
+        value.text === 'undefined' && !localSymbol(value)?.declarations?.length);
+    };
+    const definitelyDefined = (expression, seen = new Set()) => {
+      const value = expression && unwrap(expression);
+      if (!value) return false;
+      if (ts.isIdentifier(value)) {
+        const binding = rootDeclaration(value);
+        if (binding && ts.isVariableDeclaration(binding) && binding.initializer &&
+            ts.isVariableDeclarationList(binding.parent) && (binding.parent.flags & ts.NodeFlags.Const) &&
+            !seen.has(binding)) {
+          return definitelyDefined(binding.initializer, new Set(seen).add(binding));
+        }
+      }
+      return (ts.isObjectLiteralExpression(value) ||
+        ts.isArrayLiteralExpression(value) || ts.isClassExpression(value) ||
+        ts.isFunctionExpression(value) || ts.isArrowFunction(value) ||
+        ts.isNewExpression(value) || ts.isStringLiteral(value) ||
+        ts.isNumericLiteral(value) || ts.isNoSubstitutionTemplateLiteral(value) ||
+        [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword,
+          ts.SyntaxKind.NullKeyword].includes(value.kind));
+    };
+    const selectLiteral = (expression, access) => {
+      if (access.key === undefined) return undefined;
+      const literal = literalFor(expression, new Set());
+      let selected;
+      if (access.kind === 'array' && ts.isArrayLiteralExpression(literal)) {
+        if (literal.elements.some(ts.isSpreadElement)) return undefined;
+        const element = literal.elements[Number(access.key)];
+        selected = element && !ts.isOmittedExpression(element) ? element : undefined;
+      } else if (access.kind === 'object' && ts.isObjectLiteralExpression(literal)) {
+        for (let i = literal.properties.length - 1; i >= 0; i--) {
+          const property = literal.properties[i];
+          if (ts.isSpreadAssignment(property)) return undefined;
+          if (property.name && ts.isComputedPropertyName(property.name) &&
+              !(ts.isStringLiteral(property.name.expression) ||
+                ts.isNumericLiteral(property.name.expression) ||
+                ts.isNoSubstitutionTemplateLiteral(property.name.expression))) return undefined;
+          const name = property.name && (ts.isComputedPropertyName(property.name)
+            ? property.name.expression : property.name);
+          if (name?.text !== access.key) continue;
+          selected = ts.isPropertyAssignment(property) ? property.initializer :
+            ts.isShorthandPropertyAssignment(property) ? property.name : undefined;
+          break;
+        }
+      } else return undefined;
+      return selected && !definitelyUndefined(selected) ? selected : access.fallback;
+    };
+    const spreadReferences = (expression, access, remaining = [], values, includeReferences = false, followPrototype = false) => {
+      const accesses = [access, ...remaining];
+      const found = [], cache = new Map(), arrays = new Map(), lengths = new Map();
+      const arrayLength = (source, seen = new Set()) => {
+        const value = literalFor(source, new Set());
+        if (!ts.isArrayLiteralExpression(value) || seen.has(value)) return undefined;
+        if (lengths.has(value)) return lengths.get(value);
+        const next = new Set(seen).add(value);
+        let length = 0;
+        for (const item of value.elements) {
+          const size = ts.isSpreadElement(item) ? arrayLength(item.expression, next) : 1;
+          if (size === undefined) return undefined;
+          length = Math.min(Number.MAX_SAFE_INTEGER, length + size);
+        }
+        lengths.set(value, length);
+        return length;
+      };
+      const arrayValue = (source, target, seen = new Set(), throughSpread = false) => {
+        const value = literalFor(source, new Set());
+        if (!ts.isArrayLiteralExpression(value) || seen.has(value)) return undefined;
+        const next = new Set(seen).add(value);
+        let offset = 0;
+        for (const item of value.elements) {
+          const size = ts.isSpreadElement(item) ? arrayLength(item.expression) : 1;
+          if (size === undefined) return undefined;
+          if (target < offset + size) {
+            return ts.isSpreadElement(item) ? arrayValue(item.expression, target - offset, next, true) :
+              ts.isOmittedExpression(item) && !throughSpread ? undefined : item;
+          }
+          offset += size;
+        }
+        return undefined;
+      };
+      const inspect = (source, seen, index = 0, arrayUnknown = false, arrayIndex, ownOnly = false) => {
+        const origin = reference(source);
+        if (index === accesses.length) {
+          if (origin) found.push(origin);
+          if (origin && values && includeReferences) values.push(source);
+          else if (values && (ts.isObjectLiteralExpression(unwrap(source)) ||
+                   ts.isArrayLiteralExpression(unwrap(source)))) values.push(source);
+          return { definite: true, possible: Boolean(origin), cyclic: false };
+        }
+        const access = accesses[index];
+        const key = access.key === undefined ? unknownKey : access.key;
+        const suffix = accesses.slice(index).map(item => item.key === undefined ? unknownKey : item.key);
+        if (arrayUnknown) suffix[0] = unknownKey;
+        else if (arrayIndex !== undefined) suffix[0] = String(arrayIndex);
+        const raw = unwrap(source);
+        if (ts.isSpreadElement(raw)) {
+          const sequence = reference(raw.expression);
+          if (sequence) found.push({ ...sequence, path: [...sequence.path, unknownKey, ...suffix] });
+          return { definite: false, possible: Boolean(sequence), cyclic: false };
+        }
+        const value = literalFor(source, new Set());
+        const arrayObject = access.kind === 'object' &&
+          (key === unknownKey || /^(?:0|[1-9]\d*)$/.test(key));
+        if ((access.kind === 'array' || arrayObject) && ts.isArrayLiteralExpression(value)) {
+          const firstSpread = value.elements.findIndex(ts.isSpreadElement);
+          const target = arrayIndex ?? (access.key === undefined ? undefined : Number(access.key));
+          if (arrayUnknown || target === undefined || firstSpread !== -1 && target >= firstSpread) {
+            if (!arrays.has(index)) arrays.set(index, new Map());
+            if (!arrays.get(index).has(value)) arrays.get(index).set(value, new Set());
+            const visited = arrays.get(index).get(value);
+            const selection = arrayUnknown || target === undefined ? '*' : target;
+            if (visited.has(selection)) return { definite: false, possible: true, cyclic: false };
+            visited.add(selection);
+            let offset = 0, exact = true;
+            for (const item of value.elements) {
+              if (ts.isSpreadElement(item)) {
+                const size = arrayLength(item.expression);
+                if (size !== 0 && (arrayUnknown || target === undefined || target >= offset &&
+                    (!exact || size === undefined || target < offset + size))) {
+                  const unknown = arrayUnknown || target === undefined || !exact || size === undefined;
+                  inspect(item.expression, seen, index, unknown, unknown ? undefined : target - offset);
+                }
+                if (size === undefined) exact = false;
+                else offset += size;
+              } else {
+                if (!ts.isOmittedExpression(item) && (arrayUnknown || target === undefined ||
+                    target >= offset && (!exact || target === offset))) inspect(item, seen, index + 1);
+                offset++;
+              }
+            }
+            const selected = !arrayUnknown && target !== undefined && arrayValue(value, target);
+            if (access.fallback && !definitelyDefined(selected)) inspect(access.fallback, seen, index + 1);
+            const certain = !arrayUnknown && target !== undefined && arrayLength(value) !== undefined;
+            const possible = !arrayObject || !certain || Boolean(selected);
+            if (origin && possible) found.push({ ...origin, path: [...origin.path, ...suffix] });
+            return { definite: arrayObject && certain && Boolean(selected), possible, cyclic: false };
+          }
+          const selected = firstSpread === -1 && arrayIndex === undefined && !arrayObject ?
+            selectLiteral(value, { ...access, kind: 'array' }) :
+            value.elements[target];
+          if (selected && !ts.isOmittedExpression(selected)) {
+            inspect(selected, seen, index + 1);
+            if (access.fallback && selected !== access.fallback && !definitelyDefined(selected)) {
+              inspect(access.fallback, seen, index + 1);
+            }
+          } else {
+            if (access.fallback) inspect(access.fallback, seen, index + 1);
+            if (origin) found.push({ ...origin, path: [...origin.path, ...suffix] });
+          }
+          const present = Boolean(selected && !ts.isOmittedExpression(selected));
+          return { definite: present, possible: Boolean(present || origin), cyclic: false };
+        }
+        if (!ts.isObjectLiteralExpression(value) || seen.has(value)) {
+          if (access.fallback) inspect(access.fallback, seen, index + 1);
+          if (origin) found.push({ ...origin, path: [...origin.path, ...suffix] });
+          return { definite: false, possible: Boolean(origin), cyclic: seen.has(value) };
+        }
+        const cacheKey = index + ':' + ownOnly;
+        if (!cache.has(cacheKey)) cache.set(cacheKey, new Map());
+        const cached = cache.get(cacheKey).get(value);
+        if (cached) {
+          if (origin && cached.possible) found.push({ ...origin, path: [...origin.path, ...suffix] });
+          return cached;
+        }
+        const nextSeen = new Set(seen).add(value);
+        let definite = false, possible = false, cyclic = false;
+        for (let i = value.properties.length - 1; i >= 0 && !definite; i--) {
+          const property = value.properties[i];
+          if (ts.isSpreadAssignment(property)) {
+            const result = inspect(property.expression, nextSeen, index, false, undefined, true);
+            definite = result.definite && key !== unknownKey;
+            possible ||= result.possible;
+            cyclic ||= result.cyclic;
+            continue;
+          }
+          const name = property.name && (ts.isComputedPropertyName(property.name)
+            ? literalName(property.name.expression) : property.name.text);
+          if (name === undefined || key !== unknownKey && name !== unknownKey && name !== key) continue;
+          possible = true;
+          const selected = ts.isPropertyAssignment(property) ? property.initializer :
+            ts.isShorthandPropertyAssignment(property) ? property.name : undefined;
+          if (selected) inspect(selected, nextSeen, index + 1);
+          if (access.fallback && (!selected || !definitelyDefined(selected))) {
+            inspect(access.fallback, nextSeen, index + 1);
+          }
+          definite = key !== unknownKey && name !== unknownKey;
+        }
+        if (followPrototype && !ownOnly && !definite) {
+          const prototype = value.properties.find(property => ts.isPropertyAssignment(property) &&
+            !ts.isComputedPropertyName(property.name) && property.name.text === '__proto__');
+          if (prototype) {
+            const result = inspect(prototype.initializer, nextSeen, index);
+            definite = result.definite;
+            possible ||= result.possible;
+            cyclic ||= result.cyclic;
+          }
+        }
+        if (access.fallback && !definite) inspect(access.fallback, nextSeen, index + 1);
+        if (origin && possible) found.push({ ...origin, path: [...origin.path, ...suffix] });
+        // Cycles make overwrite certainty context-dependent; retain all candidates.
+        if (cyclic) definite = false;
+        const result = { definite, possible, cyclic };
+        cache.get(cacheKey).set(value, result);
+        return result;
+      };
+      inspect(expression, new Set());
+      return found;
+    };
+    const extractedAliases = (declaration, restKey) => {
+      const origin = constDestructuringOrigin(declaration, restKey);
+      if (!origin) return [];
+      const found = new Map();
+      const capture = item => {
+        if (!item) return;
+        const encoded = pathCode(item.path);
+        found.set(String(item.declaration.pos) + ':' + encoded, item);
+      };
+      let expression = origin.initializer, fallback;
+      for (let i = 0; i <= origin.accesses.length; i++) {
+        const original = reference(expression);
+        if (original) fallback = {
+          ...original,
+          path: [...original.path, ...origin.accesses.slice(i).map(access =>
+            access.key === undefined ? unknownKey : access.key)],
+        };
+        if (i === origin.accesses.length) break;
+        const access = origin.accesses[i];
+        for (const spread of spreadReferences(expression, access, origin.accesses.slice(i + 1))) {
+          capture(spread);
+        }
+        const selected = selectLiteral(expression, access);
+        if (!selected) {
+          capture(fallback);
+          return [...found.values()];
+        }
+        expression = selected;
+      }
+      capture(reference(expression) || fallback);
+      return [...found.values()];
+    };
+    const restBindings = [];
+    const recordDestructuredAliases = pattern => {
+      if (ts.isBindingElement(pattern)) {
+        if (ts.isIdentifier(pattern.name)) {
+          if (pattern.dotDotDotToken) { restBindings.push(pattern); return; }
+          for (const source of extractedAliases(pattern)) {
+            aliases.push({ dest: pattern, ...source, spread: false });
+          }
+        } else recordDestructuredAliases(pattern.name);
+      } else if (ts.isObjectBindingPattern(pattern) || ts.isArrayBindingPattern(pattern)) {
+        for (const element of pattern.elements) {
+          if (ts.isBindingElement(element)) recordDestructuredAliases(element);
+        }
+      }
+    };
+    scanWrites(sf);
+    const assignGroups = new Map();
+    const assignSources = (argumentsList, seen = new Set()) => {
+      const properties = [];
+      for (const argument of argumentsList) {
+        if (!ts.isSpreadElement(argument)) {
+          properties.push(ts.factory.createSpreadAssignment(argument));
+          continue;
+        }
+        const array = literalFor(argument.expression, new Set());
+        const origin = reference(argument.expression);
+        const mutated = origin && [...(paths.get(origin.declaration)?.values() || [])].some(path =>
+          pathCode(path) === universalPath || path.slice(0, origin.path.length).every((key, i) =>
+            key === unknownKey || origin.path[i] === unknownKey || key === origin.path[i]));
+        if (mutated || !ts.isArrayLiteralExpression(array) || seen.has(array)) {
+          properties.push(ts.factory.createSpreadAssignment(argument));
+          continue;
+        }
+        if (!assignGroups.has(array)) assignGroups.set(array,
+          assignSources(array.elements.filter(item => !ts.isOmittedExpression(item)), new Set(seen).add(array)));
+        properties.push(ts.factory.createSpreadAssignment(assignGroups.get(array)));
+      }
+      return ts.factory.createObjectLiteralExpression(properties);
+    };
+    for (const copy of descriptorCopies) linkDescriptor(copy.target, copy.key, copy.descriptor);
+    for (const binding of directBindings) {
+      for (const source of extractedAliases(binding)) directAliases.push({ dest: binding, ...source });
+    }
+    let directChanged = true;
+    while (directChanged) {
+      directChanged = false;
+      for (const alias of directAliases) {
+        for (const path of [...(paths.get(alias.dest)?.values() || [])]) {
+          directChanged = add(alias.declaration, [...alias.path, ...path]) || directChanged;
+        }
+        for (const path of [...(paths.get(alias.declaration)?.values() || [])]) {
+          if (path.length > alias.path.length && alias.path.every((key, i) =>
+            key === unknownKey || path[i] === unknownKey || key === path[i])) {
+            directChanged = add(alias.dest, path.slice(alias.path.length)) || directChanged;
+          }
+        }
+      }
+    }
+    for (const copy of objectCopies) if (copy.arguments) {
+      copy.initializer = assignSources(copy.arguments);
+    }
+    const visit = node => {
+      if (ts.isBinaryExpression(node) && ts.isAssignmentOperator(node.operatorToken.kind)) {
+        assignmentTargets(node.left);
+      }
+      if ((ts.isForOfStatement(node) || ts.isForInStatement(node)) &&
+          !ts.isVariableDeclarationList(node.initializer)) assignmentTargets(node.initializer);
+      if (ts.isDeleteExpression(node) ||
+          (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+          [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator)) {
+        assignmentTargets(ts.isDeleteExpression(node) ? node.expression : node.operand);
+      }
+      if (ts.isCallExpression(node)) changedByCall(node);
+      if (ts.isVariableDeclaration(node) && node.initializer &&
+          ts.isVariableDeclarationList(node.parent) &&
+          (node.parent.flags & ts.NodeFlags.Const)) {
+        if (!ts.isIdentifier(node.name)) {
+          recordDestructuredAliases(node.name);
+        } else {
+          const initializer = unwrap(node.initializer);
+          if (ts.isIdentifier(initializer) ||
+              ts.isPropertyAccessExpression(initializer) ||
+              ts.isElementAccessExpression(initializer)) {
+            const source = reference(initializer);
+            if (source) aliases.push({ dest: node, ...source, spread: false });
+          } else if (ts.isObjectLiteralExpression(initializer)) {
+            for (const property of initializer.properties) {
+              if (ts.isSpreadAssignment(property)) {
+                const source = reference(property.expression);
+                if (source) aliases.push({ dest: node, ...source, spread: true, initializer });
+              } else if (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) {
+                const name = property.name;
+                if (!ts.isComputedPropertyName(name) && name.text === '__proto__' &&
+                    ts.isPropertyAssignment(property)) continue;
+                const key = ts.isComputedPropertyName(name) ? literalName(name.expression) : name.text;
+                const source = reference(ts.isPropertyAssignment(property) ? property.initializer : name);
+                if (source && spreadReferences(initializer, {
+                  kind: 'object', key: key === unknownKey ? undefined : key,
+                }).some(candidate => candidate.declaration === source.declaration &&
+                  pathCode(candidate.path) === pathCode(source.path))) {
+                  aliases.push({ dest: node, destPath: [key], ...source, spread: false });
+                }
+              }
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    // Rest copies own slots; only references stored inside those slots are shared.
+    const restKeys = new Map(restBindings.map(binding => [binding, new Set()]));
+    const collectRestKeys = node => {
+      if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+        const item = reference(node);
+        if (item?.path.length && restKeys.has(item.declaration)) {
+          restKeys.get(item.declaration).add(item.path[0]);
+        }
+      }
+      ts.forEachChild(node, collectRestKeys);
+    };
+    collectRestKeys(sf);
+    const processedRestKeys = new Map(restBindings.map(binding => [binding, new Set()]));
+    // A wildcard may occur on either side of an alias path comparison.
+    // Spreads copy own top-level properties into a *different* object, while
+    // the nested references under those properties remain shared.
+    const overlaps = (path, prefix) =>
+      prefix.every((key, i) => key === unknownKey || path[i] === unknownKey || path[i] === key);
+    const spreadSupplies = (alias, key) => spreadReferences(alias.initializer, {
+      kind: 'object', key: key === unknownKey ? undefined : key,
+    }).some(candidate => candidate.declaration === alias.declaration &&
+      candidate.path.length === alias.path.length + 1 && overlaps(candidate.path, [...alias.path, key]));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const binding of restBindings) {
+        for (const path of paths.get(binding)?.values() || []) {
+          if (path.length) restKeys.get(binding).add(path[0]);
+        }
+        for (const key of restKeys.get(binding)) {
+          if (processedRestKeys.get(binding).has(key)) continue;
+          processedRestKeys.get(binding).add(key);
+          const restKey = key === unknownKey || key === universalKey ? null : key;
+          for (const source of extractedAliases(binding, restKey)) {
+            aliases.push({ dest: binding, destPath: [key], ...source, spread: false });
+          }
+          changed = true;
+        }
+      }
+      for (const copy of arrayCopies) {
+        const keys = new Set();
+        const collect = path => {
+          if (pathCode(path) === universalPath) keys.add(unknownKey);
+          else if (path.length > copy.destPath.length && overlaps(path, copy.destPath)) {
+            keys.add(path[copy.destPath.length]);
+          }
+        };
+        for (const path of paths.get(copy.declaration)?.values() || []) collect(path);
+        for (const alias of aliases) {
+          if (alias.declaration === copy.declaration) collect(alias.path);
+          if (alias.dest === copy.declaration) collect(alias.destPath || []);
+        }
+        for (const key of keys) {
+          if (copy.processed.has(key)) continue;
+          copy.processed.add(key);
+          const access = { kind: 'array', key: key === unknownKey ? undefined : key };
+          const values = [];
+          for (const source of spreadReferences(copy.literal, access, [], values)) {
+            aliases.push({ dest: copy.declaration, destPath: [...copy.destPath, key], ...source, spread: false });
+          }
+          for (const value of values) copy.capture(value, [...copy.destPath, key]);
+          changed = true;
+        }
+      }
+      for (const copy of objectCopies) {
+        const keys = new Set();
+        const collect = path => {
+          if (pathCode(path) === universalPath) keys.add(unknownKey);
+          else if (path.length > copy.path.length + 1 && overlaps(path, copy.path)) {
+            keys.add(path[copy.path.length]);
+          }
+        };
+        for (const path of paths.get(copy.declaration)?.values() || []) collect(path);
+        for (const alias of aliases) {
+          if (alias.declaration === copy.declaration && alias.path.length > copy.path.length &&
+              overlaps(alias.path, copy.path)) keys.add(alias.path[copy.path.length]);
+          if (alias.dest === copy.declaration && (alias.destPath || []).length > copy.path.length &&
+              overlaps(alias.destPath, copy.path)) keys.add(alias.destPath[copy.path.length]);
+        }
+        for (const key of keys) {
+          if (copy.processed.has(key)) continue;
+          copy.processed.add(key);
+          const values = [];
+          const sources = spreadReferences(copy.initializer, {
+            kind: 'object', key: key === unknownKey ? undefined : key,
+          }, [], values, copy.descriptors);
+          if (!copy.descriptors) for (const source of sources) {
+            aliases.push({ dest: copy.declaration, destPath: [...copy.path, key], ...source, spread: false });
+          }
+          for (const value of values) {
+            if (copy.descriptors) linkDescriptor(copy.target, key, value);
+            else linkAssignment(copy.target, value, [key]);
+          }
+          changed = true;
+        }
+      }
+      for (const alias of aliases) {
+        const destPath = alias.destPath || [];
+        for (const path of [...(paths.get(alias.dest)?.values() || [])]) {
+          if (pathCode(path) === universalPath) {
+            changed = add(alias.declaration, [universalKey]) || changed;
+          } else if (path.length > destPath.length && overlaps(path, destPath)) {
+            const relative = path.slice(destPath.length);
+            if (!alias.spread || relative.length > 1 && spreadSupplies(alias, relative[0])) {
+              changed = add(alias.declaration, [...alias.path, ...relative]) || changed;
+            }
+          }
+        }
+        for (const path of [...(paths.get(alias.declaration)?.values() || [])]) {
+          // An alias captures a reference. Replacing the holder's property
+          // slot does not mutate that previously captured object.
+          if (pathCode(path) === universalPath) {
+            changed = add(alias.dest, [universalKey]) || changed;
+          } else if (path.length > alias.path.length && overlaps(path, alias.path)) {
+            const relative = path.slice(alias.path.length);
+            if (!alias.spread || relative.length > 1 && spreadSupplies(alias, relative[0])) {
+              changed = add(alias.dest, [...destPath, ...relative]) || changed;
+            }
+          }
+        }
+      }
+    }
+    return changes;
+  };
+  const possiblyMutated = expression => {
+    const value = reference(expression);
+    if (!value) return false;
+    const writes = mutations().get(value.declaration);
+    return Boolean(writes && [...writes.values()].some(path =>
+      path.length <= value.path.length && path.every((key, i) =>
+        key === universalKey || key === unknownKey || value.path[i] === unknownKey || key === value.path[i])));
+  };
+  return { rootDeclaration, possiblyMutated };
+}
+function workerProvenance(sf, workerNames, unwrap) {
+  let checker;
+  // A single checker per source file keeps binding resolution consistent and
+  // avoids repeatedly rebuilding its program for every Worker-like expression.
+  const localSymbol = identifier => {
+    if (!checker) {
+      const workerOptions = { noLib: true, noResolve: true, allowJs: true };
+      const host = ts.createCompilerHost(workerOptions);
+      host.getSourceFile = filename => path.resolve(filename) === path.resolve(sf.fileName) ? sf : undefined;
+      checker = ts.createProgram([sf.fileName], workerOptions, host).getTypeChecker();
+    }
+    return ts.isShorthandPropertyAssignment(identifier.parent)
+      ? checker.getShorthandAssignmentValueSymbol(identifier.parent)
+      : checker.getSymbolAtLocation(identifier);
+  };
+  const localValue = identifier => {
+    const symbol = localSymbol(identifier);
+    return Boolean(symbol && (symbol.flags & (ts.SymbolFlags.Value | ts.SymbolFlags.Alias)) &&
+      symbol.declarations?.some(declaration => {
+        if (declaration.getSourceFile().isDeclarationFile) return false;
+        for (let current = declaration; current && !ts.isSourceFile(current); current = current.parent) {
+          if (current.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.DeclareKeyword)) return false;
+        }
+        return true;
+      }));
+  };
+  // TypeScript binds references to a locally declared 'globalThis' to a
+  // transient symbol without declarations in noLib programs. Resolve lexical
+  // shadowing rather than treating that absence as proof of the browser global.
+  const bindingHasName = (name, binding) => {
+    if (ts.isIdentifier(binding)) return binding.text === name;
+    if (ts.isBindingElement(binding)) return bindingHasName(name, binding.name);
+    if (ts.isObjectBindingPattern(binding) || ts.isArrayBindingPattern(binding)) {
+      return binding.elements.some(element => element && bindingHasName(name, element));
+    }
+    return false;
+  };
+  const shadowsGlobal = identifier => {
+    const name = identifier.text;
+    for (let parent = identifier.parent; parent; parent = parent.parent) {
+      if (ts.isFunctionLike(parent) &&
+          parent.parameters.some(parameter => bindingHasName(name, parameter.name))) return true;
+      if (ts.isCatchClause(parent) && parent.variableDeclaration &&
+          bindingHasName(name, parent.variableDeclaration.name)) return true;
+      if (!ts.isBlock(parent) && !ts.isSourceFile(parent)) continue;
+      for (const statement of parent.statements) {
+        if (ts.isVariableStatement(statement) && statement.declarationList.declarations
+          .some(declaration => bindingHasName(name, declaration.name))) return true;
+        if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+            statement.name?.text === name) return true;
+      }
+    }
+    return false;
+  };
+  const { rootDeclaration, possiblyMutated } =
+    workerMutationPaths(sf, localSymbol, unwrap);
+  const unstableWorkerMember = member => {
+    if (!(ts.isPropertyAccessExpression(member) || ts.isElementAccessExpression(member))) return false;
+    const key = ts.isPropertyAccessExpression(member)
+      ? member.name.text : literalString(member.argumentExpression);
+    return workerNames.includes(key) && possiblyMutated(member);
+  };
+  const constInitializer = (identifier, seen) => {
+    const declaration = rootDeclaration(identifier);
+    if (!declaration || seen.has(declaration)) return undefined;
+    if (ts.isVariableDeclaration(declaration)) {
+      if (!ts.isIdentifier(declaration.name) || !declaration.initializer ||
+          !ts.isVariableDeclarationList(declaration.parent) ||
+          !(declaration.parent.flags & ts.NodeFlags.Const)) return undefined;
+      seen.add(declaration);
+      return declaration.initializer;
+    }
+    const origin = constDestructuringOrigin(declaration);
+    if (!origin) return undefined;
+    seen.add(declaration);
+    let selected = origin.initializer;
+    // Destructuring defaults fire on explicit undefined as well as missing
+    // entries. Unknown selections with a default must not be called local.
+    const knownUndefined = value => {
+      const node = unwrap(value);
+      return ts.isVoidExpression(node) || ts.isIdentifier(node) &&
+        node.text === 'undefined' && !localValue(node) && !shadowsGlobal(node);
+    };
+    const knownDefined = value => {
+      const node = unwrap(value);
+      return ts.isObjectLiteralExpression(node) || ts.isArrayLiteralExpression(node) ||
+        ts.isClassExpression(node) || ts.isFunctionExpression(node) ||
+        ts.isArrowFunction(node) || ts.isNewExpression(node) ||
+        ts.isStringLiteral(node) || ts.isNumericLiteral(node) ||
+        ts.isNoSubstitutionTemplateLiteral(node) ||
+        [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword,
+          ts.SyntaxKind.NullKeyword].includes(node.kind) ||
+        ts.isIdentifier(node) && ['globalThis','window','self'].includes(node.text) &&
+          !localValue(node) && !shadowsGlobal(node) ||
+        Boolean(resolveStaticObject(node, new Set()));
+    };
+    const withDefault = (value, fallback) => {
+      if (!fallback) return value;
+      if (knownUndefined(value)) return fallback;
+      return knownDefined(value) ? value : undefined;
+    };
+    for (const access of origin.accesses) {
+      if (access.kind === 'object') {
+        if (access.key === undefined) return undefined;
+        const object = resolveStaticObject(selected, seen);
+        if (!object) return undefined;
+        const value = literalProperty(object, access.key, seen);
+        if (value === unknownProperty) return undefined;
+        if (value === absentProperty) {
+          if (!access.fallback) return undefined;
+          selected = access.fallback;
+        } else {
+          selected = withDefault(value, access.fallback);
+          if (!selected) return undefined;
+        }
+      } else {
+        const array = resolveStaticArray(selected, seen);
+        if (!array || array.elements.some(ts.isSpreadElement)) return undefined;
+        const element = array.elements[Number(access.key)];
+        if (!element || ts.isOmittedExpression(element)) {
+          if (!access.fallback) return undefined;
+          selected = access.fallback;
+        } else {
+          selected = withDefault(element, access.fallback);
+          if (!selected) return undefined;
+        }
+      }
+    }
+    return selected;
+  };
+  const resolveStaticArray = (expression, seen) => {
+    const value = unwrap(expression);
+    if (ts.isArrayLiteralExpression(value)) return value;
+    if (ts.isIdentifier(value)) {
+      const initializer = constInitializer(value, seen);
+      return initializer ? resolveStaticArray(initializer, seen) : undefined;
+    }
+    return undefined;
+  };
+  const literalKey = name => {
+    if (!name) return undefined;
+    if (ts.isComputedPropertyName(name)) return literalString(name.expression) ?? undefined;
+    return ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)
+      ? name.text : undefined;
+  };
+  // Resolve a literal holder through const aliases and further literal
+  // property accesses, without evaluating functions or dynamic getters.
+  const resolveStaticObject = (expression, seen) => {
+    const value = unwrap(expression);
+    if (ts.isObjectLiteralExpression(value)) return value;
+    if (ts.isIdentifier(value)) {
+      const initializer = constInitializer(value, seen);
+      return initializer ? resolveStaticObject(initializer, seen) : undefined;
+    }
+    if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
+      const member = inspectMember(value, seen);
+      return member ? resolveStaticObject(member, seen) : undefined;
+    }
+    return undefined;
+  };
+  const absentProperty = Symbol('absent property');
+  const unknownProperty = Symbol('unverified property');
+  const literalProperty = (object, key, seen) => {
+    // Rightmost properties override earlier ones, including spreads.
+    for (let i = object.properties.length - 1; i >= 0; i--) {
+      const property = object.properties[i];
+      if (ts.isSpreadAssignment(property)) {
+        const spread = resolveStaticObject(property.expression, seen);
+        if (!spread) return unknownProperty;
+        const candidate = literalProperty(spread, key, seen);
+        if (candidate !== absentProperty) return candidate;
+        continue;
+      }
+      if (property.name && ts.isComputedPropertyName(property.name) &&
+          literalKey(property.name) === undefined) return unknownProperty;
+      if (literalKey(property.name) !== key) continue;
+      if (ts.isPropertyAssignment(property)) return property.initializer;
+      if (ts.isShorthandPropertyAssignment(property)) return property.name;
+      return unknownProperty;
+    }
+    return absentProperty;
+  };
+  const inspectMember = (member, seen) => {
+    // Do not read through the original literal when a write may have replaced
+    // this property or one of its parent objects.
+    if (possiblyMutated(member)) return undefined;
+    const key = ts.isPropertyAccessExpression(member)
+      ? member.name.text : literalString(member.argumentExpression);
+    if (key === null || key === undefined) return undefined;
+    const object = resolveStaticObject(member.expression, seen);
+    if (!object) return undefined;
+    const value = literalProperty(object, key, seen);
+    return value === absentProperty || value === unknownProperty ? undefined : value;
+  };
+  // Local constructor expressions are not global browser Workers, even when
+  // stored as an own property of an object with a global prototype.
+  const localWorkerConstructor = expression => {
+    const value = unwrap(expression);
+    return ts.isClassExpression(value) || ts.isFunctionExpression(value) ||
+      ts.isIdentifier(value) && localValue(value);
+  };
+  // Plain literals cannot be constructors. A known own non-constructor value
+  // shadows an inherited Worker just as a known local class does.
+  const nonConstructorLiteral = expression => {
+    const value = unwrap(expression);
+    return ts.isStringLiteral(value) || ts.isNumericLiteral(value) ||
+      ts.isNoSubstitutionTemplateLiteral(value) || ts.isBigIntLiteral(value) ||
+      ts.isRegularExpressionLiteral(value) || ts.isObjectLiteralExpression(value) ||
+      ts.isArrayLiteralExpression(value) || ts.isArrowFunction(value) ||
+      ts.isVoidExpression(value) ||
+      ts.isIdentifier(value) && value.text === 'undefined' &&
+        !localValue(value) && !shadowsGlobal(value) ||
+      [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword,
+        ts.SyntaxKind.NullKeyword].includes(value.kind);
+  };
+  // Resolve both direct member construction and destructured extraction
+  // with the same bounded own-property and prototype-chain inspection.
+  const inheritedWorkerSource = (expression, key) => {
+    if (!workerNames.includes(key)) return false;
+    const object = resolveStaticObject(expression, new Set());
+    if (!object) return false;
+    const visited = new Set();
+    const inspect = current => {
+      if (visited.has(current)) return true;
+      visited.add(current);
+      const own = literalProperty(current, key, new Set());
+      if (own === unknownProperty) return true;
+      if (own !== absentProperty) {
+        return !localWorkerConstructor(own) && !nonConstructorLiteral(own);
+      }
+      for (const property of current.properties) {
+        if (!ts.isPropertyAssignment(property) || !property.name ||
+            ts.isComputedPropertyName(property.name) ||
+            literalKey(property.name) !== '__proto__') continue;
+        const proto = unwrap(property.initializer);
+        if (proto.kind === ts.SyntaxKind.NullKeyword ||
+            ts.isStringLiteral(proto) || ts.isNumericLiteral(proto) ||
+            proto.kind === ts.SyntaxKind.TrueKeyword ||
+            proto.kind === ts.SyntaxKind.FalseKeyword) return false;
+        if (globalObject(proto)) return true;
+        const next = resolveStaticObject(proto, new Set());
+        return next ? inspect(next) : true;
+      }
+      return false;
+    };
+    return inspect(object);
+  };
+  const inheritedWorkerMember = member => {
+    if (!(ts.isPropertyAccessExpression(member) || ts.isElementAccessExpression(member))) return false;
+    const key = ts.isPropertyAccessExpression(member)
+      ? member.name.text : literalString(member.argumentExpression);
+    return inheritedWorkerSource(member.expression, key);
+  };
+  // An ambiguous computed key or opaque spread may overwrite an otherwise
+  // statically known global-root property. Treat that provenance as unknown,
+  // not as proof that the Worker-shaped constructor is local.
+  const unresolvedWorkerReceiver = member => {
+    if (!(ts.isPropertyAccessExpression(member) || ts.isElementAccessExpression(member))) return false;
+    const name = ts.isPropertyAccessExpression(member)
+      ? member.name.text : literalString(member.argumentExpression);
+    if (!workerNames.includes(name)) return false;
+    const ambiguous = (expression, seen = new Set()) => {
+      const value = unwrap(expression);
+      if (ts.isIdentifier(value)) {
+        // Unknown provenance must survive a direct const alias and any
+        // further const aliases, not just an inline chain of member accesses.
+        const declaration = rootDeclaration(value);
+        const initializer = constInitializer(value, seen);
+        // Unsupported binding patterns are unknown, not proven local.
+        if (!initializer && declaration && ts.isBindingElement(declaration)) return true;
+        return Boolean(initializer && ambiguous(initializer, seen));
+      }
+      if (!(ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value))) return false;
+      const root = resolveStaticObject(value.expression, new Set());
+      const name = ts.isPropertyAccessExpression(value)
+        ? value.name.text : literalString(value.argumentExpression);
+      if (root && (name === null ||
+          literalProperty(root, name, new Set()) === unknownProperty)) return true;
+      return ambiguous(value.expression, seen);
+    };
+    return ambiguous(member.expression);
+  };
+  // Follow const aliases and directly inspectable object properties. Reflective
+  // access, unknown computed keys, mutated aliases and accessors are not proven.
+  const globalObject = (expression, seen = new Set()) => {
+    const value = unwrap(expression);
+    if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
+      const resolved = inspectMember(value, seen);
+      return Boolean(resolved && globalObject(resolved, seen));
+    }
+    if (!ts.isIdentifier(value)) return false;
+    if (['globalThis', 'window', 'self'].includes(value.text)) {
+      return !localValue(value) && !shadowsGlobal(value);
+    }
+    const initializer = constInitializer(value, seen);
+    return Boolean(initializer && globalObject(initializer, seen));
+  };
+  const globalSource = expression => {
+    const value = unwrap(expression);
+    if (globalObject(value)) return true;
+    if (ts.isSpreadElement(value)) return globalSource(value.expression);
+    if (ts.isArrayLiteralExpression(value)) return value.elements.some(globalSource);
+    return ts.isCallExpression(value) && value.arguments.length === 0 &&
+      ts.isPropertyAccessExpression(value.expression) && value.expression.name.text === 'values' &&
+      globalSource(value.expression.expression);
+  };
+  const globalWorkerMember = expression =>
+    (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) &&
+    workerNames.includes(ts.isPropertyAccessExpression(expression)
+      ? expression.name.text : literalString(expression.argumentExpression)) && globalObject(expression.expression);
+  return { localValue, globalObject, globalSource, globalWorkerMember, unstableWorkerMember, inheritedWorkerMember, inheritedWorkerSource, unresolvedWorkerReceiver };
+}
+function workerBindings(sf) {
+  const workerNames = ['Worker', 'SharedWorker'];
+  const isWrapper = node => ts.isParenthesizedExpression(node) || ts.isAsExpression(node) ||
+    ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node);
+  const unwrap = expression => {
+    while (isWrapper(expression)) expression = expression.expression;
+    return expression;
+  };
+  const { localValue, globalObject, globalSource, globalWorkerMember, unstableWorkerMember, inheritedWorkerMember, inheritedWorkerSource, unresolvedWorkerReceiver } =
+    workerProvenance(sf, workerNames, unwrap);
+  const workerProperty = key => key && (ts.isComputedPropertyName(key) ||
+    (ts.isIdentifier(key) || ts.isStringLiteral(key)) && workerNames.includes(key.text));
+  const workerPattern = pattern => {
+    if (ts.isObjectBindingPattern(pattern)) {
+      return pattern.elements.some(element => element.dotDotDotToken || workerProperty(element.propertyName || element.name));
+    }
+    if (ts.isObjectLiteralExpression(pattern)) {
+      return pattern.properties.some(property => ts.isSpreadAssignment(property) || workerProperty(property.name));
+    }
+    if (ts.isArrayBindingPattern(pattern) || ts.isArrayLiteralExpression(pattern)) {
+      return pattern.elements.some(workerPattern);
+    }
+    if (ts.isBindingElement(pattern) || ts.isSpreadElement(pattern)) {
+      return workerPattern(ts.isBindingElement(pattern) ? pattern.name : pattern.expression);
+    }
+    if (ts.isBinaryExpression(pattern) && pattern.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      return workerPattern(pattern.left);
+    }
+    return false;
+  };
+  const definitelyDefined = source => {
+    if (!source) return false;
+    const value = unwrap(source);
+    return ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value) ||
+      ts.isFunctionExpression(value) || ts.isArrowFunction(value) || ts.isNewExpression(value) ||
+      ts.isStringLiteral(value) || ts.isNumericLiteral(value) || ts.isNoSubstitutionTemplateLiteral(value) ||
+      [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NullKeyword].includes(value.kind);
+  };
+  const propertyKey = name => {
+    if (name && ts.isComputedPropertyName(name)) {
+      return ts.isStringLiteral(name.expression) || ts.isNumericLiteral(name.expression) ? name.expression.text : undefined;
+    }
+    return name && (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) ? name.text : undefined;
+  };
+  const nativeWorker = Symbol('native worker');
+  const propertyValues = (source, name) => {
+    const key = propertyKey(name);
+    if (!source) return [undefined];
+    if (key === undefined) {
+      // A computed binding key may evaluate to Worker or SharedWorker.
+      // Known native or opaque Worker properties cannot be called local just
+      // because the key's identifier spelling is unrelated to "Worker".
+      return globalObject(source) || workerNames.some(name =>
+        inheritedWorkerSource(source, name)) ? [nativeWorker] : [undefined];
+    }
+    // Own-property-only destructuring misses an inherited native Worker.
+    if (inheritedWorkerSource(source, key)) return [nativeWorker];
+    if (!ts.isObjectLiteralExpression(source)) return [undefined];
+    let values = [undefined];
+    const visit = object => {
+      for (const property of object.properties) {
+        if (ts.isSpreadAssignment(property)) {
+          const spread = unwrap(property.expression);
+          if (ts.isObjectLiteralExpression(spread)) visit(spread);
+          else if (globalObject(spread) && workerNames.includes(key)) values = [...values, nativeWorker];
+          else if (!values.includes(undefined)) values = [...values, undefined];
+        } else if (property.name && ts.isComputedPropertyName(property.name) && propertyKey(property.name) === undefined) {
+          if (!values.includes(undefined)) values = [...values, undefined];
+        } else if (propertyKey(property.name) === key) {
+          values = [ts.isPropertyAssignment(property) ? property.initializer : undefined];
+        }
+      }
+    };
+    visit(source);
+    return values;
+  };
+  const workerFromGlobal = (pattern, source) => {
+    if (source === nativeWorker) return true;
+    if (ts.isBindingElement(pattern)) {
+      return Boolean(pattern.initializer && !definitelyDefined(source) && workerFromGlobal(pattern.name, pattern.initializer)) ||
+        workerFromGlobal(pattern.name, source);
+    }
+    if (ts.isBinaryExpression(pattern) && pattern.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      return !definitelyDefined(source) && workerFromGlobal(pattern.left, pattern.right) || workerFromGlobal(pattern.left, source);
+    }
+    const value = source && unwrap(source);
+    if ((ts.isArrayBindingPattern(pattern) || ts.isArrayLiteralExpression(pattern)) &&
+        value && ts.isArrayLiteralExpression(value) &&
+        !pattern.elements.some(element => element.dotDotDotToken || ts.isSpreadElement(element)) &&
+        !value.elements.some(ts.isSpreadElement)) {
+      return pattern.elements.some((element, index) => workerFromGlobal(element, value.elements[index]));
+    }
+    if (value && workerPattern(pattern) && globalSource(value)) return true;
+    if (ts.isObjectBindingPattern(pattern)) {
+      return pattern.elements.some(element => propertyValues(value, element.propertyName || element.name)
+        .some(candidate => workerFromGlobal(element, candidate)));
+    }
+    if (ts.isObjectLiteralExpression(pattern)) {
+      return pattern.properties.some(property =>
+        (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) &&
+        propertyValues(value, property.name).some(candidate => workerFromGlobal(
+          ts.isPropertyAssignment(property) ? property.initializer : property.name, candidate)));
+    }
+    if (ts.isArrayBindingPattern(pattern) || ts.isArrayLiteralExpression(pattern)) {
+      return pattern.elements.some(element => workerFromGlobal(element, undefined));
+    }
+    return false;
+  };
+  const nestedAssignmentDefault = node => {
+    let current = node;
+    while (current.parent && (isWrapper(current.parent) || ts.isPropertyAssignment(current.parent) ||
+        ts.isArrayLiteralExpression(current.parent) || ts.isObjectLiteralExpression(current.parent) ||
+        ts.isSpreadElement(current.parent) || ts.isSpreadAssignment(current.parent))) current = current.parent;
+    return ts.isBinaryExpression(current.parent) && current.parent.left === current &&
+      current.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken ||
+      ts.isForOfStatement(current.parent) && current.parent.initializer === current;
+  };
+  const workerFromIterable = (pattern, source) => {
+    const value = unwrap(source);
+    if (ts.isArrayLiteralExpression(value)) {
+      return value.elements.some(element => ts.isSpreadElement(element)
+        ? workerFromIterable(pattern, element.expression) : workerFromGlobal(pattern, element));
+    }
+    if (ts.isCallExpression(value) && value.arguments.length === 0 &&
+        ts.isPropertyAccessExpression(value.expression) && value.expression.name.text === 'values') {
+      return workerFromIterable(pattern, value.expression.expression);
+    }
+    return workerFromGlobal(pattern, value);
+  };
+  const parentAfterWrappers = expression => {
+    let current = expression;
+    while (current.parent && isWrapper(current.parent) && current.parent.expression === current) current = current.parent;
+    return current.parent;
+  };
+  const directConstructor = expression => {
+    const parent = parentAfterWrappers(expression);
+    return ts.isNewExpression(parent) && unwrap(parent.expression) === expression;
+  };
+  return { workerNames, localValue, globalWorkerMember, unstableWorkerMember, inheritedWorkerMember, unresolvedWorkerReceiver, workerFromGlobal, workerFromIterable, parentAfterWrappers, directConstructor, nestedAssignmentDefault, unwrap };
+}
+function imports(node, list, options, bindings, inJSDoc = false) {
   if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
     const spec = literalString(node.argument.literal);
     if (spec) list.push({ spec, runtime: false, line: node.getStart() });
@@ -164,8 +1441,54 @@ function imports(node, list, options, inJSDoc = false) {
   }
   // Documentation contains type edges, never executable loader references.
   if (inJSDoc) {
-    ts.forEachChild(node, child => imports(child, list, options, true));
+    ts.forEachChild(node, child => imports(child, list, options, bindings, true));
     return;
+  }
+  const { workerNames, localValue, globalWorkerMember, unstableWorkerMember, inheritedWorkerMember, unresolvedWorkerReceiver, workerFromGlobal, workerFromIterable, parentAfterWrappers, directConstructor, nestedAssignmentDefault, unwrap } = bindings;
+  if (ts.isIdentifier(node) && workerNames.includes(node.text) && !localValue(node) &&
+      (ts.isInExpressionContext(node) || ts.isShorthandPropertyAssignment(node.parent)) &&
+      !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
+      !(ts.isPropertyAssignment(node.parent) && node.parent.name === node) &&
+      !directConstructor(node) && !ts.isTypeOfExpression(parentAfterWrappers(node))) {
+    list.push({ unsupported: 'worker-alias', line: node.getStart() });
+  }
+  if ((globalWorkerMember(node) || unstableWorkerMember(node) ||
+      inheritedWorkerMember(node) || unresolvedWorkerReceiver(node)) &&
+      !directConstructor(node) &&
+      !ts.isTypeOfExpression(parentAfterWrappers(node))) {
+    list.push({ unsupported: 'worker-alias', line: node.getStart() });
+  }
+  if (ts.isVariableDeclaration(node) && node.initializer && workerFromGlobal(node.name, node.initializer)) {
+    list.push({ unsupported: 'worker-alias', line: node.getStart() });
+  }
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      !nestedAssignmentDefault(node) && workerFromGlobal(unwrap(node.left), node.right)) {
+    list.push({ unsupported: 'worker-alias', line: node.getStart() });
+  }
+  if (ts.isForOfStatement(node) &&
+      (ts.isVariableDeclarationList(node.initializer)
+        ? node.initializer.declarations.some(declaration => workerFromIterable(declaration.name, node.expression))
+        : workerFromIterable(unwrap(node.initializer), node.expression))) {
+    list.push({ unsupported: 'worker-alias', line: node.getStart() });
+  }
+  if (ts.isNewExpression(node)) {
+    const callee = unwrap(node.expression);
+    const globalMember = globalWorkerMember(callee);
+    const unstableMember = unstableWorkerMember(callee);
+    const inheritedMember = inheritedWorkerMember(callee);
+    const unresolvedMember = unresolvedWorkerReceiver(callee);
+    if (globalMember || unstableMember || inheritedMember || unresolvedMember ||
+        ts.isIdentifier(callee) && workerNames.includes(callee.text) && !localValue(callee)) {
+      const target = node.arguments?.[0];
+      const spec = target && ts.isNewExpression(target) && ts.isIdentifier(target.expression) &&
+        target.expression.text === 'URL' && target.arguments?.length === 2 &&
+        isImportMetaUrl(target.arguments[1]) ? literalString(target.arguments[0]) : null;
+      if (globalMember || unstableMember || inheritedMember || unresolvedMember ||
+          callee !== node.expression || !spec ||
+          /^(?:[a-z][a-z\d+.-]*:|\/\/|[?#])/i.test(spec)) {
+        list.push({ unsupported: 'worker-entry', line: node.getStart() });
+      }
+    }
   }
   // Vite transforms statically analyzable new URL(...) references into bundled
   // assets or worker entrypoints; they need the same ownership validation.
@@ -179,7 +1502,7 @@ function imports(node, list, options, inJSDoc = false) {
       const parent = node.parent;
       const workerEntry = Boolean(parent && ts.isNewExpression(parent) &&
         ts.isIdentifier(parent.expression) &&
-        ['Worker', 'SharedWorker'].includes(parent.expression.text) &&
+        workerNames.includes(parent.expression.text) && !localValue(parent.expression) &&
         parent.arguments?.[0] === node);
       list.push({ spec, runtime: workerEntry, fromUrl: true, workerEntry, line: node.getStart() });
     }
@@ -293,7 +1616,7 @@ function imports(node, list, options, inJSDoc = false) {
     list.push({ unsupported: 'indirect-module-require', line: node.getStart() });
   }
   if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) &&
-      ts.isIdentifier(node.initializer) && node.initializer.text === 'module' &&
+      node.initializer && ts.isIdentifier(node.initializer) && node.initializer.text === 'module' &&
       node.name.elements.some(e =>
         (e.propertyName?.text || e.name.getText()) === 'require')) {
     list.push({ unsupported: 'indirect-module-require', line: node.getStart() });
@@ -314,8 +1637,8 @@ function imports(node, list, options, inJSDoc = false) {
       list.push({ unsupported: 'node-create-require', line: node.getStart() });
     }
   }
-  for (const doc of node.jsDoc || []) imports(doc, list, options, true);
-  ts.forEachChild(node, child => imports(child, list, options));
+  for (const doc of node.jsDoc || []) imports(doc, list, options, bindings, true);
+  ts.forEachChild(node, child => imports(child, list, options, bindings));
 }
 function configFor(dir) {
   const file = ts.findConfigFile(dir, ts.sys.fileExists, 'tsconfig.json');
@@ -1779,7 +3102,7 @@ function check(srcDir) {
       errors.push(`syntax-error: ${path.relative(root, file)}:${location.line + 1}:${location.character + 1}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}`);
     }
     const dependencies = [];
-    imports(sf, dependencies, options);
+    imports(sf, dependencies, options, workerBindings(sf));
     for (const dep of dependencies) {
       const source = actual;
       if (dep.unsupported) {
