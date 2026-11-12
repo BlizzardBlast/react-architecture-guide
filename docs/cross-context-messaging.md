@@ -19,8 +19,13 @@ export type ToWorker = {
   "sum:run": { values: number[] };
 };
 
+export type WorkerFailure = {
+  code: "INVALID_INPUT" | "UNEXPECTED_FAILURE";
+};
+
 export type FromWorker = {
   "sum:finished": { total: number };
+  "sum:failed": WorkerFailure;
 };
 ```
 
@@ -30,7 +35,19 @@ import { createTypedChannel } from "typed-channel";
 import { createPostMessageTransport } from "typed-channel/transports/postMessage";
 import type { FromWorker, ToWorker } from "../api/worker-messages";
 
-export function startSummaryWorker(onResult: (total: number) => void) {
+// Display copy belongs to the receiving UI; never trust provider error strings.
+function safeFailureMessage(payload: unknown): string {
+  if (payload !== null && typeof payload === "object" && "code" in payload) {
+    if (payload.code === "INVALID_INPUT") return "Enter valid numbers.";
+    if (payload.code === "UNEXPECTED_FAILURE") return "Unable to calculate the result.";
+  }
+  return "Unable to calculate the result.";
+}
+
+export function startSummaryWorker(
+  onResult: (total: number) => void,
+  onError: (message: string) => void,
+) {
   const worker = new Worker(new URL("../api/summary.worker.ts", import.meta.url), {
     type: "module",
   });
@@ -38,6 +55,10 @@ export function startSummaryWorker(onResult: (total: number) => void) {
     createPostMessageTransport<FromWorker, ToWorker>(worker),
   );
   const unsubscribe = channel.on("sum:finished", ({ total }) => onResult(total));
+  // Static typing does not validate data at runtime.
+  const unsubscribeFailure = channel.on("sum:failed", (payload: unknown) => {
+    onError(safeFailureMessage(payload));
+  });
 
   return {
     run(values: number[]) {
@@ -45,6 +66,7 @@ export function startSummaryWorker(onResult: (total: number) => void) {
     },
     dispose() {
       unsubscribe();
+      unsubscribeFailure();
       channel.unlisten();
       worker.terminate();
     },
@@ -52,21 +74,13 @@ export function startSummaryWorker(onResult: (total: number) => void) {
 }
 ```
 
-The Worker endpoint imports the same maps and reverses the transport's generic parameters: `createPostMessageTransport<ToWorker, FromWorker>(self)`. This example illustrates the API and lifecycle; it is **not** a bundled, typechecked runnable example, nor proof of the third-party library's behavior. Place worker source behind the existing [checked local Worker import rules](dependency-rules.md).
+The Worker endpoint imports the same maps and reverses the transport's generic parameters: `createPostMessageTransport<ToWorker, FromWorker>(self)`. A Worker that rejects input emits `channel.emit("sum:failed", { code: "INVALID_INPUT" })` instead of transferring the caught exception; unexpected failures use `UNEXPECTED_FAILURE`. This example illustrates the API and lifecycle; it is **not** a bundled, typechecked runnable example, nor proof of the third-party library's behavior. Place worker source behind the existing [checked local Worker import rules](dependency-rules.md).
 
 ## Failure messages across execution contexts
 
 A native `Error` is **not a stable messaging contract**. `JSON.stringify(error)` generally omits `message`, `stack` and `cause` because those fields are non-enumerable; `structuredClone(error)` and `postMessage(error)` may preserve some standard properties but can drop custom fields, codes, nested causes or runtime-specific stack details. Worker and iframe boundaries must not depend on a copied exception having the same identity or shape as the original.
 
-Define an explicit, structured-clone-safe **failure payload** in the directional message map instead:
-
-```ts
-// An application-specific failure contract, validated by the receiver.
-type WorkerFailure = {
-  code: "INVALID_INPUT" | "UNEXPECTED_FAILURE";
-  message: string; // Fixed, safe display text, not a caught error's raw message.
-};
-```
+Define an explicit, structured-clone-safe **failure payload** in the directional message map instead. The `WorkerFailure` and `"sum:failed"` contract above carries only a code; the receiver checks it at runtime and maps it to fixed UI-owned text. A type that permits `message: string` would also permit accidentally forwarding `error.message`, which can contain secrets or untrusted data. Keep internal diagnostics separate from transport payloads.
 
 - Classify failures from trusted error codes or known error types at the originating boundary. Treat caught values as `unknown`; thrown strings, objects, and nested `AggregateError` values are possible. Do not use the text of `error.message` to decide whether to retry.
 - Retain a caught error internally with `new Error("Operation failed", { cause: caught })` when a layer can add useful context. If diagnostics need the original failure tree, walk `cause`, `AggregateError.errors`, and other explicitly supported links with cycle detection and a depth limit; never assume a single unbounded chain.
