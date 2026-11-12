@@ -574,7 +574,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         }
         return undefined;
       };
-      const inspect = (source, seen, index = 0, arrayUnknown = false, arrayIndex) => {
+      const inspect = (source, seen, index = 0, arrayUnknown = false, arrayIndex, ownOnly = false) => {
         const origin = reference(source);
         if (index === accesses.length) {
           if (origin) found.push(origin);
@@ -651,8 +651,9 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
           if (origin) found.push({ ...origin, path: [...origin.path, ...suffix] });
           return { definite: false, possible: Boolean(origin), cyclic: seen.has(value) };
         }
-        if (!cache.has(index)) cache.set(index, new Map());
-        const cached = cache.get(index).get(value);
+        const cacheKey = index + ':' + ownOnly;
+        if (!cache.has(cacheKey)) cache.set(cacheKey, new Map());
+        const cached = cache.get(cacheKey).get(value);
         if (cached) {
           if (origin && cached.possible) found.push({ ...origin, path: [...origin.path, ...suffix] });
           return cached;
@@ -662,7 +663,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         for (let i = value.properties.length - 1; i >= 0 && !definite; i--) {
           const property = value.properties[i];
           if (ts.isSpreadAssignment(property)) {
-            const result = inspect(property.expression, nextSeen, index);
+            const result = inspect(property.expression, nextSeen, index, false, undefined, true);
             definite = result.definite && key !== unknownKey;
             possible ||= result.possible;
             cyclic ||= result.cyclic;
@@ -680,7 +681,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
           }
           definite = key !== unknownKey && name !== unknownKey;
         }
-        if (followPrototype && !definite) {
+        if (followPrototype && !ownOnly && !definite) {
           const prototype = value.properties.find(property => ts.isPropertyAssignment(property) &&
             !ts.isComputedPropertyName(property.name) && property.name.text === '__proto__');
           if (prototype) {
@@ -695,7 +696,7 @@ function workerMutationPaths(sf, localSymbol, unwrap) {
         // Cycles make overwrite certainty context-dependent; retain all candidates.
         if (cyclic) definite = false;
         const result = { definite, possible, cyclic };
-        cache.get(index).set(value, result);
+        cache.get(cacheKey).set(value, result);
         return result;
       };
       inspect(expression, new Set());

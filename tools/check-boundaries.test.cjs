@@ -5658,6 +5658,33 @@ test('spread arguments and inherited descriptors retain Worker aliases', () => {
   }
 });
 
+test('descriptor spreads copy own properties without inheriting source prototypes', () => {
+  const calls = [
+    descriptor => 'Object.defineProperty(source,"root",'+descriptor+');',
+    descriptor => 'Reflect.defineProperty(source,"root",'+descriptor+');',
+    descriptor => 'Object.defineProperties(source,{root:'+descriptor+'});',
+  ];
+  for (const call of calls) for (const extension of ['js','ts']) {
+    for (const [descriptor, unsafe] of [
+      ['{__proto__:{value:holder.root},...{__proto__:{value:other.root}}}', true],
+      ['{__proto__:{value:other.root},...{__proto__:{value:holder.root}}}', false],
+      ['{__proto__:{value:holder.root},...{value:other.root}}', false],
+      ['{__proto__:{value:other.root},...{value:holder.root}}', true],
+      ['{__proto__:proto,...proto}', true],
+    ]) {
+      const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
+        'other={root:{Worker:LocalWorker}},source={},proto={__proto__:{value:holder.root}}; '+call(descriptor)+
+        ' Reflect.set(source.root,"Worker",next); new holder.root.Worker('+ (unsafe ? '"/private.js"' : '') +');}';
+      const file='shared/ui/panel.'+extension, offset=source.indexOf('new holder.root.Worker(');
+      withFixture({[file]:source},result=>{
+        const rejected=result.errors.some(error=>error.includes('unsupported-worker-entry: '+file+' at offset '+offset+';'));
+        assert.equal(rejected,unsafe,source+'\n'+result.errors.join('\n'));
+        if (!unsafe) assert.deepEqual(result.errors,[],source);
+      });
+    }
+  }
+});
+
 test('Object.assign treats undefined array entries as present and holes as absent', () => {
   for (const value of ['undefined','void 0','...[,]']) for (const extension of ['js','ts']) {
     const source='class LocalWorker{} function run(next){const holder={root:{Worker:LocalWorker}},'+
