@@ -32,7 +32,7 @@ Use this checklist when reviewing a change to the guide or adopting its rules in
 - [ ] Untrusted server data is validated; authorization/idempotency is enforced by a trusted backend.
 - [ ] When cross-context messaging is used, message names and payloads have directional contracts in their owning module; generic transports do not depend on domain models.
 - [ ] For relevant Worker/iframe/tab boundaries, verify message validation and trusted origins, listener teardown, failed or missing peers, and cooperative request cancellation. See [cross-context messaging](cross-context-messaging.md).
-- [ ] Cross-context failures send safe code-only payloads, validate received codes at runtime and map them to fixed UI text; raw `Error` serialization is not trusted. Test non-`Error` throws and lost causes/custom fields where supported.
+- [ ] Cross-context failures are classified at the sender and projected into fresh, allowlisted code-only payloads (never spread raw errors or diagnostic objects); receivers validate codes at runtime and map them to fixed UI text. Test non-`Error` throws and lost causes/custom fields where supported.
 - [ ] SSR services and query clients are scoped correctly; server-only data is not bundled into clients.
 
 ## Interaction performance (for relevant high-cardinality or shared UI changes)

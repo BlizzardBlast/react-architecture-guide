@@ -74,13 +74,27 @@ export function startSummaryWorker(
 }
 ```
 
-The Worker endpoint imports the same maps and reverses the transport's generic parameters: `createPostMessageTransport<ToWorker, FromWorker>(self)`. A Worker that rejects input emits `channel.emit("sum:failed", { code: "INVALID_INPUT" })` instead of transferring the caught exception; unexpected failures use `UNEXPECTED_FAILURE`. This example illustrates the API and lifecycle; it is **not** a bundled, typechecked runnable example, nor proof of the third-party library's behavior. Place worker source behind the existing [checked local Worker import rules](dependency-rules.md).
+The Worker endpoint imports the same maps and reverses the transport's generic parameters: `createPostMessageTransport<ToWorker, FromWorker>(self)`. At the sending boundary, classify trusted application failures and **construct a fresh payload**, rather than passing along an error or diagnostics object:
+
+```ts
+// modules/reports/api/summary.worker.ts (after creating the Worker channel)
+import type { WorkerFailure } from "./worker-messages";
+
+function sendWorkerFailure(code: WorkerFailure["code"]): void {
+  channel.emit("sum:failed", { code }); // Fresh allowlisted object: no extra fields.
+}
+
+// After trusted input validation: sendWorkerFailure("INVALID_INPUT");
+// For an unexpected caught value: sendWorkerFailure("UNEXPECTED_FAILURE");
+```
+
+The Worker must not pass or spread the caught error, raw response, or an internal failure object into `channel.emit`. This example illustrates the API and lifecycle; it is **not** a bundled, typechecked runnable example, nor proof of the third-party library's behavior. Place worker source behind the existing [checked local Worker import rules](dependency-rules.md).
 
 ## Failure messages across execution contexts
 
 A native `Error` is **not a stable messaging contract**. `JSON.stringify(error)` generally omits `message`, `stack` and `cause` because those fields are non-enumerable; `structuredClone(error)` and `postMessage(error)` may preserve some standard properties but can drop custom fields, codes, nested causes or runtime-specific stack details. Worker and iframe boundaries must not depend on a copied exception having the same identity or shape as the original.
 
-Define an explicit, structured-clone-safe **failure payload** in the directional message map instead. The `WorkerFailure` and `"sum:failed"` contract above carries only a code; the receiver checks it at runtime and maps it to fixed UI-owned text. A type that permits `message: string` would also permit accidentally forwarding `error.message`, which can contain secrets or untrusted data. Keep internal diagnostics separate from transport payloads.
+Define an explicit, structured-clone-safe **failure payload** in the directional message map instead. The `WorkerFailure` and `"sum:failed"` contract above declares only a code, but **TypeScript does not strip extra runtime properties**: a variable with `{ code: "INVALID_INPUT", token: secret }` is structurally assignable to `WorkerFailure`, and a `postMessage` transport would still transmit the `token`. The producer-side `sendWorkerFailure` above projects a trusted code into a fresh, code-only object; the receiver separately validates the code and maps it to fixed UI-owned text. Even a type permitting `message: string` would allow accidentally forwarding `error.message`. Keep internal diagnostics separate from transport payloads.
 
 - Classify failures from trusted error codes or known error types at the originating boundary. Treat caught values as `unknown`; thrown strings, objects, and nested `AggregateError` values are possible. Do not use the text of `error.message` to decide whether to retry.
 - Retain a caught error internally with `new Error("Operation failed", { cause: caught })` when a layer can add useful context. If diagnostics need the original failure tree, walk `cause`, `AggregateError.errors`, and other explicitly supported links with cycle detection and a depth limit; never assume a single unbounded chain.
