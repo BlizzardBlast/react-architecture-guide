@@ -54,6 +54,27 @@ export function startSummaryWorker(onResult: (total: number) => void) {
 
 The Worker endpoint imports the same maps and reverses the transport's generic parameters: `createPostMessageTransport<ToWorker, FromWorker>(self)`. This example illustrates the API and lifecycle; it is **not** a bundled, typechecked runnable example, nor proof of the third-party library's behavior. Place worker source behind the existing [checked local Worker import rules](dependency-rules.md).
 
+## Failure messages across execution contexts
+
+A native `Error` is **not a stable messaging contract**. `JSON.stringify(error)` generally omits `message`, `stack` and `cause` because those fields are non-enumerable; `structuredClone(error)` and `postMessage(error)` may preserve some standard properties but can drop custom fields, codes, nested causes or runtime-specific stack details. Worker and iframe boundaries must not depend on a copied exception having the same identity or shape as the original.
+
+Define an explicit, structured-clone-safe **failure payload** in the directional message map instead:
+
+```ts
+// An application-specific failure contract, validated by the receiver.
+type WorkerFailure = {
+  code: "INVALID_INPUT" | "UNEXPECTED_FAILURE";
+  message: string; // Fixed, safe display text, not a caught error's raw message.
+};
+```
+
+- Classify failures from trusted error codes or known error types at the originating boundary. Treat caught values as `unknown`; thrown strings, objects, and nested `AggregateError` values are possible. Do not use the text of `error.message` to decide whether to retry.
+- Retain a caught error internally with `new Error("Operation failed", { cause: caught })` when a layer can add useful context. If diagnostics need the original failure tree, walk `cause`, `AggregateError.errors`, and other explicitly supported links with cycle detection and a depth limit; never assume a single unbounded chain.
+- Send only allowlisted, bounded, runtime-validated fields to peers. Never forward raw error objects, arbitrary custom properties, stacks, nested causes, URLs or tokens into a UI response, iframe or third-party logging channel. A correlation ID can link a safe user-facing failure to private diagnostics when needed.
+- Test the actual supported browser/Worker combinations with normal errors, non-`Error` throws, nested causes, aggregates, serialization and sanitization. A TypeScript type alone does not verify the received failure shape.
+
+See [Your JS Error Is Lying to You](https://blog.gaborkoos.com/posts/2026-11-12-Your-JS-Error-Is-Lying-to-You/) for the underlying serialization and runtime differences. The same policy applies to HTTP/API error responses: expose safe, stable error codes, and keep detailed causes in access-controlled diagnostics.
+
 ## Runtime safety and lifecycle
 
 - **Compile-time typing is not validation.** Validate `event.data` from untrusted or independently deployed participants at the receive boundary (for example with a schema). Reject unexpected names, payload shapes and protocol versions. Never treat a TypeScript cast or typed wrapper as proof of authenticity.
