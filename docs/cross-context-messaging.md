@@ -19,8 +19,13 @@ export type ToWorker = {
   "sum:run": { values: number[] };
 };
 
+export type WorkerFailure = {
+  code: "INVALID_INPUT" | "UNEXPECTED_FAILURE";
+};
+
 export type FromWorker = {
   "sum:finished": { total: number };
+  "sum:failed": WorkerFailure;
 };
 ```
 
@@ -30,7 +35,19 @@ import { createTypedChannel } from "typed-channel";
 import { createPostMessageTransport } from "typed-channel/transports/postMessage";
 import type { FromWorker, ToWorker } from "../api/worker-messages";
 
-export function startSummaryWorker(onResult: (total: number) => void) {
+// Display copy belongs to the receiving UI; never trust provider error strings.
+function safeFailureMessage(payload: unknown): string {
+  if (payload !== null && typeof payload === "object" && "code" in payload) {
+    if (payload.code === "INVALID_INPUT") return "Enter valid numbers.";
+    if (payload.code === "UNEXPECTED_FAILURE") return "Unable to calculate the result.";
+  }
+  return "Unable to calculate the result.";
+}
+
+export function startSummaryWorker(
+  onResult: (total: number) => void,
+  onError: (message: string) => void,
+) {
   const worker = new Worker(new URL("../api/summary.worker.ts", import.meta.url), {
     type: "module",
   });
@@ -38,6 +55,10 @@ export function startSummaryWorker(onResult: (total: number) => void) {
     createPostMessageTransport<FromWorker, ToWorker>(worker),
   );
   const unsubscribe = channel.on("sum:finished", ({ total }) => onResult(total));
+  // Static typing does not validate data at runtime.
+  const unsubscribeFailure = channel.on("sum:failed", (payload: unknown) => {
+    onError(safeFailureMessage(payload));
+  });
 
   return {
     run(values: number[]) {
@@ -45,6 +66,7 @@ export function startSummaryWorker(onResult: (total: number) => void) {
     },
     dispose() {
       unsubscribe();
+      unsubscribeFailure();
       channel.unlisten();
       worker.terminate();
     },
@@ -52,7 +74,34 @@ export function startSummaryWorker(onResult: (total: number) => void) {
 }
 ```
 
-The Worker endpoint imports the same maps and reverses the transport's generic parameters: `createPostMessageTransport<ToWorker, FromWorker>(self)`. This example illustrates the API and lifecycle; it is **not** a bundled, typechecked runnable example, nor proof of the third-party library's behavior. Place worker source behind the existing [checked local Worker import rules](dependency-rules.md).
+The Worker endpoint imports the same maps and reverses the transport's generic parameters: `createPostMessageTransport<ToWorker, FromWorker>(self)`. At the sending boundary, classify trusted application failures and **construct a fresh payload**, rather than passing along an error or diagnostics object:
+
+```ts
+// modules/reports/api/summary.worker.ts (after creating the Worker channel)
+import type { WorkerFailure } from "./worker-messages";
+
+function sendWorkerFailure(code: WorkerFailure["code"]): void {
+  channel.emit("sum:failed", { code }); // Fresh allowlisted object: no extra fields.
+}
+
+// After trusted input validation: sendWorkerFailure("INVALID_INPUT");
+// For an unexpected caught value: sendWorkerFailure("UNEXPECTED_FAILURE");
+```
+
+The Worker must not pass or spread the caught error, raw response, or an internal failure object into `channel.emit`. This example illustrates the API and lifecycle; it is **not** a bundled, typechecked runnable example, nor proof of the third-party library's behavior. Place worker source behind the existing [checked local Worker import rules](dependency-rules.md).
+
+## Failure messages across execution contexts
+
+A native `Error` is **not a stable messaging contract**. `JSON.stringify(error)` generally omits `message`, `stack` and `cause` because those fields are non-enumerable; `structuredClone(error)` and `postMessage(error)` may preserve some standard properties but can drop custom fields, codes, nested causes or runtime-specific stack details. Worker and iframe boundaries must not depend on a copied exception having the same identity or shape as the original.
+
+Define an explicit, structured-clone-safe **failure payload** in the directional message map instead. The `WorkerFailure` and `"sum:failed"` contract above declares only a code, but **TypeScript does not strip extra runtime properties**: a variable with `{ code: "INVALID_INPUT", token: secret }` is structurally assignable to `WorkerFailure`, and a `postMessage` transport would still transmit the `token`. The producer-side `sendWorkerFailure` above projects a trusted code into a fresh, code-only object; the receiver separately validates the code and maps it to fixed UI-owned text. Even a type permitting `message: string` would allow accidentally forwarding `error.message`. Keep internal diagnostics separate from transport payloads.
+
+- Classify failures from trusted error codes or known error types at the originating boundary. Treat caught values as `unknown`; thrown strings, objects, and nested `AggregateError` values are possible. Do not use the text of `error.message` to decide whether to retry.
+- Retain a caught error internally with `new Error("Operation failed", { cause: caught })` when a layer can add useful context. If diagnostics need the original failure tree, walk `cause`, `AggregateError.errors`, and other explicitly supported links with cycle detection and a depth limit; never assume a single unbounded chain.
+- Send only allowlisted, bounded, runtime-validated fields to peers. Never forward raw error objects, arbitrary custom properties, stacks, nested causes, URLs or tokens into a UI response, iframe or third-party logging channel. A correlation ID can link a safe user-facing failure to private diagnostics when needed.
+- Test the actual supported browser/Worker combinations with normal errors, non-`Error` throws, nested causes, aggregates, serialization and sanitization. A TypeScript type alone does not verify the received failure shape.
+
+See [Your JS Error Is Lying to You](https://blog.gaborkoos.com/posts/2026-11-12-Your-JS-Error-Is-Lying-to-You/) for the underlying serialization and runtime differences. The same policy applies to HTTP/API error responses: expose safe, stable error codes, and keep detailed causes in access-controlled diagnostics.
 
 ## Runtime safety and lifecycle
 
