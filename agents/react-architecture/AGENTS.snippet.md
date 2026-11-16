@@ -4,6 +4,7 @@ Before editing React/TypeScript code, read the canonical policy:
 https://github.com/BlizzardBlast/react-architecture-guide/blob/main/docs/architecture.md
 and the dependency rules:
 https://github.com/BlizzardBlast/react-architecture-guide/blob/main/docs/dependency-rules.md
+For browser UI changes, consult the [modern web and compatibility guidance](https://github.com/BlizzardBlast/react-architecture-guide/blob/main/docs/react-practices.md#modern-web-features-and-browser-compatibility).
 
 - Keep code in the owning business module, not an indiscriminate global utilities directory.
 - Modules are independent by default; compose sibling features in routes or app integration.
@@ -13,7 +14,7 @@ https://github.com/BlizzardBlast/react-architecture-guide/blob/main/docs/depende
 - Use Clean Architecture layers **only** for nontrivial business logic, not simple CRUD.
 - Respect the project's actual router and React compiler versions.
 - For shared UI that handles substantial lists or bulk changes, document a realistic interaction workload and verify responsiveness and accessibility together; do not prescribe unconditional virtualization, memoization or CI timing thresholds.
-- For browser UI, prefer semantic/native web features only when they preserve the current interaction and accessibility contract; check supported browsers, progressive fallbacks and relevant runtime behavior. Treat Modern Web Guidance scan findings as advisory, not automatic refactoring instructions.
+- For browser UI, prefer semantic/native web features only when they preserve existing behavior and accessibility. Verify documented browser targets, progressive fallbacks and relevant runtime behavior; when browser targets are missing, defer compatibility-sensitive replacements pending an explicit project decision. Modern Web Guidance scan findings are advisory, not automatic refactoring instructions.
 - Validate server responses at integration boundaries; enforce authorization server-side.
 - Run local architecture checks, typechecking, tests, and review in coherent batches before a push.
 - Preserve required security and CI checks; avoid unnecessary repeated GitHub Actions executions.
