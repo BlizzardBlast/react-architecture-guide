@@ -35,6 +35,13 @@ Use this checklist when reviewing a change to the guide or adopting its rules in
 - [ ] Cross-context failures are classified at the sender and projected into fresh, allowlisted payloads with safe codes and only necessary, bounded metadata such as request IDs (never spread raw errors or diagnostic objects). Receivers validate these fields at runtime and map codes to fixed UI text. Test non-`Error` throws, lost causes/custom fields, and request correlation and stale replies where applicable.
 - [ ] SSR services and query clients are scoped correctly; server-only data is not bundled into clients.
 
+## Browser-platform changes (when applicable)
+
+- [ ] A native HTML/CSS/browser API is chosen only when it meets the component's existing behavior and accessibility contract, including relevant focus, keyboard, dismissal and SSR behavior.
+- [ ] New platform features are checked against documented browser targets and current feature compatibility/Baseline data; if targets are missing, record the gap and defer compatibility-sensitive replacements until the project decides. Preserve existing behavior and progressive fallbacks.
+- [ ] Optional Modern Web Guidance legacy-scan matches are checked against surrounding code, intentional compatibility fallbacks and component ownership before treating them as findings; no automatic rewrites or CI requirements are inferred.
+- [ ] The affected supported-browser and accessibility/input scenarios are verified where feasible; any unavailable checks are explicit, and performance claims rely on comparable runtime evidence.
+
 ## Interaction performance (for relevant high-cardinality or shared UI changes)
 
 - [ ] Shared components with material interaction risk have a stated supported workload and user-visible responsiveness expectation; do not invent a universal numeric budget.

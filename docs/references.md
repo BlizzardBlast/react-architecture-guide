@@ -25,6 +25,9 @@ The supplied PDF is **not republished** here.
 - [typed-channel](https://github.com/psd-coder/typed-channel) — an optional lightweight implementation; typed calls do not provide runtime validation or origin authentication.
 - [MDN — Window.postMessage](https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage) — source/origin checks and restrictive target origins.
 
+- [Chrome for Developers — Modern Web Guidance 1.0](https://developer.chrome.com/blog/modern-web-guidance-v1) — expert-reviewed modern browser guidance and an optional, limited-scope modernization scan; neither is required infrastructure or an automatic fix mandate.
+- [web.dev — Baseline](https://web.dev/baseline) — cross-browser availability context, to be checked against each application's supported browser versions and fallback requirements.
+
 ## Choices made by this guide
 
 - Use `modules/` as a neutral business-capability term instead of claiming every module is a bounded context.
