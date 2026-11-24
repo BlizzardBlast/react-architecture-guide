@@ -34,6 +34,17 @@ Optimize based on measurement. React Compiler can automatically memoize compatib
 
 Treat costly shared UI interactions (such as large comboboxes and bulk-selection controls) as part of the shared component's performance contract. Define realistic workloads, maintain keyboard/screen-reader usability, and measure the interaction rather than inferring speed from bundle size. See [interaction performance contracts](interaction-performance.md).
 
+### Initial page loading and design
+
+For browser-based routes where initial loading materially affects users, define the primary visible content and first usable action during design. Choose rendering and cache strategy per route: static/prerendered HTML for suitable public content, request-time rendering for genuinely dynamic content, and client rendering where appropriate (for example an authenticated interactive application). Do not migrate frameworks or introduce SSR solely on principle. Never put personalized or authorization-dependent responses in shared caches; use content-addressed long-lived static assets only when URLs change with their content, and preserve deployment freshness and cache isolation for HTML/data.
+
+- Identify the actual LCP element for representative viewport sizes and the request/render path that delays it. Avoid lazy-loading that element when it is an image; make its resource discoverable early, and use selective fetch priority/preload only when traces justify it. Keep noncritical assets deferred, reserve media dimensions, and avoid expensive offscreen animation. Preserve content, accessibility, reduced-motion behavior and legitimate loading/error states.
+- Agree on route-specific resource budgets (for example initial transferred bytes or JavaScript) and a representative device/network profile before substantial UI changes. Use measured baselines rather than universal byte caps. Google's general good field thresholds are LCP ≤ 2.5 s, INP ≤ 200 ms and CLS ≤ 0.1 at the 75th percentile, segmented by mobile and desktop. These are not per-run lab assertions or a guarantee for every route.
+- Compare production builds under comparable cold/warm cache conditions, viewport, CPU/network settings and realistic data; record repetitions, actual visible outcome, resource waterfall and metric definitions. Use field data when available and permitted; do not equate a lab trace with field compliance. A fast shell or skeleton does not prove the primary task is usable. If evidence is unavailable, record the gap and avoid claiming improvement.
+- Keep measurements opt-in/local until a stable controlled baseline and demonstrated regression risk justify a mandatory gate; never relax existing verification. No new telemetry or external data collection is implied.
+
+Sources: [Fast is a design decision](https://shannadige.com/blog/performance-is-design/) (a site-specific case study), [Optimize LCP](https://web.dev/articles/optimize-lcp), and [Web Vitals](https://web.dev/articles/vitals).
+
 ## API and security boundaries
 
 - Parse untrusted responses at an integration boundary: a TypeScript cast does not validate JSON.

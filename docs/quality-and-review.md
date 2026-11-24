@@ -42,6 +42,12 @@ Use this checklist when reviewing a change to the guide or adopting its rules in
 - [ ] Optional Modern Web Guidance legacy-scan matches are checked against surrounding code, intentional compatibility fallbacks and component ownership before treating them as findings; no automatic rewrites or CI requirements are inferred.
 - [ ] The affected supported-browser and accessibility/input scenarios are verified where feasible; any unavailable checks are explicit, and performance claims rely on comparable runtime evidence.
 
+## Initial page loading (when relevant to browser route or design changes)
+
+- [ ] Identify primary visible content/first usable action and actual LCP candidates on representative viewports; justify rendering and cache choices without exposing user-specific data through shared caches.
+- [ ] Critical resources are discoverable and appropriately prioritized; do not lazy-load the actual LCP image or preload all assets indiscriminately. Preserve visual stability, accessibility and loading/error behavior.
+- [ ] Compare production builds under representative, comparable device/network/cache conditions; distinguish field percentile thresholds from lab measurements. Record project-specific budgets, baselines and unavailable evidence rather than inventing a passing result. See [initial page loading and design](react-practices.md#initial-page-loading-and-design).
+
 ## Interaction performance (for relevant high-cardinality or shared UI changes)
 
 - [ ] Shared components with material interaction risk have a stated supported workload and user-visible responsiveness expectation; do not invent a universal numeric budget.
