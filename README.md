@@ -48,6 +48,7 @@ For complex business workflows, **replace**, rather than combine blindly, the si
 | Where new code belongs | [Placement guide](docs/placement-guide.md) |
 | SOLID in React | [SOLID guidance](docs/solid-in-react.md) |
 | Hooks, caching, React Compiler and modern browser compatibility | [React practices](docs/react-practices.md) |
+| Initial page-loading performance and design | [Initial page loading guidance](docs/react-practices.md#initial-page-loading-and-design) |
 | Shared UI responsiveness and interaction benchmarks | [Interaction performance contracts](docs/interaction-performance.md) |
 | Type-safe Web Worker, iframe and tab messages | [Cross-context messaging](docs/cross-context-messaging.md) |
 | Incremental adoption | [Adoption](docs/adoption.md) |

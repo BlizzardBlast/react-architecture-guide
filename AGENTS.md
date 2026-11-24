@@ -19,6 +19,7 @@ This repository documents a **pragmatic modular/feature-first React architecture
 - Query cache keys must include data ownership/source scope. Handle pending, empty, error, retry and success paths. Resetting a TanStack mutation observer does not cancel an in-flight request.
 - Use semantic accessible markup, stable field associations with `useId`, structured validation errors, and user-observable behavior tests.
 - For browser UI changes, consult [modern web and compatibility guidance](docs/react-practices.md#modern-web-features-and-browser-compatibility). Preserve interaction/accessibility contracts and fallbacks, verify browser-support requirements, and treat modernization-scan results as advisory; do not invent missing browser targets.
+- For material browser route/design changes, consult [initial page loading guidance](docs/react-practices.md#initial-page-loading-and-design) for critical content, cache isolation and proportionate, privacy-safe performance evidence.
 - The reference checkout prevents overlapping saves in one mounted UI, but production orders also need server-side authorization and idempotency.
 
 ## Checker and testing
