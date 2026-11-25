@@ -16,6 +16,7 @@ This repository documents a **pragmatic modular/feature-first React architecture
 - Follow React's rules of hooks and the project's React/Compiler/router version; do not add blanket memoization.
 - Keep render functions pure. Effects synchronize with external systems, not ordinary derived state.
 - Validate untrusted server data at boundaries and enforce sensitive authorization server-side.
+- For browser authentication, authorization, session/identity state, private caching or sensitive-route changes, consult [private caching and session restoration](docs/react-practices.md#private-caching-and-session-restoration) independently of performance work.
 - Query cache keys must include data ownership/source scope. Handle pending, empty, error, retry and success paths. Resetting a TanStack mutation observer does not cancel an in-flight request.
 - Use semantic accessible markup, stable field associations with `useId`, structured validation errors, and user-observable behavior tests.
 - For browser UI changes, consult [modern web and compatibility guidance](docs/react-practices.md#modern-web-features-and-browser-compatibility). Preserve interaction/accessibility contracts and fallbacks, verify browser-support requirements, and treat modernization-scan results as advisory; do not invent missing browser targets.

@@ -17,6 +17,7 @@ For browser UI changes, consult the [modern web and compatibility guidance](http
 - For browser UI, prefer semantic/native web features only when they preserve existing behavior and accessibility. Verify documented browser targets, progressive fallbacks and relevant runtime behavior; when browser targets are missing, defer compatibility-sensitive replacements pending an explicit project decision. Modern Web Guidance scan findings are advisory, not automatic refactoring instructions.
 - For material browser route/design changes, follow [initial page loading guidance](https://github.com/BlizzardBlast/react-architecture-guide/blob/main/docs/react-practices.md#initial-page-loading-and-design): prioritize actual critical content, verify private cache isolation when caching changes, and use proportionate, privacy-safe production-build measurements before claiming speed improvements.
 - Validate server responses at integration boundaries; enforce authorization server-side.
+- For browser authentication, authorization, session/identity state, private caching or sensitive-route changes, follow [private caching and session restoration](https://github.com/BlizzardBlast/react-architecture-guide/blob/main/docs/react-practices.md#private-caching-and-session-restoration) independently of performance work.
 - Run local architecture checks, typechecking, tests, and review in coherent batches before a push.
 - Preserve required security and CI checks; avoid unnecessary repeated GitHub Actions executions.
 
