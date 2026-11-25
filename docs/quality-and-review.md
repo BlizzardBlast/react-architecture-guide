@@ -34,6 +34,23 @@ Use this checklist when reviewing a change to the guide or adopting its rules in
 - [ ] For relevant Worker/iframe/tab boundaries, verify message validation and trusted origins, listener teardown, failed or missing peers, and cooperative request cancellation. See [cross-context messaging](cross-context-messaging.md).
 - [ ] Cross-context failures are classified at the sender and projected into fresh, allowlisted payloads with safe codes and only necessary, bounded metadata such as request IDs (never spread raw errors or diagnostic objects). Receivers validate these fields at runtime and map codes to fixed UI text. Test non-`Error` throws, lost causes/custom fields, and request correlation and stale replies where applicable.
 - [ ] SSR services and query clients are scoped correctly; server-only data is not bundled into clients.
+- [ ] When private HTML/data caching changes, inspect effective headers and applicable application/framework, browser and intermediary cache behavior; verify warmed-cache isolation between representative identities and unauthorized access, plus logout/account switching and permission changes where relevant. Preserve legitimate public caching and authorized access. See [private caching and session restoration](react-practices.md#private-caching-and-session-restoration).
+- [ ] For relevant sensitive routes/session changes, verify ordinary and bfcache Back/Forward restoration after logout, identity/tenant switching and permission changes, including failed session verification and legitimate same-session recovery; no stale private content may be exposed. See [private caching and session restoration](react-practices.md#private-caching-and-session-restoration).
+
+## Browser-platform changes (when applicable)
+
+- [ ] A native HTML/CSS/browser API is chosen only when it meets the component's existing behavior and accessibility contract, including relevant focus, keyboard, dismissal and SSR behavior.
+- [ ] New platform features are checked against documented browser targets and current feature compatibility/Baseline data; if targets are missing, record the gap and defer compatibility-sensitive replacements until the project decides. Preserve existing behavior and progressive fallbacks.
+- [ ] Optional Modern Web Guidance legacy-scan matches are checked against surrounding code, intentional compatibility fallbacks and component ownership before treating them as findings; no automatic rewrites or CI requirements are inferred.
+- [ ] The affected supported-browser and accessibility/input scenarios are verified where feasible; any unavailable checks are explicit, and performance claims rely on comparable runtime evidence.
+- [ ] For material inline text/icon/badge layout changes, verify actual alignment, wrapping, font fallback, zoom/text scaling and applicable text-spacing overrides without loss of content or functionality; see [inline text, icons and badges](react-practices.md#inline-text-icons-and-badges).
+
+## Initial page loading (when relevant to browser route or design changes)
+
+- [ ] Identify primary visible content/first usable action and actual LCP candidates on representative viewports; justify rendering and cache choices without exposing user-specific data through shared caches.
+- [ ] Relevant private caching and session-restoration requirements in React, state and security are satisfied; see [private caching and session restoration](react-practices.md#private-caching-and-session-restoration).
+- [ ] Critical resources are discoverable and appropriately prioritized; do not lazy-load the actual LCP image or preload all assets indiscriminately. Preserve visual stability, accessibility and loading/error behavior.
+- [ ] Compare production builds under representative, comparable device/network/cache conditions; distinguish field percentile thresholds from lab measurements. Record justified project-specific budgets and baselines, or a bounded investigation goal if absent; do not invent a passing result. Use representative synthetic or authorized sanitized data, and minimize and inspect benchmark artifacts before sharing; never commit or share unsanitized sensitive traces. See [initial page loading and design](react-practices.md#initial-page-loading-and-design).
 
 ## Interaction performance (for relevant high-cardinality or shared UI changes)
 
